@@ -4,114 +4,11 @@
 //! keeps receivers clear of the absorbing layers and stops before their (small) reflections
 //! could matter, unless reflections are what it measures.
 
-use std::f64::consts::PI;
-use std::path::Path;
+mod common;
 
-use vibe_rations::config::Config;
+use common::*;
 use vibe_rations::receiver::Component;
-use vibe_rations::simulation::Simulation;
 use vibe_rations::source::Wavelet;
-
-const VP: f64 = 3000.0;
-const VS: f64 = 1732.0;
-const RHO: f64 = 2500.0;
-
-fn setup(toml: &str) -> Simulation {
-    let cfg = Config::from_toml(toml).expect("a valid configuration");
-    Simulation::new(&cfg, Path::new(".")).expect("a valid setup")
-}
-
-fn simulate(toml: &str) -> Simulation {
-    let mut sim = setup(toml);
-    sim.run(None, false).expect("a stable run");
-    sim
-}
-
-/// A homogeneous model with the given grid, boundary and sources/receivers sections.
-fn homogeneous(
-    points: [usize; 3],
-    pml: usize,
-    free_surface: bool,
-    duration: f64,
-    rest: &str,
-) -> String {
-    format!(
-        r#"
-        [grid]
-        points = {points:?}
-        spacing = 10.0
-        [time]
-        duration = {duration}
-        [boundary]
-        pml_width = {pml}
-        free_surface = {free_surface}
-        [[model.layer]]
-        top = 0.0
-        vp = {VP}
-        vs = {VS}
-        rho = {RHO}
-        {rest}
-        "#
-    )
-}
-
-/// ‖a - b‖ / ‖b‖ over a whole trace.
-fn misfit(a: &[f64], b: &[f64]) -> f64 {
-    let num: f64 = a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum();
-    let den: f64 = b.iter().map(|y| y * y).sum();
-    (num / den).sqrt()
-}
-
-fn trace(sim: &Simulation, c: Component, r: usize) -> Vec<f64> {
-    sim.receivers
-        .trace(c, r)
-        .expect("recorded")
-        .iter()
-        .map(|&v| v as f64)
-        .collect()
-}
-
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn norm(a: [f64; 3]) -> f64 {
-    a.iter().map(|x| x * x).sum::<f64>().sqrt()
-}
-
-/// Radial particle velocity at distance r from an explosion whose moment rate is m0·w(t):
-/// v = m0/(4πρα²) [w(τ)/r² + w'(τ)/(α r)], τ = t - r/α.
-fn explosion_velocity(w: &Wavelet, m0: f64, r: f64, t: f64) -> f64 {
-    let tau = t - r / VP;
-    m0 / (4.0 * PI * RHO * VP * VP) * (w.value(tau) / (r * r) + w.derivative(tau) / (VP * r))
-}
-
-/// Particle velocity at offset `d` from a point force f·w(t) along x (Stokes' solution,
-/// differentiated in time).
-fn force_velocity(w: &Wavelet, f: f64, d: [f64; 3], t: f64) -> [f64; 3] {
-    let r = norm(d);
-    let g = d.map(|x| x / r);
-    // ∫ τ w'(t - τ) dτ from r/α to r/β, by the trapezium rule.
-    let (a, b) = (r / VP, r / VS);
-    let n = 4000;
-    let h = (b - a) / n as f64;
-    let near: f64 = (0..=n)
-        .map(|m| {
-            let tau = a + m as f64 * h;
-            let weight = if m == 0 || m == n { 0.5 } else { 1.0 };
-            weight * tau * w.derivative(t - tau)
-        })
-        .sum::<f64>()
-        * h;
-    std::array::from_fn(|i| {
-        let delta = if i == 0 { 1.0 } else { 0.0 };
-        let gg = g[i] * g[0];
-        f / (4.0 * PI * RHO)
-            * ((3.0 * gg - delta) / r.powi(3) * near
-                + gg / (VP * VP * r) * w.derivative(t - r / VP)
-                - (gg - delta) / (VS * VS * r) * w.derivative(t - r / VS))
-    })
-}
 
 #[test]
 fn an_explosion_matches_the_full_space_solution() {
@@ -341,7 +238,16 @@ fn absorbing_layers_reflect_little_along_a_free_surface() {
 /// and a receiver on the free surface make it a hard case.
 #[test]
 fn swapping_source_and_receiver_gives_the_same_trace() {
-    let model = r#"
+    // Longer stencils reach further above the free surface; the mirroring must stay
+    // self-adjoint for every order.
+    for order in [4, 8] {
+        reciprocity(order);
+    }
+}
+
+fn reciprocity(order: usize) {
+    let model = format!(
+        r#"
         [grid]
         points = [60, 50, 40]
         spacing = 10.0
@@ -349,6 +255,8 @@ fn swapping_source_and_receiver_gives_the_same_trace() {
         duration = 0.5
         [boundary]
         pml_width = 10
+        [scheme]
+        order = {order}
         [[model.layer]]
         top = 0.0
         vp = 2200.0
@@ -365,7 +273,8 @@ fn swapping_source_and_receiver_gives_the_same_trace() {
         vp = 1800.0
         vs = 900.0
         rho = 1900.0
-    "#;
+    "#
+    );
     let run = |at: [f64; 3], force: [f64; 3], to: [f64; 3]| {
         simulate(&format!(
             r#"{model}
@@ -394,7 +303,7 @@ fn swapping_source_and_receiver_gives_the_same_trace() {
             .zip(&ba)
             .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
         println!(
-            "reciprocity, force {} at A to {} at B: worst difference {:.2e} of peak",
+            "reciprocity, order {order}, force {} at A to {} at B: worst difference {:.2e} of peak",
             ["x", "y", "z"][i],
             components[j].name(),
             worst / peak
@@ -410,7 +319,13 @@ fn swapping_source_and_receiver_gives_the_same_trace() {
 /// meeting the surface at the corners: the energy must leave and stay gone.
 #[test]
 fn a_long_run_stays_stable_and_drains() {
-    let mut sim = setup(
+    for order in [4, 8] {
+        long_run(order);
+    }
+}
+
+fn long_run(order: usize) {
+    let mut sim = setup(&format!(
         r#"
         [grid]
         points = [48, 48, 40]
@@ -419,6 +334,8 @@ fn a_long_run_stays_stable_and_drains() {
         duration = 0.4
         [boundary]
         pml_width = 10
+        [scheme]
+        order = {order}
         [[model.layer]]
         top = 0.0
         vp = 1500.0
@@ -436,10 +353,10 @@ fn a_long_run_stays_stable_and_drains() {
         rho = 2600.0
         [[source]]
         position = [240.0, 240.0, 200.0]
-        moment = { xx = 1e13, yy = -5e12, xy = 3e12, xz = 4e12 }
-        wavelet = { kind = "ricker", frequency = 6.0 }
-        "#,
-    );
+        moment = {{ xx = 1e13, yy = -5e12, xy = 3e12, xz = 4e12 }}
+        wavelet = {{ kind = "ricker", frequency = 6.0 }}
+        "#
+    ));
     let mut peak = 0.0f32;
     for _ in 0..sim.steps {
         sim.step();
@@ -459,7 +376,7 @@ fn a_long_run_stays_stable_and_drains() {
     }
     let end = sim.solver.peak_velocity();
     println!(
-        "long run: peak {peak:.3e}, after {} s {end:.3e}",
+        "long run, order {order}: peak {peak:.3e}, after {} s {end:.3e}",
         sim.solver.step as f64 * sim.solver.dt
     );
     assert!(end < 1e-4 * peak, "{end} left of a peak of {peak}");
