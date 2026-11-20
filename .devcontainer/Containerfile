@@ -1,20 +1,26 @@
-# Development container for vibe-rations: the Rust toolchain, just, and a zsh. Bump the
-# pinned Rust version here and in rust-toolchain.toml together, then rebuild.
+# Development container for vibe-rations: the Rust toolchain with the WebAssembly target,
+# wasm-bindgen and wasm-opt for the web app, just, and a zsh. Bump the pinned Rust version
+# here and in rust-toolchain.toml together, then rebuild.
 FROM docker.io/library/rust:1.99.1-trixie
 
 ARG USERNAME=dev
 ARG USER_UID=1000
+# Must match the wasm-bindgen crate version in web/Cargo.toml exactly.
+ARG WASM_BINDGEN_VERSION=0.2.130
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN apt-get update; \
     apt-get install -y --no-install-recommends \
-      bash-completion file htop jq just less locales procps sudo tree vim zsh; \
+      bash-completion binaryen file htop jq just less locales procps sudo tree vim zsh; \
     rm -rf /var/lib/apt/lists/*; \
     sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen; \
     locale-gen
 
-RUN rustup component add clippy rustfmt rust-src rust-analyzer
+RUN rustup component add clippy rustfmt rust-src rust-analyzer; \
+    rustup target add wasm32-unknown-unknown; \
+    cargo install --locked "wasm-bindgen-cli@${WASM_BINDGEN_VERSION}"; \
+    rm -rf "${CARGO_HOME}/registry/"* "${CARGO_HOME}/git"
 
 # Non-root user with passwordless sudo. Directories that compose mounts volumes onto
 # are created here so the volumes inherit the user's ownership.
