@@ -31,7 +31,8 @@ use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Component as PathPart, Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -88,6 +89,10 @@ pub struct Status {
     pub info: Option<serde_json::Value>,
     /// Whether its wavefield is in memory, so that sections and gathers can be drawn.
     pub live: bool,
+    /// Nobody has asked for a picture of it in the last few seconds, so it steps in longer
+    /// chunks, which saves the per-chunk work (unless a watched run shares the machine).
+    #[serde(default)]
+    pub headless: bool,
 }
 
 /// How to serve.
@@ -104,16 +109,79 @@ pub struct Options {
 
 struct Run {
     dir: PathBuf,
+    /// What clients read: locked briefly, never while stepping, so status requests don't wait.
+    shared: Mutex<Shared>,
+    /// The wavefield and its stepping, held for a whole chunk. Lock it with [`Run::state`],
+    /// never while holding `shared`.
     state: Mutex<State>,
+    /// Requests waiting for `state`: the scheduler lets them in before its next chunk, since
+    /// the mutex isn't fair and would otherwise go straight back to the scheduler.
+    waiting: AtomicUsize,
+}
+
+struct Shared {
+    status: Status,
+    /// When a client last asked for a picture of it.
+    pictured: Option<Instant>,
 }
 
 struct State {
-    status: Status,
     view: Option<View>,
-    /// Steps per scheduling round, adapted to take about a tenth of a second.
+    /// Steps per scheduling round, adapted to the chunk length wanted.
     chunk: usize,
     /// Cell updates and seconds spent, for the speed.
     work: (f64, f64),
+}
+
+/// A run nobody has asked for a picture of for this long is headless.
+const WATCH_WINDOW: Duration = Duration::from_secs(5);
+
+impl Shared {
+    fn watched(&self) -> bool {
+        self.pictured.is_some_and(|t| t.elapsed() < WATCH_WINDOW)
+    }
+
+    /// The status as clients see it now.
+    fn status(&self) -> Status {
+        Status {
+            headless: !self.watched(),
+            ..self.status.clone()
+        }
+    }
+}
+
+impl Run {
+    fn new(dir: PathBuf, status: Status) -> Self {
+        Run {
+            dir,
+            shared: Mutex::new(Shared {
+                status,
+                pictured: None,
+            }),
+            state: Mutex::new(State {
+                view: None,
+                chunk: 1,
+                work: (0.0, 0.0),
+            }),
+            waiting: AtomicUsize::new(0),
+        }
+    }
+
+    fn shared(&self) -> MutexGuard<'_, Shared> {
+        self.shared.lock().unwrap()
+    }
+
+    /// The wavefield, ahead of the scheduler's next chunk.
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let guard = self.state.lock().unwrap();
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        guard
+    }
+
+    fn status(&self) -> Status {
+        self.shared().status()
+    }
 }
 
 struct Server {
@@ -137,9 +205,13 @@ pub fn serve(opts: Options) -> Result<()> {
     });
     let http = tiny_http::Server::http(&opts.listen)
         .map_err(|e| anyhow!("listening on {}: {e}", opts.listen))?;
+    // The address bound, which differs from the one asked for with port 0.
+    let bound = http
+        .server_addr()
+        .to_ip()
+        .map_or(opts.listen.clone(), |a| a.to_string());
     eprintln!(
-        "serving on http://{}: {} run(s) in {}",
-        opts.listen,
+        "serving on http://{bound}: {} run(s) in {}",
         server.runs.lock().unwrap().len(),
         server.data.display()
     );
@@ -169,31 +241,49 @@ fn load_runs(data: &Path) -> Result<BTreeMap<String, Arc<Run>>> {
             status.error = Some("the server stopped during the run".into());
         }
         status.live = false;
-        let run = Run {
-            dir,
-            state: Mutex::new(State {
-                status,
-                view: None,
-                chunk: 1,
-                work: (0.0, 0.0),
-            }),
-        };
-        run.save(&run.state.lock().unwrap().status);
-        let id = run.state.lock().unwrap().status.id.clone();
+        let id = status.id.clone();
+        let run = Run::new(dir, status);
+        run.save(&run.shared().status);
         runs.insert(id, Arc::new(run));
     }
     Ok(runs)
+}
+
+/// Steps a watched run's chunk takes, in seconds: short, so its pictures move smoothly and
+/// requests wait little for the run's lock.
+const WATCHED_CHUNK: f64 = 0.1;
+/// And a headless run's, when no watched run shares the machine: long, so the work done once
+/// per chunk (the blow-up check, the status) costs next to nothing.
+const HEADLESS_CHUNK: f64 = 2.0;
+
+/// What a run did with its turn.
+enum Turn {
+    Stepped,
+    /// Left its turn to a request waiting for it.
+    Yielded,
+    /// Nothing to do.
+    Idle,
 }
 
 /// Steps every running run a chunk at a time, in turn, sleeping while none is.
 fn schedule(server: &Server) {
     loop {
         let all: Vec<Arc<Run>> = server.runs.lock().unwrap().values().cloned().collect();
-        let mut stepped = false;
+        let watched = all.iter().any(|r| {
+            let s = r.shared();
+            s.status.phase == Phase::Running && s.watched()
+        });
+        let (mut stepped, mut yielded) = (false, false);
         for run in all {
-            stepped |= run.step();
+            match run.step(watched) {
+                Turn::Stepped => stepped = true,
+                Turn::Yielded => yielded = true,
+                Turn::Idle => {}
+            }
         }
-        if !stepped {
+        if !stepped && yielded {
+            std::thread::sleep(Duration::from_millis(1));
+        } else if !stepped {
             let runs = server.runs.lock().unwrap();
             let _ = server.wake.wait_timeout(runs, Duration::from_millis(500));
         }
@@ -201,25 +291,29 @@ fn schedule(server: &Server) {
 }
 
 impl Run {
-    /// Takes one chunk of steps if the run is running and nobody else holds it; whether it did.
-    fn step(&self) -> bool {
-        let Ok(mut guard) = self.state.try_lock() else {
-            return false;
+    /// Takes one chunk of steps if the run is running and no request is waiting for it.
+    /// `watched`: whether any running run is being watched, which keeps every chunk short.
+    fn step(&self, watched: bool) -> Turn {
+        let headless = {
+            let sh = self.shared();
+            if sh.status.phase != Phase::Running {
+                return Turn::Idle;
+            }
+            !sh.watched()
         };
-        let State {
-            status,
-            view,
-            chunk,
-            work,
-        } = &mut *guard;
-        if status.phase != Phase::Running {
-            return false;
+        if self.waiting.load(Ordering::SeqCst) > 0 {
+            return Turn::Yielded;
         }
+        let Ok(mut guard) = self.state.try_lock() else {
+            return Turn::Yielded;
+        };
+        let State { view, chunk, work } = &mut *guard;
         let Some(v) = view.as_mut() else {
-            status.phase = Phase::Failed;
-            status.error = Some("the run lost its wavefield".into());
-            self.save(status);
-            return false;
+            let mut sh = self.shared();
+            sh.status.phase = Phase::Failed;
+            sh.status.error = Some("the run lost its wavefield".into());
+            self.save(&sh.status);
+            return Turn::Idle;
         };
         let snapshots = self.dir.join("out/snapshots");
         let snapshots = (!v.sim.snapshots.is_empty()).then_some(snapshots.as_path());
@@ -230,20 +324,28 @@ impl Run {
             work.0 += taken as f64 * v.sim.solver.grid.interior_len() as f64;
             work.1 += seconds;
         }
-        *chunk = ((*chunk as f64 * 0.1 / seconds.max(1e-3)).round() as usize).clamp(1, 10_000);
-        status.step = v.sim.solver.step;
-        status.time = v.sim.solver.step as f64 * v.sim.solver.dt;
-        status.speed = if work.1 > 0.0 {
-            work.0 / work.1 / 1e6
+        let target = if headless && !watched {
+            HEADLESS_CHUNK
         } else {
-            0.0
+            WATCHED_CHUNK
         };
+        *chunk =
+            ((*chunk as f64 * target / seconds.max(1e-3)).round() as usize).clamp(1, 1_000_000);
         let outcome = match result {
             Err(e) => Err(e),
             Ok(_) if v.sim.remaining() == 0 => {
                 v.sim.write_outputs(&self.dir.join("out")).map(|_| true)
             }
             Ok(_) => Ok(false),
+        };
+        let mut sh = self.shared();
+        let status = &mut sh.status;
+        status.step = v.sim.solver.step;
+        status.time = v.sim.solver.step as f64 * v.sim.solver.dt;
+        status.speed = if work.1 > 0.0 {
+            work.0 / work.1 / 1e6
+        } else {
+            0.0
         };
         match outcome {
             Err(e) => {
@@ -257,7 +359,7 @@ impl Run {
             }
             Ok(false) => {}
         }
-        true
+        Turn::Stepped
     }
 
     /// Writes the status where the next server will find it.
@@ -416,7 +518,7 @@ fn route(
                 .remove(*id)
                 .ok_or_else(|| not_found("such run"))?;
             // Waits for the scheduler to let go of it, then frees its memory.
-            run.state.lock().unwrap().view = None;
+            run.state().view = None;
             fs::remove_dir_all(&run.dir).map_err(|e| Error(500, e.to_string()))?;
             Ok(Reply::Empty)
         }
@@ -424,31 +526,31 @@ fn route(
             upload(&*find(server, id)?, &rest.join("/"), request).map(|s| json(&s))
         }
         (Post, ["api", "runs", id, "start"]) => {
-            let paused = query.get("paused").is_some_and(|v| v == "true" || v == "1");
-            start(server, &find(server, id)?, paused).map(|s| json(&s))
+            start(server, &find(server, id)?, flag(query, "paused")).map(|s| json(&s))
         }
         (Post, ["api", "runs", id, action @ ("pause" | "resume")]) => {
             let run = find(server, id)?;
-            let mut st = run.state.lock().unwrap();
+            let mut sh = run.shared();
             let (from, to) = match *action {
                 "pause" => (Phase::Running, Phase::Paused),
                 _ => (Phase::Paused, Phase::Running),
             };
-            if st.status.phase != from {
+            if sh.status.phase != from {
                 return Err(conflict(
-                    format!("the run is {:?}, not {from:?}", st.status.phase).to_lowercase(),
+                    format!("the run is {:?}, not {from:?}", sh.status.phase).to_lowercase(),
                 ));
             }
-            st.status.phase = to;
-            run.save(&st.status);
-            let s = st.status.clone();
-            drop(st);
+            sh.status.phase = to;
+            run.save(&sh.status);
+            let s = sh.status();
+            drop(sh);
             server.wake.notify_all();
             Ok(json(&s))
         }
         (Get, ["api", "runs", id, "section"]) => {
             let run = find(server, id)?;
-            let mut st = run.state.lock().unwrap();
+            run.shared().pictured = Some(Instant::now());
+            let mut st = run.state();
             let view = live(&mut st)?;
             let index: usize = number(query, "index", 0.0)? as usize;
             let gain = number(query, "gain", 1.0)? as f32;
@@ -463,7 +565,8 @@ fn route(
         }
         (Get, ["api", "runs", id, "gather"]) => {
             let run = find(server, id)?;
-            let mut st = run.state.lock().unwrap();
+            run.shared().pictured = Some(Instant::now());
+            let mut st = run.state();
             let view = live(&mut st)?;
             let rows = number(query, "rows", 600.0)? as usize;
             let component = query.get("component").map_or("vz", String::as_str);
@@ -475,7 +578,7 @@ fn route(
         }
         (Get, ["api", "runs", id, "traces", file]) => {
             let run = find(server, id)?;
-            let mut st = run.state.lock().unwrap();
+            let mut st = run.state();
             let view = live(&mut st)?;
             let component = file.strip_suffix(".npy").unwrap_or(file);
             Ok(Reply::Bytes(
@@ -536,7 +639,7 @@ fn find(server: &Server, id: &str) -> Result<Arc<Run>, Error> {
 }
 
 fn status(run: &Run) -> Status {
-    run.state.lock().unwrap().status.clone()
+    run.status()
 }
 
 fn live(state: &mut State) -> Result<&mut View, Error> {
@@ -550,6 +653,11 @@ fn body_text(request: &mut Request) -> Result<String, Error> {
     io::Read::read_to_string(request.as_reader(), &mut text)
         .map_err(|e| Error(400, format!("reading the request: {e}")))?;
     Ok(text)
+}
+
+/// A query flag: true for `true` or `1`.
+fn flag(query: &BTreeMap<String, String>, key: &str) -> bool {
+    query.get(key).is_some_and(|v| v == "true" || v == "1")
 }
 
 fn number(query: &BTreeMap<String, String>, key: &str, default: f64) -> Result<f64, Error> {
@@ -606,16 +714,9 @@ fn create(server: &Server, name: &str, toml: &str) -> Result<Status, Error> {
         error: None,
         info: None,
         live: false,
+        headless: false,
     };
-    let run = Run {
-        dir,
-        state: Mutex::new(State {
-            status: status.clone(),
-            view: None,
-            chunk: 1,
-            work: (0.0, 0.0),
-        }),
-    };
+    let run = Run::new(dir, status.clone());
     run.save(&status);
     server.runs.lock().unwrap().insert(id, Arc::new(run));
     Ok(status)
@@ -623,8 +724,7 @@ fn create(server: &Server, name: &str, toml: &str) -> Result<Status, Error> {
 
 /// Stores a model file the configuration names.
 fn upload(run: &Run, name: &str, request: &mut Request) -> Result<Status, Error> {
-    let mut st = run.state.lock().unwrap();
-    if !st.status.needs.iter().any(|n| n == name) {
+    if !run.shared().status.needs.iter().any(|n| n == name) {
         return Err(conflict(format!("the run doesn't need {name}")));
     }
     let path = run.dir.join(relative(name)?);
@@ -634,25 +734,30 @@ fn upload(run: &Run, name: &str, request: &mut Request) -> Result<Status, Error>
     let mut file = File::create(&path).map_err(|e| Error(500, e.to_string()))?;
     io::copy(request.as_reader(), &mut file)
         .map_err(|e| Error(400, format!("receiving {name}: {e}")))?;
-    st.status.needs.retain(|n| n != name);
-    run.save(&st.status);
-    Ok(st.status.clone())
+    let mut sh = run.shared();
+    sh.status.needs.retain(|n| n != name);
+    run.save(&sh.status);
+    Ok(sh.status())
 }
 
 /// Sets a run up, if it fits in the memory available, and runs it or holds it at step 0.
 fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error> {
-    let mut st = run.state.lock().unwrap();
-    if st.status.phase != Phase::Created {
-        return Err(conflict(format!(
-            "the run has been started already ({:?})",
-            st.status.phase
-        )));
-    }
-    if !st.status.needs.is_empty() {
-        return Err(conflict(format!(
-            "upload {} first",
-            st.status.needs.join(", ")
-        )));
+    // Held throughout, so two starts can't both set it up.
+    let mut st = run.state();
+    {
+        let sh = run.shared();
+        if sh.status.phase != Phase::Created {
+            return Err(conflict(format!(
+                "the run has been started already ({:?})",
+                sh.status.phase
+            )));
+        }
+        if !sh.status.needs.is_empty() {
+            return Err(conflict(format!(
+                "upload {} first",
+                sh.status.needs.join(", ")
+            )));
+        }
     }
     let text =
         fs::read_to_string(run.dir.join("config.toml")).map_err(|e| Error(500, e.to_string()))?;
@@ -677,17 +782,19 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
     let out = run.dir.join("out");
     fs::create_dir_all(out.join("snapshots")).map_err(|e| Error(500, e.to_string()))?;
     let view = View::new(sim);
-    st.status.info = Some(view.info());
-    st.status.total_steps = view.sim.steps;
-    st.status.live = true;
-    st.status.phase = if paused {
+    let mut sh = run.shared();
+    sh.status.info = Some(view.info());
+    sh.status.total_steps = view.sim.steps;
+    sh.status.live = true;
+    sh.status.phase = if paused {
         Phase::Paused
     } else {
         Phase::Running
     };
     st.view = Some(view);
-    run.save(&st.status);
-    let s = st.status.clone();
+    run.save(&sh.status);
+    let s = sh.status();
+    drop(sh);
     drop(st);
     server.wake.notify_all();
     Ok(s)
@@ -697,21 +804,23 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
 /// or none is left; returns what it freed.
 fn evict(server: &Server, keep: &Arc<Run>, wanted: u64) -> u64 {
     let mut runs: Vec<Arc<Run>> = server.runs.lock().unwrap().values().cloned().collect();
-    runs.sort_by_key(|r| r.state.try_lock().map_or(u64::MAX, |s| s.status.created));
+    runs.sort_by_key(|r| r.shared().status.created);
     let mut freed = 0;
     for r in runs {
         if freed >= wanted || Arc::ptr_eq(&r, keep) {
             continue;
         }
+        if !r.shared().status.phase.finished() {
+            continue;
+        }
         let Ok(mut st) = r.state.try_lock() else {
             continue;
         };
-        if st.status.phase.finished()
-            && let Some(v) = st.view.take()
-        {
+        if let Some(v) = st.view.take() {
             freed += v.sim.info.memory.resident;
-            st.status.live = false;
-            r.save(&st.status);
+            let mut sh = r.shared();
+            sh.status.live = false;
+            r.save(&sh.status);
         }
     }
     freed

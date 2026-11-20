@@ -5,7 +5,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
 use vibe_rations::config::Config;
-use vibe_rations::simulation::Simulation;
+use vibe_rations::simulation::{self, Simulation};
 use vibe_rations::{memory, remote, server};
 
 /// 3D elastic seismic wave simulator.
@@ -39,6 +39,10 @@ enum Command {
         /// The port `vibe-rations serve` listens on, on the remote machine.
         #[arg(long, default_value_t = 8088)]
         port: u16,
+        /// With --remote: start the run and return at once, without following it. `remote
+        /// list` shows its progress and `remote fetch` its results.
+        #[arg(long, requires = "remote")]
+        detach: bool,
     },
     /// Keep simulations for clients that come and go: the command line's `--remote` and the
     /// web page. Listens on localhost only by default; reach it through an SSH tunnel.
@@ -95,6 +99,14 @@ enum RemoteAction {
         #[arg(long, short)]
         quiet: bool,
     },
+    /// Fetch a finished run's results now, without waiting.
+    Fetch {
+        /// The run's id, as `list` shows it.
+        id: String,
+        /// Where to write the results; out/<id> by default.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Stop a run and delete it with its files.
     Cancel {
         /// The run's id, as `list` shows it.
@@ -126,20 +138,32 @@ fn run() -> Result<()> {
             quiet,
             remote: Some(target),
             port,
+            detach,
         } => {
             let cfg = Config::load(&config)?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             let r = remote::connect(&target, port)?;
+            // Nothing here asks for pictures, so the server runs it headless.
             let s = r.submit(&config)?;
-            eprintln!(
-                "running {} on {target}; if this stops, `vibe-rations remote {target} attach {}` picks it up",
-                s.id, s.id
-            );
             if let Some(info) = &s.info {
                 for w in info["warnings"].as_array().into_iter().flatten() {
                     eprintln!("warning: {}", w.as_str().unwrap_or_default());
                 }
             }
+            if detach {
+                println!("{}", s.id);
+                eprintln!(
+                    "started {id} on {target}, headless. Progress: `vibe-rations remote {target} list`; \
+                     results, once done: `vibe-rations remote {target} fetch {id}`",
+                    id = s.id
+                );
+                return Ok(());
+            }
+            eprintln!(
+                "running {id} on {target}; if this stops, the run carries on, and \
+                 `vibe-rations remote {target} attach {id}` picks it up",
+                id = s.id
+            );
             finish(&r, &s.id, &out, quiet)?;
         }
         Command::Run {
@@ -185,14 +209,29 @@ fn run() -> Result<()> {
                         } else {
                             "-".into()
                         };
+                        let left = match (s.phase, remote::seconds_left(&s)) {
+                            (server::Phase::Running, Some(t)) => simulation::human_time(t),
+                            _ => "-".into(),
+                        };
                         println!(
-                            "{:<40} {:<11} {:>5}  {}",
+                            "{:<40} {:<11} {:>5} {:>7}  {}{}",
                             s.id,
                             format!("{:?}", s.phase).to_lowercase(),
                             done,
-                            s.error.as_deref().unwrap_or(&s.name)
+                            left,
+                            s.error.as_deref().unwrap_or(&s.name),
+                            if s.headless || s.phase.finished() {
+                                ""
+                            } else {
+                                " (watched)"
+                            }
                         );
                     }
+                }
+                RemoteAction::Fetch { id, out } => {
+                    let out = out.unwrap_or_else(|| PathBuf::from("out").join(&id));
+                    let n = r.fetch(&id, &out)?;
+                    eprintln!("wrote {n} files to {}", out.display());
                 }
                 RemoteAction::Attach { id, out, quiet } => {
                     let out = out.unwrap_or_else(|| PathBuf::from("out").join(&id));

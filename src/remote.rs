@@ -3,7 +3,7 @@
 //! tunnel this opens with the system's `ssh` (so its keys, agent and config apply).
 
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io::{self, IsTerminal, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -17,6 +17,7 @@ use ureq::http::Response;
 use crate::config::Config;
 use crate::memory::human;
 use crate::server::{Phase, Status};
+use crate::simulation::human_time;
 
 /// A connection to a run server.
 pub struct Remote {
@@ -188,41 +189,58 @@ impl Remote {
         Ok(())
     }
 
-    /// Waits until the run has finished, reporting progress on stderr if `progress`.
+    /// Waits until the run has finished, reporting its progress on stderr if `progress`: one
+    /// line, rewritten in place on a terminal, otherwise a line every minute.
     pub fn follow(&self, id: &str, progress: bool) -> Result<Status> {
-        let mut last = Instant::now() - Duration::from_secs(10);
+        let terminal = io::stderr().is_terminal();
+        let every = if terminal {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(60)
+        };
+        let mut last: Option<Instant> = None;
         let mut paused = false;
+        let mut drawn = false;
         loop {
             let s = self.status(id)?;
             if s.phase.finished() {
+                if progress && drawn {
+                    eprintln!("{}", if terminal { "" } else { "finished" });
+                }
                 return Ok(s);
             }
             if s.phase == Phase::Paused && !paused && progress {
-                eprintln!("paused at step {}; resume it from the web page", s.step);
+                eprintln!("{}paused at step {}", if drawn { "\n" } else { "" }, s.step);
+                drawn = false;
             }
             paused = s.phase == Phase::Paused;
-            if progress && s.phase == Phase::Running && last.elapsed() >= Duration::from_secs(2) {
-                last = Instant::now();
-                let left = if s.speed > 0.0 && s.step > 0 {
-                    let cells = s.info.as_ref().map_or(0.0, |i| {
-                        i["points"]
-                            .as_array()
-                            .map_or(0.0, |p| p.iter().filter_map(|v| v.as_f64()).product())
-                    });
-                    format!(
-                        "  {:.0}s left",
-                        cells * (s.total_steps - s.step) as f64 / (s.speed * 1e6)
-                    )
+            if progress && s.phase == Phase::Running && last.is_none_or(|t| t.elapsed() >= every) {
+                last = Some(Instant::now());
+                let line = progress_line(&s);
+                if terminal {
+                    eprint!("\r{line}\x1b[K");
                 } else {
-                    String::new()
-                };
-                eprintln!(
-                    "step {:>6}/{}  t {:.4} s  {:.0} Mcells/s{left}",
-                    s.step, s.total_steps, s.time, s.speed
-                );
+                    eprintln!("{line}");
+                }
+                drawn = true;
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(2));
         }
+    }
+
+    /// The run's results now, if it has finished: into `out`, as [`Remote::download`].
+    pub fn fetch(&self, id: &str, out: &Path) -> Result<usize> {
+        let s = self.status(id)?;
+        ensure!(
+            s.phase == Phase::Done,
+            "{id} is {}{}",
+            format!("{:?}", s.phase).to_lowercase(),
+            match s.phase {
+                Phase::Running | Phase::Paused => format!(", {}", progress_line(&s)),
+                _ => s.error.map(|e| format!(": {e}")).unwrap_or_default(),
+            }
+        );
+        self.download(id, out)
     }
 
     /// Fetches everything the run wrote into `out`, keeping its layout; returns the count.
@@ -260,6 +278,31 @@ impl Remote {
         }
         Ok(files.len())
     }
+}
+
+/// A run's progress in one line: share done, step, speed and time left.
+pub fn progress_line(s: &Status) -> String {
+    let share = if s.total_steps > 0 {
+        100.0 * s.step as f64 / s.total_steps as f64
+    } else {
+        0.0
+    };
+    let mut line = format!("{share:5.1}%  step {}/{}", s.step, s.total_steps);
+    if let Some(left) = seconds_left(s) {
+        line += &format!("  {:.0} Mcell/s  {} left", s.speed, human_time(left));
+    }
+    line
+}
+
+/// Seconds until the run is done at its speed so far, once it has one.
+pub fn seconds_left(s: &Status) -> Option<f64> {
+    let cells: f64 = s.info.as_ref()?["points"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_f64())
+        .product();
+    (s.speed > 0.0 && s.step > 0)
+        .then(|| cells * s.total_steps.saturating_sub(s.step) as f64 / (s.speed * 1e6))
 }
 
 /// Percent-encoding for a URL path or query value; keeps / so paths stay paths.

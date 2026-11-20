@@ -2,7 +2,7 @@
 //! the same results as local ones, outlast their clients, and outlast the server's restarts.
 
 use std::fs;
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,33 +29,25 @@ struct Server {
 }
 
 impl Server {
+    /// Starts a server on a port of its own choosing, which it names on its first line.
     fn start(data: &Path, page: Option<&Path>) -> Server {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let listen = format!("127.0.0.1:{port}");
         let mut cmd = Command::new(BIN);
-        cmd.args(["serve", "--listen", &listen, "--data"])
+        cmd.args(["serve", "--listen", "127.0.0.1:0", "--data"])
             .arg(data)
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         if let Some(p) = page {
             cmd.arg("--page").arg(p);
         }
-        let child = cmd.spawn().unwrap();
-        let start = Instant::now();
-        while TcpStream::connect(&listen).is_err() {
-            assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "the server didn't start"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        Server {
-            child,
-            url: format!("http://{listen}"),
-        }
+        let mut child = cmd.spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stderr.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line
+            .strip_prefix("serving on ")
+            .and_then(|rest| rest.split(':').take(3).collect::<Vec<_>>().join(":").into())
+            .unwrap_or_else(|| panic!("the server said {line:?}"));
+        Server { child, url }
     }
 
     fn client(&self) -> Remote {
@@ -231,6 +223,8 @@ fn runs_outlast_their_clients_and_the_server() {
         let (code, body) = call("POST", &format!("{u}/api/runs/{id}/start?paused=true"), "");
         assert_eq!(code, 200, "{body}");
         assert!(body.contains("\"phase\":\"paused\""), "{body}");
+        // Nobody has asked for a picture yet: headless.
+        assert!(body.contains("\"headless\":true"), "{body}");
         let png = agent
             .get(&format!(
                 "{u}/api/runs/{id}/section?field=vz&plane=xz&index=12&gain=1"
@@ -238,6 +232,9 @@ fn runs_outlast_their_clients_and_the_server() {
             .call()
             .unwrap();
         assert!(png.headers().contains_key("x-clip"));
+        // Asked for a picture: watched.
+        let (_, body) = call("GET", &format!("{u}/api/runs/{id}"), "");
+        assert!(body.contains("\"headless\":false"), "{body}");
         assert_eq!(call("POST", &format!("{u}/api/runs/{id}/start"), "").0, 409);
         assert_eq!(call("POST", &format!("{u}/api/runs/{id}/pause"), "").0, 409);
         // Run, then follow from a second connection to the end.
@@ -301,5 +298,42 @@ fn runs_outlast_their_clients_and_the_server() {
     assert!(!done.live);
     assert!(r.download(&done.id, &dir.join("after")).unwrap() >= 6);
     assert_eq!(r.status(&held).unwrap().phase, Phase::Interrupted);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// A headless run steps in long chunks, but its status answers at once throughout: std's
+/// Mutex isn't fair, and with the status under the wavefield's lock a request once waited out
+/// a whole run.
+#[test]
+fn status_answers_promptly_during_a_headless_run() {
+    let dir = scratch("prompt");
+    let config = dir.join("long.toml");
+    let text = CONFIG
+        .replace("points = [24, 24, 20]", "points = [72, 72, 64]")
+        .replace("duration = 0.05", "duration = 2.0")
+        .replace("[[snapshot]]", "[[snapshot.ignored]]");
+    // No snapshots: just a run long enough for several headless chunks.
+    let text = text[..text.find("[[snapshot.ignored]]").unwrap()].to_string();
+    fs::write(&config, text).unwrap();
+    let server = Server::start(&dir.join("data"), None);
+    let r = server.client();
+    let id = r.submit(&config).unwrap().id;
+    let mut steps = Vec::new();
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(300));
+        let start = Instant::now();
+        let s = r.status(&id).unwrap();
+        let waited = start.elapsed();
+        assert!(
+            waited < Duration::from_millis(300),
+            "status took {waited:?}"
+        );
+        if s.phase == Phase::Running {
+            assert!(s.headless, "nobody asked for pictures");
+            steps.push(s.step);
+        }
+    }
+    assert!(steps.len() >= 2, "the run should still be going: {steps:?}");
+    assert_eq!(r.follow(&id, false).unwrap().phase, Phase::Done);
     fs::remove_dir_all(dir).unwrap();
 }

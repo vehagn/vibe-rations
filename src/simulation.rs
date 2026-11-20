@@ -661,7 +661,8 @@ impl RunInfo {
     }
 }
 
-fn human_time(seconds: f64) -> String {
+/// A duration for people: 12s, 3m05s, 1h02m.
+pub fn human_time(seconds: f64) -> String {
     let s = seconds.round() as u64;
     if s >= 3600 {
         format!("{}h{:02}m", s / 3600, s % 3600 / 60)
