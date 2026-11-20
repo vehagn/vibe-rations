@@ -24,6 +24,7 @@ opens a shell there instead.
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
 | `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
+| `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -45,9 +46,10 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run | check | gradient
+  main.rs        the CLI: run (--shots) | check | gradient | invert
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
+  inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
@@ -109,6 +111,15 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Inversion** (`Inversion`, `invert`): L-BFGS on relative changes $m/m_0 - 1$, each source
+  a shot, with $\Delta t$ and the layers' damping (`pml_vp_max`) fixed at the starting
+  model's so the misfit is smooth and the gradient exact. Unpreconditioned, the updates pile
+  up around the sources and the surface receivers, and a sphere below hardly moves (55% of
+  the misfit left after 4 iterations, the sphere's $v_s$ error 99%). Dividing by the
+  illumination (source side) and holding the top fixed around the sources and receivers
+  (`fixed_above`) gave 6.6% and 78% after 6. The line search almost always takes the full
+  step at the first try. Forces recorded at the surface barely see $v_p$ in a sphere half
+  a P wavelength across. Details: the log.
 - **Gradients are those of the discrete run** (`gradient::gradient`): the multipliers of the
   forward equations are $W B^{-1} \tilde v$ and $-W \tilde\varepsilon$, with the adjoint
   strain $\tilde\varepsilon$ *summed* from the adjoint strain rates (not $M^{-1}\tilde\sigma$:
@@ -147,7 +158,8 @@ doesn't show.
   peak without a free surface, $2.1 \times 10^{-3}$ along one; reciprocity
   $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the adjoint dot-product test
   $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
-  $\le 2.2 \times 10^{-4}$; the 9 s soft-sediment run drains to
+  $\le 2.2 \times 10^{-4}$; the sphere inversion leaves 17.9% of its misfit and 91.8% of the
+  $v_s$ anomaly after 3 iterations; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. At order 4 with $C = 0.85$ they were 0.7–1.6%,
   0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
 - **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at

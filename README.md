@@ -39,6 +39,7 @@ Then, in the container:
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
 | `just run <config>` | Runs a simulation; `--shots` fires the sources one at a time, into `shot-NNN/` |
 | `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
+| `just invert <config>` | Inverts observed traces for the model with L-BFGS, as `[inversion]` says |
 | `just web` | Builds the web app into `web/dist` |
 
 ```bash
@@ -101,6 +102,7 @@ a free surface $z = 0$ is the surface.
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
+| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, bounds `vp_range`, `vs_range`, `rho_range` |
 
 The wavelet is the moment rate of a moment-tensor source and the force of a force source. A
 Ricker wavelet peaks at 1, so its amplitude is a peak rate; a Gaussian has unit area, so its
@@ -139,6 +141,18 @@ the L2 misfit, `--balance` weighting each component by its observed energy, and 
 ```bash
 just run truth.toml --out out/observed
 just gradient guess.toml out/observed --balance --out out/gradient
+```
+
+`invert` runs the configuration's `[inversion]`: each source is a shot, whose observed
+traces are in `<observed>/shot-NNN/` as `run --shots` writes them (or `<observed>/` itself for
+one source). After every iteration it writes the model, `vp.npy`, `vs.npy` and `rho.npy`
+(shape (nz, ny, nx), ready for `[model.files]`), and `inversion.json`: the settings and each
+iteration's misfit, step and largest change. The time step and the layers' damping are held
+at the starting model's, so give the observed run the same `[time] dt` (and `pml_vp_max`).
+
+```bash
+just run truth.toml --shots --out out/observed
+just invert guess.toml --out out/inverted   # guess.toml: [inversion] observed = "out/observed"
 ```
 
 ## Numerics
@@ -305,8 +319,11 @@ Planned next, following Fichtner (2011), ch. 7–11:
    for gradients.
 5. **Misfits and adjoint sources.** L2 waveform first, then cross-correlation time shifts and
    time–frequency phase misfits (Fichtner 2011, ch. 11).
-6. **Optimisation.** L-BFGS with a line search, frequency continuation (Fichtner et al.
-   2013), and gradient checks against finite differences.
+6. **Optimisation** (L-BFGS done: `src/inversion.rs`). Preconditioned L-BFGS (Nocedal 1980;
+   Liu & Nocedal 1989) on relative model changes, with bounds and an Armijo line search; each
+   source a shot; the illumination (Shin et al. 2001) as preconditioner. Still to come:
+   frequency continuation (Fichtner et al. 2013), receiver-side preconditioning, and
+   parameter scaling for $\rho$.
 7. Later: Born modelling and Hessian-vector products for truncated-Newton FWI (Métivier et
    al. 2013), source estimation, viscoelasticity.
 

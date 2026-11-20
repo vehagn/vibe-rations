@@ -102,6 +102,11 @@ run config *args:
 gradient config observed *args:
     cargo run --release -- gradient {{ config }} --observed {{ observed }} {{ args }}
 
+# Inverts observed traces for the model with L-BFGS, as the configuration's [inversion] says
+[group("simulate")]
+invert config *args:
+    cargo run --release -- invert {{ config }} {{ args }}
+
 # Set up a simulation without running it: grid, time step, accuracy and memory
 [group("simulate")]
 check config:

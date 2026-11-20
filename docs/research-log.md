@@ -353,6 +353,61 @@ restricted rows and checks came from the same tests with the perturbation restri
 $k \le 2$, the outermost planes) or the velocity components' weights set to zero. The cost: `just run` of the example with a sphere
 added and `dt = 5.3e-4`, then `just gradient` of the example itself against it.
 
+## 2026-11-20 — L-BFGS inversion
+
+**Question.** Do the gradients drive an inversion that recovers the model, and what does it
+need besides the gradient?
+
+**Method** (`src/inversion.rs`). The unknowns are relative changes $x = m / m_0 - 1$ of the
+inverted parameters at the free nodes (outside the absorbing layers, below `fixed_above`; $v_s$
+stays zero in fluids), so the gradient is $m_0\,\partial\chi/\partial m$. Each source is a shot,
+and the balanced misfits and their gradients add up. $\Delta t$ and the layers' damping
+(`pml_vp_max`) stay at the starting model's, so the forward map is smooth and the gradient is
+its derivative. Each iteration takes the L-BFGS direction [@nocedal1980; @liu1989], the
+two-loop recursion with initial matrix $\gamma P$, $\gamma = s^T y / y^T P y$
+[@nocedal2006], where $P$ is optionally the source-side pseudo-Hessian, $1 / (I / I_{\max} +
+\epsilon)$ with $I = \sum_n |v^{n+\frac12}|^2$ the forward run's energy at the node
+[@shin2001]. It scales the direction so that no value changes by more than 2% when there is no
+memory and 10% ever, projects onto bounds ($v_p$ below the stability limit of the fixed
+$\Delta t$, $v_s \le v_p / \sqrt2$), and backtracks with misfit-only runs until the Armijo
+condition holds for the projected step. The pair $(s, y)$ is kept if $s^T y > 0$.
+
+**Experiment.** A homogeneous model ($v_p = 2400$, $v_s = 1300$ m/s, $\rho = 2100$ kg/m³) with
+a sphere of radius 45 m, $v_p = 2700$, $v_s = 1500$ m/s, 120 m deep;
+40 × 36 × 30 nodes of 10 m, a free surface, 8-node layers; three shots of forces at 30 m depth
+(12 Hz Ricker), 31 receivers on the surface recording $v_x$, $v_y$ and $v_z$ for 0.4 s;
+inverted for $v_p$ and $v_s$ from the homogeneous model. Errors are the L2 model error over
+the sphere's nodes, relative to the anomaly:
+
+| Preconditioner | Fixed | Iterations | Misfit left | $v_s$ error | $v_p$ error |
+|---|---|---|---|---|---|
+| none | nothing | 4 | 54.8% | 99.1% | 100.0% |
+| none | top 60 m | 6 | 13.1% | 84.6% | 100.1% |
+| illumination, $\epsilon = 10^{-2}$ | nothing | 6 | 23.8% | 92.5% | 100.1% |
+| illumination, $\epsilon = 10^{-3}$ | nothing | 6 | 13.5% | 87.9% | 100.2% |
+| illumination, $\epsilon = 10^{-2}$ | top 60 m | 6 | 6.8% | 77.8% | 100.0% |
+| illumination, $\epsilon = 10^{-3}$ | top 60 m | 6 | 6.6% | 77.7% | 100.1% |
+
+Without help the gradient is dominated by the sources' and receivers' surroundings, where it is
+largest, and L-BFGS spends its steps there. The illumination evens out the source side; the
+receivers at the surface still pull, and fixing the top 60 m, which holds both, does most.
+With the top fixed, $\epsilon$ hardly matters; without it, $10^{-3}$ is better. Every
+iteration here took the full step at the first try (in the smaller test below, one of five
+backtracked once), so an iteration costs about one gradient (five forward runs) and one
+forward run per shot. $v_p$ didn't move: at 12 Hz its
+wavelength (200 m) is twice the sphere's diameter, and the forces radiate mostly S waves
+(108 m), which the data are full of.
+
+**Decision.** Precondition by default with $\epsilon = 10^{-3}$; fix the region around the
+sources and receivers when they sit near the targets' depth. To come: receiver-side
+illumination, frequency continuation [@fichtner2013] to approach the larger anomalies, and
+scaling between parameters when $\rho$ is inverted too.
+
+**Reproduce:** `an_inversion_finds_a_sphere` (a smaller version: two shots, 36 × 32 × 26
+nodes, 0.3 s, the top 60 m fixed, preconditioned; 3 iterations leave 17.9% of the misfit and a
+$v_s$ error of 91.8%, 5 iterations 6.6% and 82.7%). The table came from that test's earlier,
+larger setup, with the settings varied.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
