@@ -1,5 +1,7 @@
-# The container engine for `just dev`, e.g. ENGINE=podman. Any Compose implementation works,
-# e.g. COMPOSE=docker-compose.
+# Recipes run inside the dev container, except `dev` and `in`, which run on the host.
+#
+# The container engine for `just dev` and `just in`, e.g. ENGINE=podman. Any Compose
+# implementation works, e.g. COMPOSE=docker-compose.
 engine := env("ENGINE", "docker")
 compose := env("COMPOSE", engine + " compose") + " --file .devcontainer/compose.yaml"
 
@@ -20,16 +22,52 @@ dev command="up":
       *) echo "just dev [up|down]" >&2; exit 1 ;;
     esac
 
-# All tests, optimised: the physics tests run whole simulations.
+# Runs a recipe in the dev container from the host, starting the container if need be,
+# e.g. `just in test` or `just in run examples/explosion.toml`.
+[doc("Run a recipe in the dev container from the host, e.g. `just in ci`")]
+[group("dev")]
+in +recipe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{ compose }} up --detach --wait >/dev/null 2>&1 || {{ compose }} up --detach --build --wait
+    # A terminal only when there is one, so agents and scripts can call this too.
+    tty=(); [[ -t 0 && -t 1 ]] || tty=(-T)
+    exec {{ compose }} exec "${tty[@]}" dev just {{ recipe }}
+
+# Everything that must pass before a commit: formatting, clippy and all tests.
+[group("check")]
+ci: lint test
+
+# All tests, optimised: the physics tests run whole simulations (about 20 s).
 [group("check")]
 test *args:
     cargo test --release {{ args }}
+
+# Unit tests only: every module's tests and the CLI and example checks (a few seconds).
+[group("check")]
+unit *args:
+    cargo test --release --lib --bins --test cli --test examples {{ args }}
+
+# The physics tests, one at a time, printing their misfits and reflections.
+[group("check")]
+physics *args:
+    cargo test --release --test physics {{ args }} -- --nocapture --test-threads 1
 
 # rustfmt and clippy with -D warnings
 [group("check")]
 lint:
     cargo fmt --check
     cargo clippy --release --all-targets -- -D warnings
+
+# Formats the code.
+[group("check")]
+fmt:
+    cargo fmt
+
+# Builds the API documentation into the target directory.
+[group("check")]
+doc:
+    cargo doc --no-deps
 
 # Run a simulation, e.g. `just run examples/explosion.toml`
 [group("simulate")]
