@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::grid::Grid;
 use crate::receiver::Component;
@@ -28,6 +28,8 @@ pub struct Config {
     pub snapshots: Vec<SnapshotConfig>,
     #[serde(default)]
     pub output: OutputConfig,
+    /// What `invert` does; nothing else reads it.
+    pub inversion: Option<InversionConfig>,
 }
 
 impl Config {
@@ -420,6 +422,89 @@ pub enum Format {
 
 fn default_formats() -> Vec<Format> {
     vec![Format::Png]
+}
+
+/// A model parameter an inversion can update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Parameter {
+    Vp,
+    Vs,
+    Rho,
+}
+
+impl Parameter {
+    pub fn name(self) -> &'static str {
+        match self {
+            Parameter::Vp => "vp",
+            Parameter::Vs => "vs",
+            Parameter::Rho => "rho",
+        }
+    }
+}
+
+/// An L-BFGS inversion of the observed traces for the model (`invert`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InversionConfig {
+    /// The observed traces, relative to the configuration: `<component>.npy` as `run` writes
+    /// them for one source; with several, each source is a shot, in `shot-NNN/` as
+    /// `run --shots` writes them. They must be sampled like the synthetics: same dt.
+    pub observed: PathBuf,
+    /// What to update; the rest stays as the configuration's model has it.
+    #[serde(default = "default_parameters")]
+    pub parameters: Vec<Parameter>,
+    #[serde(default = "default_iterations")]
+    pub iterations: usize,
+    /// Model changes and gradient changes L-BFGS remembers.
+    #[serde(default = "default_memory")]
+    pub memory: usize,
+    /// The largest relative change of any value in the first iteration (and after a
+    /// restart), which sets the scale L-BFGS starts from.
+    #[serde(default = "default_initial_step")]
+    pub initial_step: f64,
+    /// No value changes by more than this fraction in one iteration.
+    #[serde(default = "default_max_step")]
+    pub max_step: f64,
+    /// Weigh each component of each shot by 1/(its observed energy), so pressure and
+    /// velocity, and loud and quiet shots, count alike.
+    #[serde(default = "default_true")]
+    pub balance: bool,
+    /// Hold the model fixed above this depth in metres, e.g. a known water layer.
+    pub fixed_above: Option<f64>,
+    /// Divide the gradient by the forward wavefield's energy at each node (a source-side
+    /// pseudo-Hessian), so that poorly lit nodes aren't starved and the sources' surroundings
+    /// don't take every update.
+    #[serde(default = "default_true")]
+    pub precondition: bool,
+    /// The fraction of the largest energy added to every node's before dividing by it.
+    #[serde(default = "default_water_level")]
+    pub water_level: f64,
+    /// Bounds on the inverted values; by default half the smallest and twice the largest of
+    /// the starting model's, and for vp no faster than the time step allows. vs also stays
+    /// below vp/√2 (λ ≥ 0).
+    pub vp_range: Option<[f64; 2]>,
+    pub vs_range: Option<[f64; 2]>,
+    pub rho_range: Option<[f64; 2]>,
+}
+
+fn default_parameters() -> Vec<Parameter> {
+    vec![Parameter::Vp, Parameter::Vs]
+}
+fn default_iterations() -> usize {
+    10
+}
+fn default_memory() -> usize {
+    5
+}
+fn default_initial_step() -> f64 {
+    0.02
+}
+fn default_max_step() -> f64 {
+    0.1
+}
+fn default_water_level() -> f64 {
+    1e-3
 }
 
 #[derive(Debug, Clone, Deserialize)]
