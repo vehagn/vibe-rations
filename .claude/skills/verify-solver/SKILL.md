@@ -26,6 +26,7 @@ are at the default, order 8 with $C = 0.3$):
 | `absorbing_layers_reflect_little` (± free surface) | $3.9 \times 10^{-4}$ / $2.1 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
 | `swapping_source_and_receiver_gives_the_same_trace` | $\le 1.5 \times 10^{-6}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
 | `the_adjoint_run_is_the_transpose_of_the_forward_run` | $\le 8.3 \times 10^{-8}$ | the adjoint's step pairing or `Solver::adjoint_op`, or anything that breaks reciprocity |
+| `the_inversion_gradient_matches_finite_differences` | $\le 3 \times 10^{-5}$ (measured $1.1 \times 10^{-5}$) | the inversion's parametrisation, its sum over shots, or anything the gradient checks catch |
 | `the_gradient_matches_finite_differences` (and `…_with_walls_and_water`) | $\le 1.7 \times 10^{-4}$ ($\le 2.2 \times 10^{-4}$) extrapolated | the material averaging, the free surface's moduli, the update's strain rates, sources or receivers that change how the material enters |
 | `a_long_run_stays_stable_and_drains` | $\le 3 \times 10^{-6}$ | instabilities (see `debug-instability`) |
 

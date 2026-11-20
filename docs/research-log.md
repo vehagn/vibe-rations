@@ -403,6 +403,22 @@ sources and receivers when they sit near the targets' depth. To come: receiver-s
 illumination, frequency continuation [@fichtner2013] to approach the larger anomalies, and
 scaling between parameters when $\rho$ is inverted too.
 
+**Review.** An adversarial review found the inversion's safeguards incomplete: with $v_p$
+inverted alone, $v_p$ could fall until $\lambda < 0$ and then the model failed validation and
+aborted the run; with `parameters = ["vs", "vp"]` $v_s$ was capped by the unprojected $v_p$; a
+trial that couldn't be set up ended the line search; at a bound the projected search could
+stop while the gradient along the bound's face still pointed downhill; and a nearly silent
+component could take over the balanced misfit. Now $v_p$ is projected first and held at or
+above $\sqrt2\, v_s$ where $v_s$ isn't inverted; failed trials shorten the step; unknowns
+pinned at a bound with the gradient pushing out are left out of the direction (projected
+gradient), with steepest descent as a fallback; and a velocity component's weight is floored
+at $10^{-4}$ of the loudest one's energy. The inversion's own gradient, with respect to its
+unknowns ($v_s$, $\rho$, $v_p$, two shots, velocity and pressure), agrees with extrapolated
+central differences down the gradient to $1.1 \times 10^{-5}$
+(`the_inversion_gradient_matches_finite_differences`); along a random direction the predicted
+change cancelled to $4 \times 10^{-4}$ of that, and round-off held the check at $10^{-2}$. The
+other tests' numbers didn't change.
+
 **Reproduce:** `an_inversion_finds_a_sphere` (a smaller version: two shots, 36 × 32 × 26
 nodes, 0.3 s, the top 60 m fixed, preconditioned; 3 iterations leave 17.9% of the misfit and a
 $v_s$ error of 91.8%, 5 iterations 6.6% and 82.7%). The table came from that test's earlier,

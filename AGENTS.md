@@ -16,8 +16,8 @@ opens a shell there instead.
 | Command | Does | Time |
 |---|---|---|
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
-| `just physics` | Whole simulations against analytic answers, misfits printed | ~2.5 min |
-| `just test` | Everything | ~2.5 min |
+| `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
+| `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
@@ -119,7 +119,12 @@ doesn't show.
   illumination (source side) and holding the top fixed around the sources and receivers
   (`fixed_above`) gave 6.6% and 78% after 6. The line search almost always takes the full
   step at the first try. Forces recorded at the surface barely see $v_p$ in a sphere half
-  a P wavelength across. Details: the log.
+  a P wavelength across. The bounds keep $\lambda \ge 0$ whichever parameters are inverted
+  ($v_p$ projected first; $v_p \ge \sqrt2\, v_s$ where $v_s$ is fixed): without that, an
+  inversion of $v_p$ alone reached an unphysical model and aborted. A trial the solver can't
+  run shortens the step; unknowns pinned at a bound drop out of the direction. Check an
+  inversion's gradient *down the gradient*: along a random direction the predicted change
+  cancels and round-off swamps it. Details: the log.
 - **Gradients are those of the discrete run** (`gradient::gradient`): the multipliers of the
   forward equations are $W B^{-1} \tilde v$ and $-W \tilde\varepsilon$, with the adjoint
   strain $\tilde\varepsilon$ *summed* from the adjoint strain rates (not $M^{-1}\tilde\sigma$:
@@ -159,7 +164,8 @@ doesn't show.
   $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the adjoint dot-product test
   $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
   $\le 2.2 \times 10^{-4}$; the sphere inversion leaves 17.9% of its misfit and 91.8% of the
-  $v_s$ anomaly after 3 iterations; the 9 s soft-sediment run drains to
+  $v_s$ anomaly after 3 iterations, and its gradient matches finite differences to
+  $1.1 \times 10^{-5}$; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. At order 4 with $C = 0.85$ they were 0.7–1.6%,
   0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
 - **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at

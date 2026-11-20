@@ -148,7 +148,9 @@ traces are in `<observed>/shot-NNN/` as `run --shots` writes them (or `<observed
 one source). After every iteration it writes the model, `vp.npy`, `vs.npy` and `rho.npy`
 (shape (nz, ny, nx), ready for `[model.files]`), and `inversion.json`: the settings and each
 iteration's misfit, step and largest change. The time step and the layers' damping are held
-at the starting model's, so give the observed run the same `[time] dt` (and `pml_vp_max`).
+at the starting model's, so give the observed run the same `[time] dt` (and `pml_vp_max`);
+`invert` checks the shapes and, from `time.npy`, the sample times. `observed` is relative to
+the configuration's directory, `--out` (and `[output] dir`) to the working directory.
 
 ```bash
 just run truth.toml --shots --out out/observed
