@@ -1,4 +1,5 @@
-//! PNG pictures: wavefield sections over the model, and receiver gathers.
+//! Pictures of wavefield sections over the model, and of receiver gathers: as RGBA pixels
+//! (for the web app) and as PNG files.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -27,48 +28,87 @@ pub struct Section<'a> {
     pub shade: &'a [f32],
 }
 
-/// Draws a section, scaled up by a whole number so its longer side is about 512 pixels. The
-/// colour follows the signed square root of value / clip, so weak arrivals show next to
-/// strong ones.
+/// A section's colours at one pixel per value, RGBA. The colour follows the signed square root
+/// of value / clip, so weak arrivals show next to strong ones.
+pub fn section_rgba(s: &Section) -> Vec<u8> {
+    let clip = if s.clip > 0.0 { s.clip } else { 1.0 };
+    let mut rgba = Vec::with_capacity(s.values.len() * 4);
+    for (&v, &shade) in s.values.iter().zip(s.shade) {
+        let v = v / clip;
+        let c = diverging(v.signum() * v.abs().sqrt());
+        rgba.extend(c.map(|c| (c * shade * 255.0).round() as u8));
+        rgba.push(255);
+    }
+    rgba
+}
+
+/// Draws a section, scaled up by a whole number so its longer side is about 512 pixels.
 pub fn write_section(path: &Path, s: &Section) -> Result<()> {
     let scale = (512 / s.width.max(s.height)).max(1);
     let (w, h) = (s.width * scale, s.height * scale);
-    let clip = if s.clip > 0.0 { s.clip } else { 1.0 };
+    let pixels = section_rgba(s);
     let mut rgb = vec![0u8; w * h * 3];
     for y in 0..h {
         for x in 0..w {
             let p = (y / scale) * s.width + x / scale;
-            let v = s.values[p] / clip;
-            let c = diverging(v.signum() * v.abs().sqrt());
-            for ch in 0..3 {
-                rgb[(y * w + x) * 3 + ch] = (c[ch] * s.shade[p] * 255.0).round() as u8;
-            }
+            rgb[(y * w + x) * 3..][..3].copy_from_slice(&pixels[p * 4..p * 4 + 3]);
         }
     }
     write_png(path, w, h, &rgb)
 }
 
-/// Draws a gather: one column per receiver, time running down. Each trace is scaled to its
-/// own peak (but not by more than 1000 times the gather's peak), so late, weak arrivals show.
-pub fn write_gather(path: &Path, receivers: usize, samples: usize, data: &[f32]) -> Result<()> {
+/// A gather's colours, RGBA: one column per receiver and `rows` rows spread over all
+/// `samples`, time running down. Only the first `recorded` samples are drawn; the rest stay
+/// pale grey. Each trace is scaled to its own peak so far (but not by more than 1000 times
+/// the gather's peak), so late, weak arrivals show.
+pub fn gather_rgba(
+    receivers: usize,
+    samples: usize,
+    recorded: usize,
+    data: &[f32],
+    rows: usize,
+) -> Vec<u8> {
+    let recorded = recorded.min(samples);
     let peak = |t: &[f32]| t.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-    let global = peak(data).max(f32::MIN_POSITIVE);
-    let scales: Vec<f32> = data
-        .chunks(samples)
+    let traces: Vec<&[f32]> = data
+        .chunks(samples.max(1))
+        .map(|t| &t[..recorded])
+        .collect();
+    let global = traces
+        .iter()
+        .map(|t| peak(t))
+        .fold(f32::MIN_POSITIVE, f32::max);
+    let scales: Vec<f32> = traces
+        .iter()
         .map(|t| 1.0 / peak(t).max(1e-3 * global))
         .collect();
+    let mut rgba = Vec::with_capacity(receivers * rows * 4);
+    for y in 0..rows {
+        let m = y * samples / rows.max(1);
+        for r in 0..receivers {
+            if m < recorded {
+                let c = diverging(traces[r][m] * scales[r]);
+                rgba.extend(c.map(|c| (c * 255.0).round() as u8));
+            } else {
+                rgba.extend([236, 236, 236]);
+            }
+            rgba.push(255);
+        }
+    }
+    rgba
+}
+
+/// Draws a gather: up to 8 pixels per receiver and up to 1000 rows.
+pub fn write_gather(path: &Path, receivers: usize, samples: usize, data: &[f32]) -> Result<()> {
     let col = (600 / receivers).clamp(1, 8);
     let rows = samples.min(1000);
+    let pixels = gather_rgba(receivers, samples, samples, data, rows);
     let (w, h) = (receivers * col, rows);
     let mut rgb = vec![0u8; w * h * 3];
     for y in 0..h {
-        let m = y * samples / rows;
         for x in 0..w {
-            let r = x / col;
-            let c = diverging(data[r * samples + m] * scales[r]);
-            for ch in 0..3 {
-                rgb[(y * w + x) * 3 + ch] = (c[ch] * 255.0).round() as u8;
-            }
+            let p = y * receivers + x / col;
+            rgb[(y * w + x) * 3..][..3].copy_from_slice(&pixels[p * 4..p * 4 + 3]);
         }
     }
     write_png(path, w, h, &rgb)
@@ -124,5 +164,18 @@ mod tests {
         write_gather(&dir.join("g.png"), 3, 2000, &vec![1.0; 6000]).unwrap();
         assert_eq!(size(&dir.join("g.png")), (24, 1000));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn gathers_leave_unrecorded_samples_pale() {
+        // Two receivers, four samples, two recorded; one row per sample.
+        let data = [1.0, -1.0, 9.0, 9.0, 0.5, 0.0, 9.0, 9.0];
+        let px = gather_rgba(2, 4, 2, &data, 4);
+        assert_eq!(px.len(), 2 * 4 * 4);
+        let at = |row: usize, col: usize| &px[(row * 2 + col) * 4..][..4];
+        assert_eq!(at(0, 0), &[255, 0, 0, 255]); // +peak: red
+        assert_eq!(at(1, 0), &[0, 0, 255, 255]); // -peak: blue
+        assert_eq!(at(0, 1), &[255, 0, 0, 255]); // scaled to its own peak
+        assert_eq!(at(2, 0), &[236, 236, 236, 255]); // not recorded yet
     }
 }

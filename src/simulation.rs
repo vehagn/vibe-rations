@@ -309,6 +309,20 @@ impl Simulation {
         );
     }
 
+    /// Advances one step and records the receivers if this step is one to record.
+    pub fn advance(&mut self) {
+        let n = self.solver.step;
+        self.step();
+        if n.is_multiple_of(self.record_every) {
+            self.receivers.record(&self.solver);
+        }
+    }
+
+    /// Steps still to take.
+    pub fn remaining(&self) -> usize {
+        self.steps.saturating_sub(self.solver.step)
+    }
+
     /// Runs every step, writing snapshots into `out` if given, and reporting progress on
     /// stderr if `progress`.
     pub fn run(&mut self, out: Option<&Path>, progress: bool) -> Result<()> {
@@ -322,10 +336,7 @@ impl Simulation {
         let mut last_report = start;
         let cells = self.solver.grid.interior_len() as f64;
         for n in 0..self.steps {
-            self.step();
-            if n % self.record_every == 0 {
-                self.receivers.record(&self.solver);
-            }
+            self.advance();
             if let Some(dir) = &snap_dir {
                 for s in &self.snapshots {
                     if s.due(n + 1) {

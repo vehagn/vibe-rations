@@ -68,32 +68,62 @@ impl Snapshot {
         (shape, nodes)
     }
 
-    /// Writes the snapshot of the wavefield now into `dir`.
-    pub fn write(&self, dir: &Path, solver: &Solver) -> Result<()> {
+    /// The snapshot of the wavefield now.
+    pub fn capture(&self, solver: &Solver) -> Capture {
         let (shape, nodes) = self.nodes(solver);
-        let values: Vec<f32> = nodes
+        let values = nodes
             .iter()
             .map(|&n| solver.sample(self.component, n))
             .collect();
+        Capture {
+            shape,
+            values,
+            shade: shade(solver, &nodes),
+        }
+    }
+
+    /// The colour scale limit for a capture: the configured one, or a robust default.
+    pub fn clip_for(&self, capture: &Capture) -> f32 {
+        self.clip.unwrap_or_else(|| robust_clip(&capture.values))
+    }
+
+    /// Writes the snapshot of the wavefield now into `dir`.
+    pub fn write(&self, dir: &Path, solver: &Solver) -> Result<()> {
+        let c = self.capture(solver);
         let stem = format!("{}_{:06}", self.name(), solver.step);
         if self.npy {
-            npy::write(&dir.join(format!("{stem}.npy")), &shape, &values)?;
+            npy::write(&dir.join(format!("{stem}.npy")), &c.shape, &c.values)?;
         }
         if self.png && self.plane != PlaneKind::Volume {
-            let shade = shade(solver, &nodes);
-            let clip = self.clip.unwrap_or_else(|| robust_clip(&values));
             write_section(
                 &dir.join(format!("{stem}.png")),
-                &Section {
-                    width: shape[1],
-                    height: shape[0],
-                    values: &values,
-                    clip,
-                    shade: &shade,
-                },
+                &c.section(self.clip_for(&c)),
             )?;
         }
         Ok(())
+    }
+}
+
+/// A snapshot's values, with the model's shading under them.
+#[derive(Clone, Debug)]
+pub struct Capture {
+    /// (rows, columns) for a section, the top row first; (nz, ny, nx) for a volume.
+    pub shape: Vec<usize>,
+    pub values: Vec<f32>,
+    /// Brightness of the model under each value: faster rock and the absorbing layers darker.
+    pub shade: Vec<f32>,
+}
+
+impl Capture {
+    /// The capture as a section to draw, for a plane (not a volume).
+    pub fn section(&self, clip: f32) -> Section<'_> {
+        Section {
+            width: self.shape[1],
+            height: self.shape[0],
+            values: &self.values,
+            clip,
+            shade: &self.shade,
+        }
     }
 }
 

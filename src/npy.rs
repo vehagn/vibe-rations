@@ -8,10 +8,32 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 
 pub fn write(path: &Path, shape: &[usize], data: &[f32]) -> Result<()> {
+    let header = header(shape, data.len())?;
+    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut w = BufWriter::new(file);
+    w.write_all(&header)?;
+    for chunk in data.chunks(1 << 14) {
+        let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
+        w.write_all(&bytes)?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
+/// The bytes of an `.npy` file, for sending rather than writing.
+pub fn to_bytes(shape: &[usize], data: &[f32]) -> Result<Vec<u8>> {
+    let mut bytes = header(shape, data.len())?;
+    bytes.reserve(4 * data.len());
+    bytes.extend(data.iter().flat_map(|v| v.to_le_bytes()));
+    Ok(bytes)
+}
+
+/// Magic, version, header length and the header dictionary, padded so the data starts on a
+/// 64-byte boundary.
+fn header(shape: &[usize], len: usize) -> Result<Vec<u8>> {
     ensure!(
-        shape.iter().product::<usize>() == data.len(),
-        "shape {shape:?} doesn't fit {} values",
-        data.len()
+        shape.iter().product::<usize>() == len,
+        "shape {shape:?} doesn't fit {len} values"
     );
     let dims: Vec<String> = shape.iter().map(usize::to_string).collect();
     let shape = if dims.len() == 1 {
@@ -19,23 +41,14 @@ pub fn write(path: &Path, shape: &[usize], data: &[f32]) -> Result<()> {
     } else {
         format!("({})", dims.join(", "))
     };
-    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape}, }}");
-    // Magic, version and length take 10 bytes; pad so the data starts on a 64-byte boundary.
-    let used = 10 + header.len() + 1;
-    header.push_str(&" ".repeat((64 - used % 64) % 64));
-    header.push('\n');
-
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut w = BufWriter::new(file);
-    w.write_all(b"\x93NUMPY\x01\x00")?;
-    w.write_all(&(header.len() as u16).to_le_bytes())?;
-    w.write_all(header.as_bytes())?;
-    for chunk in data.chunks(1 << 14) {
-        let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
-        w.write_all(&bytes)?;
-    }
-    w.flush()?;
-    Ok(())
+    let mut dict = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape}, }}");
+    let used = 10 + dict.len() + 1;
+    dict.push_str(&" ".repeat((64 - used % 64) % 64));
+    dict.push('\n');
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend((dict.len() as u16).to_le_bytes());
+    bytes.extend(dict.as_bytes());
+    Ok(bytes)
 }
 
 /// Reads a C-ordered float32 or float64 array: its shape and values.
@@ -128,6 +141,7 @@ mod tests {
             let bytes = fs::read(&path).unwrap();
             let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
             assert_eq!((10 + header_len) % 64, 0);
+            assert_eq!(to_bytes(&shape, &data).unwrap(), bytes);
             assert_eq!(read(&path).unwrap(), (shape, data));
         }
         fs::remove_dir_all(dir).unwrap();
