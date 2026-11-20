@@ -479,6 +479,30 @@ impl Parameter {
     }
 }
 
+/// What an inversion's misfit compares (`crate::misfit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MisfitKind {
+    /// Half the weighted sum of squared differences, sample by sample.
+    #[default]
+    L2,
+    /// Half the sum of each trace's squared cross-correlation time shift (Luo & Schuster
+    /// 1991).
+    Traveltime,
+    /// The time–frequency phase misfit (Fichtner et al. 2008).
+    Phase,
+}
+
+impl MisfitKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            MisfitKind::L2 => "l2",
+            MisfitKind::Traveltime => "traveltime",
+            MisfitKind::Phase => "phase",
+        }
+    }
+}
+
 /// An L-BFGS inversion of the observed traces for the model (`invert`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -865,6 +865,104 @@ $10^{-5}$ off at one step, scan $h$ before suspecting the gradient.
 
 **Reproduce:** `just physics inversion`; `just unit counts_what_an_inversion_allocates`.
 
+## 2026-11-20 — Misfits beyond L2: filtered traces, time shifts and phases
+
+**Question.** Roadmap step 5: the L2 waveform misfit is the only one, and it cycle-skips once
+the starting model is half a period off [@bunks1995]. Which misfits to add, and how to keep
+the gradient that of the discrete run, checked by finite differences, as the adjoint and the
+gradient are? Each misfit must be a function of the sampled traces with its *exact* derivative
+as the adjoint source (`gradient::gradient` takes $(\chi, \partial\chi/\partial s)$).
+
+**Method** (`src/misfit.rs`). Three pieces, each derived for the samples, not for continuous
+signals, with a literature and numerical check by research agents (Crossref for every
+reference; the papers' equations read where open access).
+
+*Low-pass filter.* A digital Butterworth filter [@butterworth1930] of order $n$: the analog
+prototype's poles, prewarped, through the bilinear transform, as second-order sections,
+$|H(f)|^2 = 1 / (1 + (\tan \pi f \Delta / \tan \pi f_c \Delta)^{2n})$. Applied forwards and then
+backwards, starting at rest, with no padding. A causal recursion started at rest is, on $N$
+samples, the lower-triangular Toeplitz matrix $H$ of its impulse response; reversing time
+($R$) gives $R H R = H^T$, so the forward–backward filter $F = R H R H = H^T H$ is symmetric
+and positive semi-definite. Hence the adjoint source of $\chi(F s, F d)$ is
+$F\, \partial\chi/\partial(F s)$: the same filter, no separate transpose. Libraries that pad
+the ends or start from steady state (e.g. SciPy's `filtfilt`) are not symmetric. The corner
+$f_c$ is where the zero-phase filter halves the amplitude.
+
+*Cross-correlation time shift* [@luo1991]. Per trace, $C(k) = \sum_n s[n + k]\, d[n]$ for
+$|k| \le K$ (`max_shift`), $k^*$ its largest, and a parabola through
+$a, b, c = C(k^* - 1), C(k^*), C(k^* + 1)$:
+$$T = (k^* + \delta)\,\Delta, \qquad \delta = \frac{a - c}{2D}, \quad D = a - 2b + c, \qquad \chi = \tfrac12 \sum T^2 .$$
+$T > 0$ when the synthetic is late: the sign of [@tromp2005]'s "predicted minus observed",
+opposite to [@luo1991]'s $\Delta\tau$ and [@dahlen2000]'s $\delta T$. With
+$\partial C(j)/\partial s[m] = d[m - j]$,
+$$\frac{\partial T}{\partial s[m]} = \frac{\Delta}{D}\Big[(\tfrac12 - \delta)\, d[m - k^* + 1] + 2\delta\, d[m - k^*] - (\tfrac12 + \delta)\, d[m - k^* - 1]\Big],$$
+the observed trace's slope at the shift found, divided by the correlation's curvature: the
+discrete form of [@luo1991]'s eq. 7b. For $|k^*| < K$, $b \ge a, c$ gives $D \le 0$ and
+$|\delta| \le \frac12$, and where $k^*$ jumps to the next lag both parabolas give the same half
+sample: $T$ is continuous, its derivative jumps. At $|k^*| = K$, $\delta$ is held within
+$\pm\frac12$ (no derivative while held), so $T$ saturates at $\pm(K + \frac12)\Delta$ instead of
+extrapolating; a synthetic that correlates positively nowhere (a silent one) gets that
+saturated value, so a model cannot lower the misfit by silencing a trace. Traces quieter than
+$10^{-4}$ of the loudest of their kind (velocity, pressure), judged on the observed data only,
+are left out, so the selection does not depend on the model.
+
+*Time–frequency phase* [@fichtner2008]. A Gabor transform with a unit-norm Gaussian window of
+width $\sigma = 1/f_0$ ("the dominant period", their §2.2.3), truncated at $\pm 3\sigma$, windows
+every $\sigma/2$, frequencies every $1/(4\pi\sigma)$ from the first above zero to $1.2 f_{hi}$
+(the Nyquist cell, being real, is left out); $f_0$ is the stage's corner frequency or the
+sources' dominant frequency, $f_{hi}$ the corner or $2.5 f_0$. They define
+$\chi = \int W^2 \Delta\varphi^2$ with $\Delta\varphi = \arg(\tilde u\, \tilde u_0^*)$ and
+$W = |\tilde u_0|$ or $\log(1 + |\tilde u_0|)$ normalised. Taken literally on samples it has two
+non-differentiable features: a branch cut at $\Delta\varphi = \pm\pi$, and $1/|\tilde u|$ where
+the synthetic lacks an arrival that the data have (any scatterer missing from the starting
+model), which in a prototype made the gradient about $10^7$ times larger there and the
+finite-difference check fail at every step. We compare instead
+$$\chi = \tfrac12 \sum_{\text{cells}} W^2 |u - u_0|^2, \qquad u = \frac{z}{\sqrt{|z|^2 + \epsilon^2}},$$
+$z$ the synthetic's coefficient, $u_0$ likewise the observed one's, $\epsilon = 0.05 \max|z_0|$
+per trace. Where both are large, $|u - u_0|^2 = 2 - 2\cos\Delta\varphi \approx \Delta\varphi^2$; it
+is smooth everywhere and bounded where $|z| \to 0$. $W = \text{taper}(f)\, |z_0| / \max|z_0|$
+where that ratio is at least 0.05, else 0 (Kristeková et al. weight by the reference's
+$|W_r|$ too [@kristekova2009]), from the observed trace alone, normalised to $\sum W^2 = 1$ per component, like the L2 misfit's
+balancing. With $q = |z|^2 + \epsilon^2$ and $e = u - u_0$,
+$d\chi = \mathrm{Re}(A\, dz)$, $A = W^2 q^{-1/2} (\bar e - \mathrm{Re}(\bar e z)\, \bar z / q)$, and
+$dz = G\, ds$ with $G$ the transform's kernel, so the adjoint source is $\mathrm{Re}(G^T A)$.
+LASIF's implementation [@krischer2015] was read and not followed: its weight depends on the
+synthetic, its denominator is a water level and its resampling is not transposed, so its
+adjoint source is not the derivative of its misfit.
+
+**Results** (`just unit misfit`).
+
+- Filter: $\langle F x, y\rangle = \langle x, F y\rangle$ to $8.9 \times 10^{-15}$ (relative); the measured gain
+  matches the squared Butterworth response to $10^{-3}$ at orders 1–6; a pulse inside the band
+  keeps its peak's sample.
+- Time shift, f64: central differences agree with the derivative to $10^{-6}$ (relative)
+  along four directions, between lag jumps. Parabola bias, Ricker at $P$ samples per peak
+  period, true shifts across a sample, at most 0.049 samples at $P = 5$ (1.0% of a period), 0.011
+at 10 (0.11%), $2.8 \times 10^{-3}$ at 20 and $4.4 \times 10^{-4}$ at 50 ($9 \times 10^{-6}$ of a
+period), falling as $P^{-2}$. The bias is odd and zero at whole and half
+  samples, so it does not move the minimum for consistent data. Against the familiar
+  adjoint source $T\,\dot s / \int s \ddot s$ [@tromp2005; @dahlen2000], which assumes $d$ is a
+  shifted copy of $s$: it agrees to $1.5 \times 10^{-7}$ for a whole-sample shift of a copy and
+$9.3 \times 10^{-4}$ for 3.3 samples, but for traces of different shape (two Rickers against
+one) the two point 27° apart (cosine 0.89) and differ by 45%. Using it would fail the
+finite-difference check.
+- Phase: $\mathrm{Re}\langle G x, a\rangle = \langle x, G^T a\rangle$ to $10^{-12}$; finite
+  differences to $10^{-6}$ with an arrival in the synthetic that the data lack; identical
+  traces give 0, a synthetic three times too loud $1.1 \times 10^{-4}$ (from $\epsilon$, in the
+  faint cells) against 0.29 for one shifted by an eighth of a period. Cells at 12 Hz and 1 ms
+  sampling: windows every 42 samples, 250 samples either side, 37 frequencies.
+- Through `Misfit` (f32 traces, weights, filter), all three misfits, filtered or not, agree
+  with central differences to $2 \times 10^{-3}$ (f32 round-off).
+
+**Decision.** Keep the parabola (closed form, local, exact derivative); its bias is below
+$10^{-3}$ of a period at the sampling these runs record. Use the regularised phase misfit,
+documented as such, rather than $\Delta\varphi^2$ literally. Weights and selections come from the
+observed data only, so each misfit is one smooth (time shift: piecewise smooth) function of
+the synthetics.
+
+**Reproduce:** `just unit misfit`; the numbers above,
+`cargo test --release --lib misfit_study -- --ignored --nocapture`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
