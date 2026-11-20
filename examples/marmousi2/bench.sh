@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The Marmousi2 benchmark (`just marmousi2-bench`, in the dev container): forward runs of the
-# whole section (marmousi2.toml) and gradient runs of its central 6 km (central.toml against
-# central-true.toml's traces), at orders 4 and 8, each timed, with its peak memory measured
-# beside what `memory` planned. Needs the model files `just marmousi2` makes. Results:
-# docs/research-log.md, "Marmousi2".
+# whole section (marmousi2.toml), and forward and gradient runs of its central 6 km
+# (central.toml, against central-true.toml's traces), at orders 4 and 8, each timed, with
+# its peak memory measured beside what `memory` planned. Needs the model files `just
+# marmousi2` makes. Results: docs/research-log.md, "Marmousi2".
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 here=examples/marmousi2
@@ -39,27 +39,32 @@ variant() { # config order name
 }
 
 summary=()
+# A forward run of `cfg`, timed, into the summary as `name`.
+forward() { # cfg name
+  local planned log=$out/$2.log
+  planned=$("$bin" memory "$1" | awk '/at most/ { print $1, $2 }')
+  echo "$2" >&2
+  measure "$log" "$bin" run "$1" --out "$out/$2"
+  summary+=("$2: $(grep -m1 -oE '[0-9]+ steps' "$log"), \
+$(grep -E '^step +([0-9]+)/\1 ' "$log" | grep -oE '[0-9]+ Mcells/s'), $(tail -1 "$log"), \
+planned $planned")
+}
+
 for order in 8 4; do
-  cfg=$(variant $here/marmousi2.toml $order forward-$order)
-  planned=$("$bin" memory "$cfg" | awk '/at most/ { print $1, $2 }')
-  echo "forward, order $order" >&2
-  measure "$out/forward-$order.log" "$bin" run "$cfg" --out "$out/forward-$order"
-  log="$out/forward-$order.log"
-  rate=$(grep -E '^step +([0-9]+)/\1 ' "$log" | grep -oE '[0-9]+ Mcells/s')
-  summary+=("forward  order $order: $(grep -m1 -oE '[0-9]+ steps' "$log"), $rate, \
-$(tail -1 "$log"), planned $planned")
+  forward "$(variant $here/marmousi2.toml $order forward-$order)" forward-$order
 done
 
 echo "observed data" >&2
 "$bin" run $here/central-true.toml --quiet --out out/marmousi2/central-true
 for order in 8 4; do
   cfg=$(variant $here/central.toml $order gradient-$order)
+  forward "$cfg" central-forward-$order
   planned=$("$bin" memory "$cfg" --gradient | awk '/at most/ { print $1, $2 }')
-  echo "gradient, order $order" >&2
+  echo "gradient-$order" >&2
   log="$out/gradient-$order.log"
   measure "$log" "$bin" gradient "$cfg" --observed out/marmousi2/central-true \
     --out "$out/gradient-$order"
-  summary+=("gradient order $order: $(grep -m1 -oE '[0-9]+ steps' "$log"), \
+  summary+=("gradient-$order: $(grep -m1 -oE '[0-9]+ steps' "$log"), \
 $(grep -oE 'checkpoints every [0-9]+ steps' "$log"), $(tail -1 "$log"), planned $planned")
 done
 printf '%s\n' "${summary[@]}"
