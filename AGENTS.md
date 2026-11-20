@@ -131,7 +131,15 @@ doesn't show.
   untested against a real remote. `tests/remote.rs` checks remote traces match local ones bit
   for bit. In the built-in browser, open local servers through `.claude/launch.json` entries
   (`solver`), not `navigate`: on other origins it blocks nested workers, which threaded
-  WebAssembly needs (the `remote-runs` skill).
+  WebAssembly needs (the `remote-runs` skill). A run is headless (`Status::headless`) when
+  nobody has asked for its pictures for 5 s; it then steps in ~2 s chunks instead of 0.1 s
+  and draws nothing: 18.7–19.6 s against 21.3–22.1 s watched (4.9 M nodes, 4 cores), about
+  12% less. **A run's locks:** std's Mutex isn't fair, and with one lock per run the
+  scheduler took it straight back after each chunk, so a status request could wait out a
+  whole headless run (and a first measurement, which found no difference, was an artifact
+  of picture requests starving the same way). Status lives in `Run::shared`, never held
+  while stepping; requests for the wavefield go through `Run::state`, which registers them
+  so the scheduler lets them in before its next chunk.
 - **Memory is counted before it is allocated** (`memory::estimate`, `vibe-rations memory`).
   It shares `simulation::timing` with `Simulation::new`, takes the model's extremes from
   `Model::extremes` (layers, spheres, or `.npy` files streamed), and must stay exact:

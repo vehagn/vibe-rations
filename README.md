@@ -191,9 +191,18 @@ vibe-rations remote me@bigbox attach layered-1795184607-3f2a
 vibe-rations remote me@bigbox cancel layered-1795184607-3f2a
 ```
 
-If the CLI stops, the run carries on; `attach` follows it again and fetches its results. The
-destination can be anything `ssh` accepts, or a URL (`--remote http://localhost:8089`) for a
-tunnel opened another way. In the dev container, which has no SSH keys, open the tunnel on the
+If the CLI stops, the run carries on; `attach` follows it again and fetches its results.
+Progress is one line, rewritten in place (a line a minute when not on a terminal): share
+done, step, speed and time left. To fire a run off and come back later:
+
+```bash
+vibe-rations run big.toml --remote me@bigbox --detach      # prints the run's id
+vibe-rations remote me@bigbox list                          # progress and time left
+vibe-rations remote me@bigbox fetch big-1795190000-1a2b     # its results, once done
+```
+
+The destination can be anything `ssh` accepts, or a URL (`--remote http://localhost:8089`)
+for a tunnel opened another way. In the dev container, which has no SSH keys, open the tunnel on the
 host (`just tunnel me@bigbox`) and use `--remote http://host.docker.internal:8089`.
 
 **Web page.** The server also serves the page:
@@ -205,7 +214,16 @@ just tunnel me@bigbox     # ssh -N -L 8089:127.0.0.1:8088 me@bigbox
 and open http://localhost:8089. **Compute** chooses between the server and this browser;
 **Runs** lists the server's runs to attach to, including ones started from the command line.
 A run started from the page keeps going when the page is closed. The memory line shows what
-the server has available.
+the server has available. Turning **Live pictures** off leaves progress only: the page asks
+for the run's status every 2 s instead of a section and a gather five times a second, which
+matters over a slow link; in the browser, the solver stops drawing.
+
+**Headless runs.** The server counts a run as watched while someone asks for its pictures,
+and as headless once nobody has for 5 s: runs from the command line, and from the page with
+live pictures off or closed. A headless run draws no pictures and steps in chunks of about
+2 s instead of 0.1 s (while no watched run shares the machine). On a 4-core machine a
+4.9-million-node run took 18.7–19.6 s headless and 21.3–22.1 s watched with pictures five
+times a second: about 12% less time, and next to nothing over the network.
 
 **The API** is plain HTTP and JSON (listed in `src/server.rs`): create a run from a
 configuration, upload its model files, start, pause, resume or delete it, read its status,

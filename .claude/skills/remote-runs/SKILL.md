@@ -20,7 +20,9 @@ in one dev-container shell (`just dev`), and in another:
 
 ```bash
 cargo run --release -- run examples/explosion.toml --remote http://127.0.0.1:8088
+cargo run --release -- run examples/explosion.toml --remote http://127.0.0.1:8088 --detach
 cargo run --release -- remote http://127.0.0.1:8088 list
+cargo run --release -- remote http://127.0.0.1:8088 fetch <id>
 ```
 
 For the page, the browser needs the port: build the image on the host,
@@ -47,8 +49,16 @@ fail the same way; a real browser doesn't.
   Publish the container's port on 127.0.0.1 only. Anything wider needs auth first.
 - **Paths from clients stay inside the run** (`server::relative`): model files, outputs and
   page files. Keep the refusal tests in `tests/remote.rs` passing.
-- **The page's two solvers answer the same messages** (`load`, `run`, `pause`, `view`, `npy`,
-  `estimate`; `attach` for the server). Change worker.js and remote.js together.
+- **The page's two solvers answer the same messages** (`load`, `run`, `pause`, `view`,
+  `live`, `npy`, `estimate`; `attach` for the server). Change worker.js and remote.js
+  together. A `frame` without a section is progress only (live pictures off).
+- **Never hold `Run::shared` while stepping, and take `Run::state` through `Run::state()`**
+  (not `.state.lock()`), so requests take turns with the scheduler: std's Mutex isn't fair.
+  Status must answer in milliseconds during a run; check it with curl's
+  `-w "%{time_starttransfer}"` against a headless run.
+- **Headless is inferred, not set:** a run is watched while picture requests (`section`,
+  `gather`) keep coming, within `WATCH_WINDOW`. Don't add a flag clients must remember to
+  clear.
 - **Results must match local runs bit for bit** (`a_remote_run_gives_what_a_local_one_does`).
 - A run's directory: `config.toml`, model files at their configured relative paths,
   `status.json`, `out/` (what `write_outputs` writes, plus `snapshots/`).
