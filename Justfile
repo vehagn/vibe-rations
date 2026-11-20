@@ -96,6 +96,12 @@ serve port="8088":
 run config *args:
     cargo run --release -- run {{ config }} {{ args }}
 
+# The misfit gradient for vp, vs and rho against observed traces, e.g.
+# `just gradient guess.toml out/observed --balance`
+[group("simulate")]
+gradient config observed *args:
+    cargo run --release -- gradient {{ config }} --observed {{ observed }} {{ args }}
+
 # Set up a simulation without running it: grid, time step, accuracy and memory
 [group("simulate")]
 check config:

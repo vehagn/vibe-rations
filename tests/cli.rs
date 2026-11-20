@@ -116,6 +116,62 @@ fn run_writes_traces_gathers_snapshots_and_settings() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// The gradient of a model's misfit to traces another model recorded.
+#[test]
+fn gradient_writes_one_array_per_parameter() {
+    let dir = scratch("gradient");
+    // The same time step for both, or the samples wouldn't line up.
+    let tiny = TINY.replace("duration = 0.05", "duration = 0.05\ndt = 6e-4");
+    let truth = dir.join("truth.toml");
+    fs::write(&truth, &tiny).unwrap();
+    let observed = dir.join("observed");
+    let out = vibe(&[
+        "run",
+        truth.to_str().unwrap(),
+        "--out",
+        observed.to_str().unwrap(),
+        "--quiet",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let guess = dir.join("guess.toml");
+    fs::write(&guess, tiny.replace("vp = 2000.0", "vp = 2100.0")).unwrap();
+    let grad = dir.join("grad");
+    let args = |observed: &Path| {
+        vibe(&[
+            "gradient",
+            guess.to_str().unwrap(),
+            "--observed",
+            observed.to_str().unwrap(),
+            "--out",
+            grad.to_str().unwrap(),
+            "--balance",
+        ])
+    };
+    let out = args(&observed);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for name in ["vp", "vs", "rho"] {
+        let bytes = fs::read(grad.join(format!("grad_{name}.npy"))).unwrap();
+        assert!(bytes.starts_with(b"\x93NUMPY"), "grad_{name}.npy");
+        assert!(bytes.len() > 4 * 24 * 24 * 20, "grad_{name}.npy");
+    }
+    assert!(grad.join("vz.npy").is_file());
+    let info: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(grad.join("gradient.json")).unwrap()).unwrap();
+    assert!(info["misfit"].as_f64().unwrap() > 0.0, "{info}");
+    assert_eq!(info["weights"].as_array().unwrap().len(), 2);
+    // The observed traces must be there, sampled as the receivers record.
+    fs::write(&guess, TINY.replace("vp = 2000.0", "vp = 2100.0")).unwrap();
+    let out = args(&observed);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("same [time] dt"), "{}", stderr(&out));
+    fs::write(&guess, tiny.replace("vp = 2000.0", "vp = 2100.0")).unwrap();
+    fs::remove_file(observed.join("p.npy")).unwrap();
+    let out = args(&observed);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("p.npy"), "{}", stderr(&out));
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn reports_a_typo_and_fails() {
     let dir = scratch("typo");

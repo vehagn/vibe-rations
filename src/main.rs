@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
 use vibe_rations::config::Config;
+use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
+use vibe_rations::npy;
 use vibe_rations::simulation::Simulation;
 
 /// 3D elastic seismic wave simulator.
@@ -35,6 +37,27 @@ enum Command {
     Check {
         /// The TOML configuration.
         config: PathBuf,
+    },
+    /// The gradient of the L2 misfit to observed traces with respect to vp, vs and ρ.
+    ///
+    /// Runs the configured model, then the adjoint of its receivers, and writes
+    /// grad_vp.npy, grad_vs.npy and grad_rho.npy (shape nz, ny, nx, like model files), the
+    /// synthetic traces and gradient.json. Exact for the discrete run outside the absorbing
+    /// layers, with the time step and layers held fixed.
+    Gradient {
+        /// The TOML configuration of the model to differentiate around.
+        config: PathBuf,
+        /// A directory with the observed traces, `<component>.npy` for every recorded
+        /// component, shaped as `run` writes them.
+        #[arg(long)]
+        observed: PathBuf,
+        /// Where to write results, instead of the configuration's [output] dir.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Weigh each component by 1/(its observed energy), so pressure and velocity count
+        /// alike.
+        #[arg(long)]
+        balance: bool,
     },
 }
 
@@ -68,6 +91,67 @@ fn run() -> Result<()> {
         Command::Check { config } => {
             let (_, sim) = load(&config)?;
             report(&sim);
+        }
+        Command::Gradient {
+            config,
+            observed,
+            out,
+            balance,
+        } => {
+            let (cfg, mut sim) = load(&config)?;
+            let out = out.unwrap_or_else(|| cfg.output.dir.clone());
+            report(&sim);
+            let r = &sim.receivers;
+            let want = [r.nodes.len(), r.samples];
+            let data = r
+                .components
+                .iter()
+                .map(|c| {
+                    let path = observed.join(format!("{}.npy", c.name()));
+                    let (shape, data) =
+                        npy::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                    ensure!(
+                        shape == want,
+                        "{} has shape {shape:?}; the receivers record {want:?} \
+                         (observed and synthetic traces must share their sampling: \
+                         give both configurations the same [time] dt)",
+                        path.display()
+                    );
+                    Ok(data)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let weights = if balance {
+                balancing_weights(&data)
+            } else {
+                vec![1.0; data.len()]
+            };
+            eprintln!("running forward, then the adjoint back with the forward run replayed");
+            let run = gradient(&mut sim, |r| l2_misfit(&r.traces, &data, &weights), None)?;
+            sim.write_outputs(&out)?;
+            let g = sim.solver.grid;
+            let shape = [g.n[2], g.n[1], g.n[0]];
+            let [vp, vs, rho] = run.gradient.velocities(&sim.solver.model);
+            for (name, values) in [("vp", vp), ("vs", vs), ("rho", rho)] {
+                let single: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                npy::write(&out.join(format!("grad_{name}.npy")), &shape, &single)?;
+            }
+            let summary = serde_json::json!({
+                "misfit": run.misfit,
+                "weights": weights,
+                "checkpoint_every": run.checkpoint_every,
+                "checkpoint_bytes": run.checkpoint_bytes,
+            });
+            std::fs::write(
+                out.join("gradient.json"),
+                serde_json::to_string_pretty(&summary)? + "\n",
+            )?;
+            eprintln!(
+                "misfit {:.6e}; checkpoints every {} steps, {:.2} GiB",
+                run.misfit,
+                run.checkpoint_every,
+                run.checkpoint_bytes as f64 / (1u64 << 30) as f64
+            );
+            eprintln!("wrote {}", out.display());
         }
     }
     Ok(())
