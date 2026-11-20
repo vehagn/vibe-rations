@@ -60,6 +60,12 @@ physics *args:
 accuracy:
     cargo test --release --test accuracy -- --ignored --nocapture --test-threads 1
 
+# The reconstruction study: how far the forward wavefield rebuilt backwards drifts, in the
+# field and the gradient, by run length, order, time step and boundary (a few minutes).
+[group("check")]
+drift:
+    cargo test --release --test reconstruction -- --ignored --nocapture --test-threads 1
+
 # rustfmt and clippy with -D warnings
 [group("check")]
 lint:
