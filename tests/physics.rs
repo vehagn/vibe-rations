@@ -399,8 +399,9 @@ fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
             ("cpml", false, "white", 1),
         ] {
             let e = dot_product(order, walls, free_surface, signal, every);
-            // Single precision over about 1300 steps.
-            assert!(e < 1e-5, "order {order}, {walls}, {signal}: {e}");
+            // Measured 2.3e-8 to 8.3e-8: single precision over about 1300 steps. Leaving the
+            // adjoint's initial pressure state unmirrored gives 2.4e-7 to 2.8e-6.
+            assert!(e < 1.5e-7, "order {order}, {walls}, {signal}: {e}");
         }
     }
 }
@@ -438,7 +439,7 @@ fn band_limited(n: usize, seed: u64, f0: f64, dt: f64) -> Vec<f64> {
 }
 
 /// |⟨F w, d̃⟩ - ⟨w, Fᵀ d̃⟩| / ⟨F w, d̃⟩ in the reciprocity test's model, with every component
-/// recorded at four receivers, one on the free surface if there is one. The residuals are the
+/// recorded at five receivers, one on the free surface and one just below it if there is one. The residuals are the
 /// data times random positive weights, so that the terms of ⟨F w, d̃⟩ can't cancel.
 fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, every: usize) -> f64 {
     let pml = if walls == "rigid" { 0 } else { 10 };
@@ -449,6 +450,8 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         [420.0, 260.0, 230.0],
         [300.0, 150.0, shallow + 60.0],
         [250.0, 300.0, 140.0],
+        // One node below the free surface, where the stresses' mirror images reach.
+        [400.0, 120.0, shallow + 10.0],
     ]
     .iter()
     .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
