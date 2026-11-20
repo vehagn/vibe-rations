@@ -27,6 +27,8 @@ opens a shell there instead.
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
 | `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
 | `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
+| `just marmousi2` | Fetch Marmousi2 (467 MB, once) and make its model files for `examples/marmousi2` | ~1 min |
+| `just marmousi2-bench` | Time forward and gradient runs on it at orders 4 and 8, with their memory | ~10 min |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -49,7 +51,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | serve | remote
+  main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | extrude | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
   inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search
@@ -63,6 +65,7 @@ src/
   source.rs      wavelets, moment tensors, how sources enter the grid
   tdt.rs         the time-dispersion transform: pre-warped sources, un-warped traces
   receiver.rs    recording traces through PointOps
+  section.rs     model files from 2D SEG-Y sections: cell averages, smoothing, extrusion along y
   server.rs      `vibe-rations serve`: runs kept for clients that come and go, an HTTP API
   remote.rs      its client: submit, follow, fetch; an SSH tunnel through the system's ssh
   view.rs        sections and gathers of a live run (the browser and the server share it)
@@ -90,7 +93,7 @@ tests/
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
-examples/        annotated configurations
+examples/        annotated configurations; marmousi2/ needs `just marmousi2`'s model files
 ```
 
 ## Conventions
@@ -122,6 +125,16 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Marmousi2** (`just marmousi2`, `examples/marmousi2/`, `vibe-rations extrude`; the log's
+  "Marmousi2"). The model isn't in the repository: the recipe fetches 467 MB of SEG-Y from the
+  Madagascar project's mirror (SEG's own link answers 403) into git-ignored `data/` and checks
+  SHA-256 sums. `extrude` averages a 2D section onto the nodes (Backus's harmonic moduli, a
+  node fluid by majority, so the seafloor stays within half a node) and repeats it along $y$.
+  The soft sediments under the seafloor ($v_s$ from 303 m/s at 25 m) set the grid and hold
+  most of the late energy and the gradient. The whole section's gradient needs 15 GiB, so
+  gradients use the central 6 km (4.3 GiB). Configurations in `examples/` subdirectories are
+  not on the web page (it can't read model files); `tests/examples.rs` parses them and sets
+  them up only where their files exist.
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients
   would otherwise change with every model it tries) as well as $\Delta t$ and

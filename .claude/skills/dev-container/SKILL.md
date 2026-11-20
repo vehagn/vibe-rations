@@ -57,6 +57,11 @@ docker compose -f .devcontainer/compose.yaml up --detach --build --wait
 
 - The Colima VM has 4 CPUs and 8 GiB. `just check <config>` prints a run's memory; keep it
   well under 8 GiB. Expect about 200 Mcell updates/s.
+- Working in a git worktree under the repository (e.g. `.claude/worktrees/<name>`): don't run
+  `just in` there. Its compose file mounts `..`, the worktree, and `up` under the shared
+  project name would recreate the one container with the worktree mounted. Use the main
+  checkout's compose file with `exec -w /workspaces/vibe-rations/<worktree path>`, and a
+  `CARGO_TARGET_DIR` of its own so the two trees don't keep rebuilding each other.
 - "the input device is not a TTY": add `-T` to `docker compose exec` (`just in` does this).
 - A stale build after changing the Containerfile: rebuild as above. The volumes survive;
   `docker compose -f .devcontainer/compose.yaml down --volumes` clears them too.
