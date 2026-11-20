@@ -20,6 +20,7 @@ pub mod npy;
 pub mod receiver;
 #[cfg(feature = "cli")]
 pub mod remote;
+pub mod section;
 #[cfg(feature = "cli")]
 pub mod server;
 pub mod simulation;
