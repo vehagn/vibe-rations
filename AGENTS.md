@@ -16,8 +16,8 @@ opens a shell there instead.
 | Command | Does | Time |
 |---|---|---|
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
-| `just physics` | Whole simulations against analytic answers, misfits printed | ~1.5 min |
-| `just test` | Everything | ~1.5 min |
+| `just physics` | Whole simulations against analytic answers, misfits printed | ~2.5 min |
+| `just test` | Everything | ~2.5 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
