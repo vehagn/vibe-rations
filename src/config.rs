@@ -113,6 +113,10 @@ pub struct BoundaryConfig {
     /// them stable for surface waves in soft, high-Poisson's-ratio media. 0 turns it off.
     #[serde(default = "default_pml_sponge")]
     pub pml_sponge: f64,
+    /// The P-wave speed that sets the layers' damping, in m/s; by default the model's
+    /// fastest. An inversion holds it at the starting model's, so the layers don't change
+    /// as the model does.
+    pub pml_vp_max: Option<f64>,
 }
 
 impl Default for BoundaryConfig {
@@ -125,6 +129,7 @@ impl Default for BoundaryConfig {
             pml_power: default_pml_power(),
             pml_alpha_frequency: None,
             pml_sponge: default_pml_sponge(),
+            pml_vp_max: None,
         }
     }
 }

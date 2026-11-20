@@ -201,12 +201,14 @@ impl Simulation {
             ));
         }
         ensure!(b.pml_sponge >= 0.0, "pml_sponge can't be negative");
+        let pml_vp = b.pml_vp_max.unwrap_or(vp_max);
+        ensure!(pml_vp > 0.0, "pml_vp_max must be positive");
         let pml = PmlSettings {
             power: b.pml_power,
             reflection: b.pml_reflection,
             kappa_max: b.pml_kappa_max,
             alpha_max: PI * b.pml_alpha_frequency.unwrap_or(f_dominant),
-            vp_max,
+            vp_max: pml_vp,
             sponge: b.pml_sponge,
         };
         let solver = Solver::new(model, dt, w, b.free_surface, &pml).with_stencil(stencil);
@@ -754,6 +756,21 @@ mod tests {
         // The bottom layer starts at node 22: node 21 is its first outside node.
         assert_eq!(next("[150.0, 150.0, 210.0]", r#"["vz"]"#), 1);
         assert_eq!(next("[150.0, 150.0, 200.0]", r#"["vz"]"#), 0);
+    }
+
+    /// The layers' damping scales with the speed it is set for, the model's fastest unless
+    /// pml_vp_max says otherwise.
+    #[test]
+    fn pml_vp_max_sets_the_damping() {
+        let damping = |text: &str| {
+            let sim = setup(text).unwrap();
+            sim.solver.cpml[0].profile(crate::cpml::Stagger::Node).d[0]
+        };
+        let model = damping(BASE);
+        let twice = damping(&BASE.replace("pml_width = 8", "pml_width = 8\npml_vp_max = 4000.0"));
+        assert!((twice / model - 2.0).abs() < 1e-6, "{twice} vs {model}");
+        let e = error(&BASE.replace("pml_width = 8", "pml_width = 8\npml_vp_max = 0.0"));
+        assert!(e.contains("pml_vp_max"), "{e}");
     }
 
     #[test]
