@@ -4,6 +4,9 @@
 const $ = (selector) => document.querySelector(selector);
 
 const UNITS = { vx: "m/s", vy: "m/s", vz: "m/s", p: "Pa" };
+// Room around a plot for the tick labels: the y label sits left of them, and the last x label
+// reaches past the edge.
+const MARGIN = { left: 74, right: 30, top: 10, bottom: 42 };
 const NORMAL_AXIS = { xy: 2, xz: 1, yz: 0 };
 
 const state = {
@@ -237,6 +240,7 @@ function drawSection() {
     ...info.receiver_positions.filter(near).map((p) => ({ x: p[coord[h]], y: p[coord[v]], kind: "receiver" })),
     ...info.sources.map((s) => s.position).filter(near).map((p) => ({ x: p[coord[h]], y: p[coord[v]], kind: "source" })),
   ];
+  fitHeight(canvas, extents[h] / extents[v]);
   plot(canvas, section.bitmap, {
     x: [0, extents[h], h === "z" ? "depth" : h],
     y: [0, extents[v], v === "z" ? "depth" : v],
@@ -263,6 +267,15 @@ function drawGather() {
   });
 }
 
+/// Makes a canvas as tall as an image of this aspect needs at its width, within limits, so
+/// there's no empty band under a wide section.
+function fitHeight(canvas, aspect) {
+  const width = canvas.getBoundingClientRect().width;
+  const fit = (width - MARGIN.left - MARGIN.right) / aspect + MARGIN.top + MARGIN.bottom;
+  const max = Math.min(window.innerHeight * 0.65, 680);
+  canvas.style.height = `${Math.round(Math.max(180, Math.min(max, fit)))}px`;
+}
+
 function clearCanvas(canvas) {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -280,8 +293,7 @@ function plot(canvas, image, { x, y, aspect, smooth, markers }) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, box.width, box.height);
 
-  // Room for the tick labels: the y label sits left of them, the last x label past the edge.
-  const margin = { left: 74, right: 30, top: 10, bottom: 42 };
+  const margin = MARGIN;
   let w = box.width - margin.left - margin.right;
   let h = box.height - margin.top - margin.bottom;
   if (aspect) {
@@ -308,14 +320,14 @@ function plot(canvas, image, { x, y, aspect, smooth, markers }) {
   const py = (v) => top + ((v - y[0]) / (y[1] - y[0] || 1)) * h;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  for (const t of ticks(x[0], x[1])) {
+  for (const t of ticks(x[0], x[1], Math.max(2, Math.floor(w / 85)))) {
     ctx.fillRect(px(t), top + h, 1, 4);
     ctx.fillText(fx(t), px(t), top + h + 6);
   }
   ctx.fillText(x[2], left + w / 2, top + h + 24);
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
-  for (const t of ticks(y[0], y[1])) {
+  for (const t of ticks(y[0], y[1], Math.max(2, Math.floor(h / 45)))) {
     ctx.fillRect(left - 4, py(t), 4, 1);
     ctx.fillText(fy(t), left - 7, py(t));
   }
@@ -354,11 +366,11 @@ function star(ctx, x, y, outer, inner) {
   ctx.closePath();
 }
 
-/// About six round numbers between `lo` and `hi`.
-function ticks(lo, hi) {
+/// About `count` round numbers between `lo` and `hi`.
+function ticks(lo, hi, count) {
   const span = hi - lo;
   if (!(span > 0)) return [lo];
-  const raw = span / 6;
+  const raw = span / Math.min(count, 8);
   const mag = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw);
   const out = [];

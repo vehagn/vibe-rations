@@ -309,6 +309,7 @@ canvas {
 }
 
 canvas.section {
+  /* app.js fits the height to the section's proportions. */
   height: min(62vh, 640px);
 }
 
@@ -363,7 +364,8 @@ a {
     grid-template-columns: 1fr;
   }
 
-  canvas.section {
-    height: 52vh;
+  /* The pictures first, the controls after. */
+  .views {
+    order: -1;
   }
 }
