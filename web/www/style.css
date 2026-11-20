@@ -200,6 +200,16 @@ textarea {
   resize: vertical;
 }
 
+.check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .memory {
   margin-top: 6px;
   color: var(--muted);

@@ -3,6 +3,9 @@
 // carry on when the page is closed, and the page can attach to them again.
 
 const POLL_MS = 200;
+// With live pictures off: progress only, and seldom. The server sees nobody asking for
+// pictures and runs the run headless, in longer chunks.
+const HEADLESS_POLL_MS = 2000;
 
 async function call(method, path, body) {
   const response = await fetch(path, { method, body });
@@ -30,6 +33,7 @@ export class RemoteSolver {
     this.polling = false;
     this.stopped = false;
     this.view = { field: "vz", plane: "xz", index: 0, gain: 1, gather: null, gatherRows: 600 };
+    this.live = true;
     this.ready();
   }
 
@@ -48,6 +52,7 @@ export class RemoteSolver {
       run: this.resume,
       pause: this.pause,
       view: this.setView,
+      live: this.setLive,
       npy: this.npy,
       estimate: this.estimate,
     }[message.type];
@@ -139,6 +144,17 @@ export class RemoteSolver {
     }
   }
 
+  async setLive({ on }) {
+    this.live = on;
+    if (on && this.id && !this.polling) {
+      try {
+        await this.frame(await json("GET", run(this.id)));
+      } catch (e) {
+        this.fail("view", e);
+      }
+    }
+  }
+
   async npy({ component }) {
     try {
       const response = await call("GET", run(this.id, `/traces/${component}.npy`));
@@ -167,7 +183,7 @@ export class RemoteSolver {
         const s = await json("GET", run(id));
         const ongoing = await this.report(s);
         if (!ongoing) break;
-        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+        await new Promise((resolve) => setTimeout(resolve, this.live ? POLL_MS : HEADLESS_POLL_MS));
       }
     } catch (e) {
       this.fail("run", e);
@@ -176,9 +192,9 @@ export class RemoteSolver {
     }
   }
 
-  /// Sends the picture and the state for status `s`; whether the run is still going.
+  /// Sends the progress (and pictures) and the state for status `s`; whether it is still going.
   async report(s) {
-    if (s.live) await this.frame(s);
+    if (s.live || !this.live) await this.frame(s);
     const running = s.phase === "running";
     this.send({ type: "state", running, done: s.phase === "done" });
     if (s.phase === "failed" || s.phase === "interrupted") this.fail("run", s.error ?? s.phase);
@@ -186,6 +202,8 @@ export class RemoteSolver {
   }
 
   async frame(s) {
+    const progress = { type: "frame", step: s.step, totalSteps: s.total_steps, time: s.time, speed: s.speed };
+    if (!this.live) return this.send({ ...progress, section: null, gather: null });
     const v = this.view;
     const query = new URLSearchParams({ field: v.field, plane: v.plane, index: v.index, gain: v.gain });
     const section = await call("GET", run(this.id, `/section?${query}`));

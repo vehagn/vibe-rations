@@ -48,6 +48,7 @@ const on = {
     $("#stat-threads").textContent =
       (threads > 1 ? `${threads}` : isolated ? "1" : "1 (page not isolated)") + (server ? " on the server" : "");
     setStatus("ready", "Solver ready");
+    worker.postMessage({ type: "live", on: $("#live").checked });
     if (server) refreshRuns();
     // Switching solvers keeps the configuration being edited.
     if (state.switched) load($("#editor").value);
@@ -83,13 +84,16 @@ const on = {
     else if (state.info) setStatus("ready", state.step > 0 ? "Paused" : "Ready to run");
   },
   frame(f) {
-    state.section?.bitmap.close();
-    state.section = f.section;
+    // Without live pictures, progress only: the last pictures stay.
+    if (f.section) {
+      state.section?.bitmap.close();
+      state.section = f.section;
+      state.clip = f.clip;
+    }
     if (f.gather) {
       state.gather?.bitmap.close();
       state.gather = f.gather;
     }
-    state.clip = f.clip;
     state.step = f.step;
     updateProgress(f);
     draw();
@@ -293,6 +297,7 @@ for (const input of document.querySelectorAll('input[name="compute"]')) {
   });
 }
 $("#server-runs").addEventListener("focus", refreshRuns);
+$("#live").addEventListener("change", (e) => worker.postMessage({ type: "live", on: e.target.checked }));
 $("#server-runs").addEventListener("change", (e) => {
   if (!e.target.value) return;
   state.section?.bitmap.close();

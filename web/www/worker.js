@@ -3,6 +3,8 @@
 // and of the gather after each chunk, so the page stays responsive and pausing is immediate.
 
 const CHUNK_MS = 50;
+// With live pictures off, longer chunks and progress only: more of the machine for the run.
+const HEADLESS_CHUNK_MS = 500;
 
 // Threads need SharedArrayBuffer, so a cross-origin-isolated page; otherwise one thread. The
 // page can ask for a number with ?threads=N.
@@ -13,6 +15,7 @@ let Simulator;
 let sim = null;
 let running = false;
 let view = { field: "vz", plane: "xz", index: 0, gain: 1, gather: null, gatherRows: 600 };
+let live = true;
 // Steps per chunk, adapted to the machine; and work done, for the speed figure.
 let chunk = 1;
 let work = { steps: 0, ms: 0 };
@@ -20,18 +23,21 @@ let work = { steps: 0, ms: 0 };
 const send = (message, transfer = []) => postMessage(message, transfer);
 const fail = (during, e) => send({ type: "error", during, message: String(e?.message ?? e) });
 
+/// The run's progress, and its pictures if they are live.
 async function frame() {
-  const section = sim.section(view.field, view.plane, view.index, view.gain);
   const message = {
     type: "frame",
     step: sim.step,
     totalSteps: sim.totalSteps,
     time: sim.time,
     speed: work.ms > 0 ? (sim.cells * work.steps) / (work.ms * 1e3) : 0,
-    section: await bitmap(section),
-    clip: section.clip,
+    section: null,
     gather: null,
   };
+  if (!live) return send(message);
+  const section = sim.section(view.field, view.plane, view.index, view.gain);
+  message.section = await bitmap(section);
+  message.clip = section.clip;
   section.free();
   if (view.gather) {
     const g = sim.gather(view.gather, view.gatherRows);
@@ -63,7 +69,8 @@ async function loop() {
     const ms = performance.now() - t0;
     work.steps += taken;
     work.ms += ms;
-    chunk = Math.max(1, Math.min(500, Math.round((chunk * CHUNK_MS) / Math.max(ms, 1))));
+    const target = live ? CHUNK_MS : HEADLESS_CHUNK_MS;
+    chunk = Math.max(1, Math.min(5000, Math.round((chunk * target) / Math.max(ms, 1))));
     await frame();
     // Let messages (pause, view changes) in before the next chunk.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -116,6 +123,16 @@ const handlers = {
       send({ type: "estimate", id, memory: JSON.parse(Simulator.estimateMemory(toml)) });
     } catch (e) {
       send({ type: "estimate", id, error: String(e?.message ?? e) });
+    }
+  },
+  async live({ on }) {
+    live = on;
+    if (sim && !running && on) {
+      try {
+        await frame();
+      } catch (e) {
+        fail("view", e);
+      }
     }
   },
   async npy({ component }) {
