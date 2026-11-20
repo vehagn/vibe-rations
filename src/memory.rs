@@ -143,12 +143,25 @@ pub fn estimate(cfg: &Config, base: &Path) -> Result<Memory> {
     Ok(Plan::new(cfg, grid, t.steps)?.memory())
 }
 
-/// Memory the system can still give a process, from /proc/meminfo's MemAvailable (Linux).
+/// Memory the system can still give this process (Linux): /proc/meminfo's MemAvailable, or
+/// less if a cgroup (a container's memory limit) allows less.
 pub fn available() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kib * 1024)
+    let system = (|| {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib * 1024)
+    })();
+    let cgroup = (|| {
+        let read = |f: &str| std::fs::read_to_string(format!("/sys/fs/cgroup/{f}")).ok();
+        let max: u64 = read("memory.max")?.trim().parse().ok()?;
+        let used: u64 = read("memory.current")?.trim().parse().ok()?;
+        Some(max.saturating_sub(used))
+    })();
+    match (system, cgroup) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Bytes for people: B, KiB, MiB or GiB.

@@ -15,6 +15,10 @@ pub mod memory;
 pub mod model;
 pub mod npy;
 pub mod receiver;
+#[cfg(feature = "cli")]
+pub mod remote;
+#[cfg(feature = "cli")]
+pub mod server;
 pub mod simulation;
 pub mod snapshot;
 pub mod solver;
