@@ -137,12 +137,17 @@ fn run_fires_shots_one_at_a_time() {
         "--shots",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    for shot in ["shot-000", "shot-001"] {
+    for (shot, at) in [
+        ("shot-000", [120.0, 120.0, 60.0]),
+        ("shot-001", [60.0, 120.0, 60.0]),
+    ] {
         assert!(out_dir.join(shot).join("vz.npy").is_file(), "{shot}");
         let info: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(out_dir.join(shot).join("run.json")).unwrap())
                 .unwrap();
-        assert_eq!(info["sources"].as_array().unwrap().len(), 1, "{shot}");
+        let sources = info["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1, "{shot}");
+        assert_eq!(sources[0]["position"], serde_json::json!(at), "{shot}");
     }
     assert!(!out_dir.join("shot-002").exists());
     fs::remove_dir_all(dir).unwrap();
@@ -248,10 +253,15 @@ fn invert_writes_the_model_and_its_history() {
     let err = stderr(&out);
     assert!(out.status.success(), "{err}");
     assert!(err.contains("iteration   1"), "{err}");
-    for name in ["vp", "vs", "rho"] {
-        let bytes = fs::read(model_out.join(format!("{name}.npy"))).unwrap();
-        assert_eq!(bytes.len(), 128 + 4 * 24 * 24 * 20, "{name}.npy");
+    // Shaped like model files, (nz, ny, nx), and changed from the start somewhere.
+    let mut moved = false;
+    for (name, start) in [("vp", 2080.0), ("vs", 1000.0), ("rho", 2000.0)] {
+        let (shape, values) =
+            vibe_rations::npy::read(&model_out.join(format!("{name}.npy"))).unwrap();
+        assert_eq!(shape, vec![20, 24, 24], "{name}.npy");
+        moved |= values.iter().any(|&v| v != start);
     }
+    assert!(moved, "the inverted model is the starting one");
     let info: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(model_out.join("inversion.json")).unwrap())
             .unwrap();
