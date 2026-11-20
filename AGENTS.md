@@ -1,22 +1,24 @@
 # vibe-rations, for coding agents
 
-A 3D elastic wave simulator (fourth-order staggered-grid velocity–stress finite differences,
-CPML, free surface), built as the forward engine for elastic full waveform inversion (FWI).
-The [README](README.md) explains the numerics and how they are verified; this file is what
-an agent needs to work on it, and the notes below record why things are the way they are.
+A 3D elastic wave simulator (staggered-grid velocity–stress finite differences, eighth order
+in space by default, CPML, free surface), built as the forward engine for elastic full
+waveform inversion (FWI) and as the basis of a paper. The [README](README.md) explains the
+numerics and how they are verified; [docs/research-log.md](docs/research-log.md) records the
+experiments; this file is what an agent needs to work on it, and the notes below record why
+things are the way they are.
 
 ## Commands
 
-Everything runs in the dev container; nothing is installed on the host. From the host,
+Everything is built in the dev container; nothing is installed on the host. From the host,
 `just in <recipe>` runs a recipe in the container (starting it if need be); `just dev`
 opens a shell there instead.
 
 | Command | Does | Time |
 |---|---|---|
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
-| `just physics` | Whole simulations against analytic answers, misfits printed | ~20 s |
-| `just test` | Everything | ~35 s |
-| `just accuracy` | The stencil order and time step study (prints a table) | ~1.5 min |
+| `just physics` | Whole simulations against analytic answers, misfits printed | ~1.5 min |
+| `just test` | Everything | ~1.5 min |
+| `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
@@ -35,7 +37,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 | `verify-solver` | Changing the solver, layers, free surface, sources or receivers; adding a physics test |
 | `debug-instability` | A run blows up or doesn't drain |
 | `conventional-commit` | Committing work |
-| `fwi-literature` | Looking up the theory: adjoints, kernels, misfits, PML, free surface |
+| `fwi-literature` | Looking up the theory: adjoints, kernels, misfits, PML, free surface; citing it |
 | `web-app` | Changing, building, testing or deploying the browser front end |
 
 ## Map
@@ -43,8 +45,8 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 ```
 src/
   main.rs        the CLI: run | check
-  config.rs      the TOML configuration (serde, deny_unknown_fields)
-  grid.rs        the grid and its two-node halo, indexing
+  config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
+  grid.rs        the grid and its halo (as wide as the stencil), indexing
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
   solver.rs      fields, staggered material, the update kernels, free surface, PointOp
   fd.rs          the staggered Stencil (Taylor, order 2–16), a row at a time
@@ -60,6 +62,10 @@ web/
   build.sh       builds web/dist: single-threaded and threaded WebAssembly, page, examples
   sws.toml       static-web-server settings, with the cross-origin isolation headers
   Containerfile  the hosted image
+docs/
+  references.bib every work cited anywhere in the repository
+  research-log.md experiments, results and decisions, for the paper
+  analysis/      von Neumann dispersion analysis (pure Python)
 deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 .github/workflows/  ci.yaml (`just ci`), web.yaml (builds and pushes the image)
 tests/
@@ -78,12 +84,21 @@ examples/        annotated configurations
   the maintainer's global config), one logical change each, and `just ci` green before each.
   Commit as you go, on a branch rather than `main`. The `conventional-commit` skill has the
   details.
+- **Citations:** every work cited anywhere (code, docs, commits, skills) gets an entry in
+  `docs/references.bib`, checked against the paper or its Crossref record, with a `note` for
+  anything unchecked. Prose cites by author and year; the research log by key, `[@key]`.
+- **Research log:** every experiment that informs a decision goes in
+  `docs/research-log.md`: question, method, results (with numbers), decision, and how to
+  reproduce it. That is the raw material for the paper.
+- **Math** in Markdown is LaTeX: `$…$` inline, `$$…$$` displayed. Code comments may use
+  Unicode, since rustdoc doesn't render LaTeX.
 - **Tests:** unit tests sit next to the code in `#[cfg(test)] mod tests`; anything that
   runs a whole simulation goes in `tests/physics.rs`. New behaviour gets a test. Don't
-  loosen a physics tolerance to make a change pass; the baselines are below.
+  loosen a physics tolerance to make a change pass. When a deliberate change trades one
+  baseline for another, record both numbers in the test's doc comment, here and in the log.
 - **Sources are the transpose of receivers** (`Solver::stagger_weights`, `PointOp`).
-  Adjoint FWI depends on it; the reciprocity test checks it to 1e-6.
-- SI units; z points down; arrays are x-fastest, padded by `grid::HALO` = 2 nodes.
+  Adjoint FWI depends on it; the reciprocity test checks it to $10^{-6}$.
+- SI units; $z$ points down; arrays are $x$-fastest, padded by `grid.halo` nodes.
 - Comments say why, not what. Doc comments on public items.
 
 ## Notes
@@ -91,14 +106,25 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
-- **Stencil order and the time step go together** (`just accuracy`, README "Accuracy").
-  Order 4 at courant 0.85 benefits from cancelling time and space errors; orders ≥ 8 at
-  0.85 are *worse* than order 4, and only beat it at courant ≈ 0.3–0.5. Order 8 at 0.3 needs
-  ~4.5 points per S wavelength for ~1% after ten wavelengths, where order 4 needs ~8–9:
-  about 3.4× less compute and 5.5× less memory. The halo widens to the stencil's
-  half-length; free-surface mirroring stays self-adjoint at every order (reciprocity checked
-  at orders 4 and 8). Time–space-optimised coefficients looked good for one speed in a
-  von Neumann analysis and failed for other speeds, so they were not adopted.
+- **Error propagation into adjoint fields** is a main research interest for what comes next:
+  forward-field error (dispersion, interfaces, free surface, layers), reconstruction error,
+  and their effect on gradients. Design the adjoint so each can be measured separately (see
+  the log's open questions).
+- **Physics test baselines at the default, order 8 with $C = 0.3$** (fail if they get worse;
+  update this list if they get better): explosion vs analytic 0.11–0.26%; point force vs
+  Stokes 0.07–0.18%; free-surface P doubling 2.4%; CPML reflection $3.9 \times 10^{-4}$ of the
+  peak without a free surface, $2.1 \times 10^{-3}$ along one; reciprocity
+  $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the 9 s soft-sediment run drains to
+  $\le 3 \times 10^{-6}$ of its peak. At order 4 with $C = 0.85$ they were 0.7–1.6%,
+  0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
+- **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at
+  $C = 0.85$ benefits from cancelling time and space errors; orders $\ge 8$ at 0.85 are
+  *worse* than order 4, and only beat it at $C \approx 0.3$–$0.5$. Order 8 at 0.3 needs about
+  4.5 points per S wavelength for about 1% after ten wavelengths, where order 4 needs 8–9:
+  about 3.4× less compute and 5.5× less memory. The price: the stress-imaging free surface
+  (second order) is now the largest error in its test (2.4%), and layer reflection rose to
+  $-68$ dB. Time–space-optimised coefficients looked good for one speed in a von Neumann
+  analysis and failed for other speeds, so they were not adopted. Details: the log.
 - **Threads in the browser** need four things, each of which failed once: (1) a std built
   with atomics: nightly `-Z build-std=panic_abort,std`, pinned in `web/build.sh` and both
   Containerfiles; (2) explicit linker flags for an imported, shared memory and the TLS
@@ -108,7 +134,7 @@ doesn't show.
   resolve, so `build.sh` rewrites it to the module file; (4) a cross-origin-isolated page
   (COOP/COEP in `web/sws.toml`). Without isolation the page falls back to the
   single-threaded build.
-- **Browser speeds:** 51 Mcell/s on one thread with SIMD128 (about native per core),
+- **Browser speeds** (order 4): 51 Mcell/s on one thread with SIMD128 (about native per core),
   234 Mcell/s on 10 threads. The built-in browser pane runs as a background page while it
   is hidden and gets throttled (down to 6–7 Mcell/s), so only measure speed with it visible.
 - **Web rendering:** sections are interpolated (bilinear, on values) up to ~600 px before
@@ -119,38 +145,34 @@ doesn't show.
   mount of a deleted directory serves 404s until the server restarts.
 - **Compute:** compile in the dev container; running what it builds on the host is fine (the
   maintainer wants the extra cores), e.g. the web app in a browser on the host.
-- **Physics test baselines** (fail if they get worse; update this list if they get better):
-  explosion vs analytic 0.7–1.6%; point force vs Stokes 0.3–0.8%; free-surface P doubling
-  1.9%; CPML reflection 0.015% of peak without a free surface, 0.18% along one; reciprocity
-  ≤ 1e-6; the 9 s soft-sediment run drains to 4e-6 of its peak.
-- **Snapshots:** colour ∝ √amplitude, scaled by the 99.5th percentile of |value|. A
+- **Snapshots:** colour $\propto \sqrt{|u|}$, scaled by the 99.5th percentile of $|u|$. A
   Gaussian moment rate leaves a static stress at the source that swamps pressure (`p`)
   sections; velocity has no static part, so the examples snapshot velocity. In a soft
   near-surface layer the surface amplitudes dominate a vertical section; that is physics.
 - **The CPML instability along a free surface.** With a free surface, a soft layer
-  (vp/vs ≈ 3.3) and CPML side layers, the field grew exponentially from about 2 s,
+  ($v_p/v_s \approx 3.3$) and CPML side layers, the field grew exponentially from about 2 s,
   starting in the layer corners at the surface (Festa et al. 2005). The free surface alone
-  (no PML) was stable; larger α, κ_max = 4 and a smaller dt didn't help. The fix is a plain
-  damping exp(-p·d·x³·dt) in the x and y layers, only when there is a free surface:
-  `pml_sponge`, default 0.2. Measured trade-off (reflection at 9 nodes from the layer /
-  stable?): d·x⁰ with p 0.1: 0.23% / yes; d·x² 0.1: 0.06–0.15% / yes; d·x⁴ 0.05: — / no;
-  d·x³ 0.2 on side layers only: 0.07–0.18% / yes.
-- **Sources on the free surface act on half a cell.** vx, vy, σxx, σyy, σzz and σxy on
-  the surface plane stand for half a cell (their other half is the mirror image), so their
-  source weights are doubled (`Solver::cell_share`). Without it, reciprocity with one end on
-  the surface was off by exactly 2.
+  (no PML) was stable; larger $\alpha$, $\kappa_{\max} = 4$ and a smaller $\Delta t$ didn't
+  help. The fix is a plain damping $\exp(-p\, d\, \xi^3 \Delta t)$ in the $x$ and $y$ layers,
+  only when there is a free surface: `pml_sponge`, default $p = 0.2$. The measured trade-off
+  is in the log.
+- **Sources on the free surface act on half a cell.** $v_x$, $v_y$, $\sigma_{xx}$,
+  $\sigma_{yy}$, $\sigma_{zz}$ and $\sigma_{xy}$ on the surface plane stand for half a cell
+  (their other half is the mirror image), so their source weights are doubled
+  (`Solver::cell_share`). Without it, reciprocity with one end on the surface was off by
+  exactly 2.
 - **The free surface mirrors velocities evenly.** First version: second-order derivatives
   next to the surface. They were not the adjoint of the stress-imaging operators, energy
-  wasn't conserved, and the free-surface misfit was 7.6%. Mirroring vx, vy and vz evenly
-  (σ oddly) makes the pair adjoint, keeps fourth order everywhere, and brought it to 1.9%.
-  The textbook image method (Fichtner 2011 §3.2.3; Graves 1996) instead derives the
+  wasn't conserved, and the free-surface misfit was 7.6%. Mirroring $v_x$, $v_y$ and $v_z$
+  evenly ($\sigma$ oddly) makes the pair adjoint for any stencil length and brought it to
+  1.9%. The textbook image method (Fichtner 2011 §3.2.3; Graves 1996) instead derives the
   velocities above the surface from the boundary conditions. It hasn't been tried here; any
   alternative must pass the reciprocity and long-run tests.
 - **Cubic interpolation for receivers and sources.** Averaging two staggered values onto a
-  node costs ~cos(kh/2), about 2% at 8 points per wavelength; cubic weights
-  (-1, 9, 9, -1)/16 cut the misfits roughly threefold.
-- **Performance:** about 200–230 Mcell updates/s on the container's 4 cores (Apple
-  Silicon, Colima VM with 8 GiB). Memory is 17 padded f32 arrays plus CPML memory: the
-  examples need 0.1–0.25 GiB. The work splits by z-plane, each plane a row at a time
-  through nine scratch rows.
+  node costs about $\cos(kh/2)$, roughly 2% at 8 points per wavelength; cubic weights
+  $(-1, 9, 9, -1)/16$ cut the misfits roughly threefold.
+- **Performance** on the container's 4 cores (Apple Silicon, Colima VM with 8 GiB): order 4
+  about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105. Memory is 17 padded f32
+  arrays plus CPML memory: the examples need 0.1–0.2 GiB. The work splits by $z$-plane, each
+  plane a row at a time through nine scratch rows.
 - **Next:** elastic FWI; the README's roadmap lists the steps.

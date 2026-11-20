@@ -38,7 +38,8 @@ mangled; read the rendered page with your PDF-reading tool when the details matt
 
 Search file names with `ls ~/claude/papers | grep -i <word>`. The most useful:
 
-- Velocity–stress FD: Virieux 1984 and 1986.
+- Velocity–stress FD: Virieux 1986 (two copies; the file named "Virieux_1984_P-SV…" is the
+  1986 paper too).
 - FWI foundations: Tarantola 1984, 1986, 1988; Mora 1987; Gauthier 1986.
 - Adjoints and kernels: Tromp, Tape & Liu 2005; Fichtner, Bunge & Igel 2006; Fichtner &
   Trampert 2011 (Hessians, resolution).
@@ -49,5 +50,20 @@ Search file names with `ls ~/claude/papers | grep -i <word>`. The most useful:
 - Multiscale: Fichtner et al. 2013.
 - Misfits: Engquist & Froese 2014, Yang, Engquist & Sun 2016 (Wasserstein).
 
-Cite what you use in doc comments and commit messages, as the code does (e.g. "Levander
-1988", "Komatitsch & Martin 2007").
+Not in the library but cited here (see `docs/references.bib`): Levander 1988, Graves 1996,
+Holberg 1987, Liu & Sen 2011, Moczo et al. 2011, Mittet 2002, Kristek et al. 2002, Hicks 2002,
+Collino & Tsogka 2001, Komatitsch & Martin 2007, Festa et al. 2005, Meza-Fajardo &
+Papageorgiou 2008, Dussaud et al. 2008. In the library and used for the wavefield
+reconstruction plan: Aaker, Raknes & Arntsen 2020 ("Aaker2020_Article_…").
+
+## Citing
+
+The maintainer is writing a paper on this simulator, so every citation counts:
+
+1. Add an entry to `docs/references.bib` for anything you cite anywhere: code comments, docs,
+   commits, skills. Check it against the paper (its first page:
+   `pdftotext -f 1 -l 1 <file> - | head`) or its Crossref record
+   (`curl -s https://api.crossref.org/works/<doi>`); put what you couldn't check in a `note`.
+2. Cite by author and year in prose and code ("Levander 1988"), by key in the research log
+   (`[@levander1988]`).
+3. Record the experiment that the citation supports in `docs/research-log.md`.

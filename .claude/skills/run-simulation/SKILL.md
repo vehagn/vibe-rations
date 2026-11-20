@@ -19,15 +19,20 @@ Positions are metres from the first node; z points down; with `free_surface = tr
 
 Check these before running; `just in check <config>` prints all of them:
 
-- **Points per wavelength ≥ 5.** h ≤ v_slow / (5 · 2.5 · f0), with v_slow the slowest S
-  speed (P in fluids) and f0 the wavelet frequency. It warns below 5.
+- **Points per wavelength.** At the default eighth order, at least 4.5 for about 1% misfit
+  after ten wavelengths (it warns below 4): $h \le v_{\text{slow}} / (4.5 \cdot 2.5 f_0)$, with
+  $v_{\text{slow}}$ the slowest S speed (P in fluids) and $f_0$ the wavelet frequency. Fourth
+  order needs 8–9 for the same accuracy (README, "Accuracy").
 - **Absorbing layers** of `pml_width` nodes (default 20, at least 10) line the sides and
   bottom. They are inside the grid, so add 2 × `pml_width` nodes to the region of interest
   and keep sources and receivers out of them (it warns).
-- **Time step:** automatic at `courant` (0.85) of the limit
-  dt ≤ 1 / (vp_max · 7/6 · √(1/dx² + 1/dy² + 1/dz²)). The fastest vp sets it.
-- **Cost:** memory ≈ 4 bytes × 17 × (nx+4)(ny+4)(nz+4) plus the layers' memory; time ≈
-  nodes × steps / 2e8 seconds on the container's 4 cores. Keep memory under ~6 GiB.
+- **Time step:** automatic at a fraction $C$ of the limit (0.3 at orders above 4, 0.85 at
+  4), $\Delta t \le 1 / \big(v_{p,\max} \sum_n |c_n| \sqrt{\Delta x^{-2} + \Delta y^{-2} + \Delta z^{-2}}\big)$.
+  The fastest $v_p$ sets it. Don't raise $C$ at order 8: accuracy collapses.
+- **Cost:** memory $\approx 4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
+  layers' memory, with $L$ the stencil half-length (4 at order 8); time
+  $\approx$ nodes $\times$ steps $/\, 1.6 \times 10^8$ seconds on the container's 4 cores at order 8.
+  Keep memory under ~6 GiB.
 
 ## 3. Sources and wavelets
 
@@ -56,7 +61,7 @@ In `[output] dir`:
 | `receivers.csv` | receiver positions after snapping to nodes |
 | `run.json` | dt, steps, accuracy figures, warnings |
 | `*_gather.png` | a column per receiver, time down, each trace scaled to its own peak |
-| `snapshots/<field>_<plane><index>_<step>.png` | blue negative, red positive, colour ∝ √amplitude; grey shows the model, darker in the layers |
+| `snapshots/<field>_<plane><index>_<step>.png` | blue negative, red positive, colour $\propto \sqrt{|u|}$; grey shows the model, darker in the layers |
 
 Look at the PNGs with your image-reading tool, a mid-run snapshot and the last one at
 least. Check that waves leave through the darker layers without coming back, and that the

@@ -15,20 +15,22 @@ independent answers show the physics is right. Any change to `solver.rs`, `cpml.
 just in physics
 ```
 
-It prints a line per check. Compare with the baselines in the Notes of `AGENTS.md`:
+It prints a line per check. Compare with the baselines in the Notes of `AGENTS.md` (these
+are at the default, order 8 with $C = 0.3$):
 
 | Test | Baseline | Breaks when |
 |---|---|---|
-| `an_explosion_matches_the_full_space_solution` | 0.7–1.6% | stencils, stress injection, timing, receiver interpolation |
-| `a_point_force_matches_stokes_solution` | 0.3–0.8% | velocity injection, buoyancy, S waves, shear averaging |
-| `the_free_surface_doubles_a_vertically_incident_p_wave` | 1.9% | free-surface condition, mirroring, surface sampling |
-| `absorbing_layers_reflect_little` (± free surface) | 0.015% / 0.18% | CPML profiles or memory, the sponge |
-| `swapping_source_and_receiver_gives_the_same_trace` | ≤ 1e-6 | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
-| `a_long_run_stays_stable_and_drains` | 4e-6 | instabilities (see `debug-instability`) |
+| `an_explosion_matches_the_full_space_solution` | 0.11–0.26% | stencils, stress injection, timing, receiver interpolation |
+| `a_point_force_matches_stokes_solution` | 0.07–0.18% | velocity injection, buoyancy, S waves, shear averaging |
+| `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.4% | free-surface condition, mirroring, surface sampling |
+| `absorbing_layers_reflect_little` (± free surface) | $3.9 \times 10^{-4}$ / $2.1 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
+| `swapping_source_and_receiver_gives_the_same_trace` | $\le 1.5 \times 10^{-6}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
+| `a_long_run_stays_stable_and_drains` | $\le 3 \times 10^{-6}$ | instabilities (see `debug-instability`) |
 
 A number that got worse is a regression even if the test passes. Find out why before
 going on. Never loosen a tolerance to get a change through. If a change makes a number
-better, tighten the tolerance and update the baseline in `AGENTS.md`.
+better, tighten the tolerance and update the baseline in `AGENTS.md`. Record what you
+measured in `docs/research-log.md`.
 
 Changes to the stencils or the time stepping also need `just in accuracy`: compare its table
 with the README's "Accuracy" section. Physics tests that exercise the free surface and
@@ -38,12 +40,14 @@ stability (`swapping_source_and_receiver_gives_the_same_trace`,
 ## 2. Reading misfits
 
 - A misfit that **grows with distance** is phase error: dispersion (too few points per
-  wavelength) or a timing offset. Velocities are at (n + ½)·dt, forces enter at n·dt and
-  moments at (n + ½)·dt.
+  wavelength, or too large a time step for the order) or a timing offset. Velocities are at
+  $(n + \tfrac12)\Delta t$, forces enter at $n \Delta t$ and moments at
+  $(n + \tfrac12)\Delta t$.
 - **The same misfit at every distance** is amplitude or position error: interpolation
   weights, the source scaling (dt/V, buoyancy), or a half-node offset.
 - **Exactly a factor 2 or a sign:** half-cell shares on the free surface
-  (`Solver::cell_share`), the mirror parities, or the moment-tensor sign (σ -= dt·Ṁ/V).
+  (`Solver::cell_share`), the mirror parities, or the moment-tensor sign
+  ($\sigma_{ij} \mathrel{-}= \Delta t\, \dot{M}_{ij} / V$).
 - **Reciprocity off at 1e-3 or more:** an asymmetry between injection and sampling, or
   between the operators that differentiate stress and velocity.
 
@@ -57,9 +61,10 @@ number (`println!`, shown by `just physics`) and set the tolerance just above it
 
 Closed-form references already in the file (Aki & Richards 2002, §4.2–4.3):
 
-- Explosion with moment rate m0·w(t): radial velocity
-  v = m0/(4πρα²)·[w(τ)/r² + w'(τ)/(α r)], τ = t − r/α (`explosion_velocity`).
-- Point force f·w(t) along x: Stokes' solution, differentiated in time, with the near-field
+- Explosion with moment rate $m_0 w(t)$: radial velocity
+  $v_r = \frac{m_0}{4\pi\rho\alpha^2}\big[\frac{w(\tau)}{r^2} + \frac{w'(\tau)}{\alpha r}\big]$,
+  $\tau = t - r/\alpha$ (`explosion_velocity` in `tests/common`).
+- Point force $f\,w(t)$ along $x$: Stokes' solution, differentiated in time, with the near-field
   integral by the trapezium rule (`force_velocity`).
 
 Good next references: Lamb's problem (a force on the free surface; Pekeris 1955 for a
