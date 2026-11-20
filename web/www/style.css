@@ -29,6 +29,12 @@
   }
 }
 
+/* The hidden attribute must win over the display a class sets (.field is flex): without
+   this, controls the page hides, such as the server's, show anyway. */
+[hidden] {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
 }
