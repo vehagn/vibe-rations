@@ -37,6 +37,7 @@ Then, in the container:
 | `just lint` | rustfmt and clippy with `-D warnings` |
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
+| `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory") |
 | `just run <config>` | Runs a simulation |
 | `just web` | Builds the web app into `web/dist` |
 
@@ -124,6 +125,36 @@ In the output directory:
 import numpy as np
 vz, t = np.load("out/explosion/vz.npy"), np.load("out/explosion/time.npy")
 ```
+
+## Memory
+
+`just memory <config>` (`vibe-rations memory`) works out what a run needs without building
+it, so a model of any size gets an answer at once:
+
+```
+      14 GiB  wavefield: 9 arrays on the padded grid
+      12 GiB  material: 8 arrays on the padded grid
+    4.49 GiB  model: vp, vs and rho
+     955 MiB  absorbing layers' memory
+      13 KiB  sources' pre-warped time series
+    1.79 MiB  traces
+      32 GiB  held throughout the run
+      32 GiB  at most, plus a few MiB
+    7.13 GiB  available now
+```
+
+That is `examples/layered.toml` on a $1001 \times 1001 \times 401$ grid. Per node of the grid
+padded by the stencil's half-length, the wavefield and material take 68 bytes; the model 12
+bytes per interior node; the absorbing layers 24 bytes per layer node; the traces 4 bytes per
+sample per receiver and component; with the time error removed, each source 8 bytes per time
+step; and a volume snapshot needs 32 bytes per node more while it is written. The time step,
+which sets the number of steps and samples, comes from the model's extremes, read from its
+layers and spheres, or from its `.npy` files a piece at a time. A test checks that the count
+matches what a run allocates, byte for byte.
+
+`run` and `check` refuse a run that needs more than the machine has available (Linux's
+`MemAvailable`) before allocating anything. The web app shows the estimate under the
+configuration as it is edited, and refuses runs above the 4 GiB a browser gives WebAssembly.
 
 ## Numerics
 

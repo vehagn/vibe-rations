@@ -38,10 +38,12 @@ Check these before running; `just in check <config>` prints all of them:
   it there, accuracy collapses. Orders 12–16 with the transform and optimised coefficients
   are the most accurate per unit of compute: order 12 at 3.0 points per wavelength beats
   order 8 with Taylor coefficients at 4.6, for a quarter of the compute (README, "Accuracy").
-- **Cost:** memory $\approx 4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
-  layers' memory, with $L$ the stencil half-length (4 at order 8); time
-  $\approx$ nodes $\times$ steps $/\, 1.6 \times 10^8$ seconds on the container's 4 cores at order 8.
-  Keep memory under ~6 GiB.
+- **Cost:** `just in memory <config>` gives the memory part by part without building
+  anything, and `run`/`check` refuse runs larger than the memory available (the container
+  has about 7 GiB). Roughly $4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
+  model, the layers and the traces, with $L$ the stencil half-length (4 at order 8). Time
+  $\approx$ nodes $\times$ steps $/\, 1.6 \times 10^8$ seconds on the container's 4 cores at
+  order 8.
 
 ## 3. Sources and wavelets
 

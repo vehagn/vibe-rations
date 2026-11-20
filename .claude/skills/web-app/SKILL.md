@@ -30,7 +30,11 @@ Open the page with the built-in browser (`.claude/launch.json` has a `web` entry
 - the status line says "Solver ready" and **Threads** shows the core count (1 means the page
   isn't cross-origin isolated, or `?threads=1`);
 - Run produces wavefronts in the section and a gather filling in; there are no console errors;
-- a configuration error (e.g. a misspelt key) shows in the red box and disables Run.
+- a configuration error (e.g. a misspelt key) shows in the red box and disables Run;
+- the memory line under the example follows the configuration as it is edited (the worker's
+  `estimate` handler, `Simulator.estimateMemory`), and a grid over the 4 GiB WebAssembly can
+  address (e.g. `points = [801, 801, 535]`) turns it red and is refused on Apply, before
+  anything is allocated (`View::new`, `BROWSER_LIMIT`).
 
 Useful URLs: `?example=layered`, `?threads=1` (to compare speeds).
 

@@ -23,6 +23,7 @@ opens a shell there instead.
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
+| `just memory <config>` | The memory a run needs, part by part, without building it | instant |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -47,6 +48,7 @@ src/
   main.rs        the CLI: run | check
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
+  memory.rs      the memory a run needs, from its configuration alone
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
   solver.rs      fields, staggered material, the update kernels, free surface, PointOp
   fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
@@ -107,6 +109,14 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Memory is counted before it is allocated** (`memory::estimate`, `vibe-rations memory`).
+  It shares `simulation::timing` with `Simulation::new`, takes the model's extremes from
+  `Model::extremes` (layers, spheres, or `.npy` files streamed), and must stay exact:
+  `counts_what_a_run_allocates` compares it with the arrays a real run holds. When a run
+  gains a large array, add it to `memory::Plan` and to `Solver::memory_bytes`. `run` and
+  `check` refuse runs larger than `MemAvailable`; the web app refuses runs over 4 GiB. A
+  volume snapshot briefly needs 32 bytes per node (a node list, values and shading), which
+  could be cut.
 - **Stencil coefficients are optimised by default** (`[scheme] coefficients`, opt out with
   `"taylor"`; `Stencil::optimised`). With the time error removed, the phase error per node,
   $\lvert \mathbf K \rvert - \lvert \mathbf k \rvert h$, is the whole error, so the
