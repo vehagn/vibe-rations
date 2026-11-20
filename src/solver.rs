@@ -590,28 +590,30 @@ impl Solver {
     }
 
     /// Weights on the interior indices along `axis` that interpolate a quantity stored half a
-    /// node forward of each node (at m + ½ for index m) onto node `at`: cubic (-1, 9, 9, -1)/16
-    /// where four values exist, linear near the ends, and a linear extrapolation on the first
-    /// node. Along z with a free surface, values above it are its mirror images, with sign
-    /// `parity` (+1 for vz, -1 for σxz and σyz), so the cubic reaches up to the surface.
+    /// node forward of each node (at m + ½ for index m) onto node `at`: Lagrange interpolation
+    /// from the 2L values around the node, L the stencil's half-length (the cubic
+    /// (-1, 9, 9, -1)/16 at order 4), from fewer near the ends, and a linear extrapolation on
+    /// the first node. Along z with a free surface, values above it are its mirror images, with
+    /// sign `parity` (+1 for vz, -1 for σxz and σyz), so the interpolation reaches up to the
+    /// surface.
     pub fn stagger_weights(&self, axis: usize, at: usize, parity: f32) -> Vec<(usize, f32)> {
-        let n = self.grid.n[axis] as isize;
-        let at = at as isize;
+        let n = self.grid.n[axis];
         let mirror = axis == 2 && self.free_surface;
-        let raw: &[(isize, f32)] = if (at >= 2 || mirror) && at + 1 < n {
-            &[
-                (-2, -1.0 / 16.0),
-                (-1, 9.0 / 16.0),
-                (0, 9.0 / 16.0),
-                (1, -1.0 / 16.0),
-            ]
-        } else if at >= 1 {
-            &[(-1, 0.5), (0, 0.5)]
+        // Indices at - m to at + m - 1 must exist, or be mirror images.
+        let room = if mirror { usize::MAX } else { at };
+        let m = self.stencil.half_length().min(n - at).min(room);
+        let raw: Vec<(isize, f32)> = if m == 0 {
+            vec![(0, 1.5), (1, -0.5)]
         } else {
-            &[(0, 1.5), (1, -0.5)]
+            let w = midpoint_weights(m);
+            let m = m as isize;
+            (-m..m)
+                .map(|o| (o, w[if o < 0 { -o - 1 } else { o } as usize]))
+                .collect()
         };
-        let mut out: Vec<(usize, f32)> = Vec::with_capacity(4);
-        for &(offset, w) in raw {
+        let at = at as isize;
+        let mut out: Vec<(usize, f32)> = Vec::with_capacity(raw.len());
+        for (offset, w) in raw {
             let m = at + offset;
             // Index -1 - m mirrors index m across the surface (positions -m - ½ and m + ½).
             let (m, w) = if m < 0 { (-1 - m, parity * w) } else { (m, w) };
@@ -794,6 +796,23 @@ fn planes<'a, const N: usize>(
         .collect()
 }
 
+/// Lagrange weights at 0 for values at ±½, ±3/2, ..., ±(m - ½), for the value at k - ½ (and
+/// its mirror) in place k - 1.
+fn midpoint_weights(m: usize) -> Vec<f32> {
+    let points: Vec<f64> = (1..=m).map(|k| k as f64 - 0.5).collect();
+    points
+        .iter()
+        .map(|&x| {
+            points
+                .iter()
+                .flat_map(|&y| [y, -y])
+                .filter(|&y| y != x)
+                .map(|y| -y / (x - y))
+                .product::<f64>() as f32
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,6 +937,38 @@ mod tests {
             free.stagger_weights(2, 5, -1.0),
             open.stagger_weights(2, 5, 1.0)
         );
+    }
+
+    /// The interpolation is as long as the stencil, and exact for polynomials up to one
+    /// degree less than its length.
+    #[test]
+    fn interpolation_matches_the_stencil() {
+        let g = Grid::new([20, 20, 20], [10.0; 3]).with_halo(4);
+        let s = Solver::new(
+            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
+            1e-3,
+            3,
+            false,
+            &pml(),
+        )
+        .with_stencil(Stencil::taylor(8).unwrap());
+        let eighth: Vec<(usize, f32)> = [-5.0, 49.0, -245.0, 1225.0, 1225.0, -245.0, 49.0, -5.0]
+            .iter()
+            .enumerate()
+            .map(|(k, w)| (6 + k, w / 2048.0))
+            .collect();
+        assert_eq!(s.stagger_weights(0, 10, 1.0), eighth);
+        // A degree-7 polynomial at the staggered positions m + ½, read at node 10.
+        let p = |x: f64| (x - 3.0).powi(7) / 1e5 - x * x;
+        let read: f64 = s
+            .stagger_weights(0, 10, 1.0)
+            .iter()
+            .map(|&(m, w)| w as f64 * p(m as f64 + 0.5))
+            .sum();
+        assert!((read - p(10.0)).abs() < 1e-4 * p(10.0).abs(), "{read}");
+        // Shorter where fewer values exist: six points two nodes from the far end.
+        assert_eq!(s.stagger_weights(0, 17, 1.0).len(), 6);
+        assert_eq!(s.stagger_weights(0, 2, 1.0).len(), 4);
     }
 
     #[test]
