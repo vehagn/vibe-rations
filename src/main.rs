@@ -508,8 +508,12 @@ fn run() -> Result<()> {
                 out.join("gradient.json"),
                 serde_json::to_string_pretty(&summary)? + "\n",
             )?;
+            let how = match run.strategy {
+                Strategy::Checkpoints { .. } => "checkpoints every",
+                Strategy::Reconstruct { .. } => "rebuilt in segments of",
+            };
             eprintln!(
-                "misfit {:.6e}; checkpoints every {} steps; {} at most",
+                "misfit {:.6e}; {how} {} steps; {} at most",
                 run.misfit,
                 run.checkpoint_every,
                 memory::human(held as u64)
