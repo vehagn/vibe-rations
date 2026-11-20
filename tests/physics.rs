@@ -794,3 +794,123 @@ fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) 
         );
     }
 }
+
+/// A small inversion: two shots of a vertical and a horizontal force, recorded on the free
+/// surface, of a model with a faster sphere, inverted for vp and vs from a homogeneous start,
+/// with the top 60 m (the sources and the receivers) held fixed and the gradient
+/// preconditioned by the illumination. L-BFGS must lower the misfit and bring the sphere's vs
+/// closer; vp, whose wavelength (200 m) is twice the sphere, the S-dominated data hardly see.
+#[test]
+fn an_inversion_finds_a_sphere() {
+    use vibe_rations::config::Config;
+    use vibe_rations::inversion::Inversion;
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let model = |sphere: &str| {
+        format!(
+            r#"
+            [grid]
+            points = [36, 32, 26]
+            spacing = 10.0
+            [time]
+            duration = 0.3
+            dt = 4.5e-4
+            [boundary]
+            pml_width = 8
+            pml_vp_max = 3000.0
+            [[model.layer]]
+            top = 0.0
+            vp = 2400.0
+            vs = 1300.0
+            rho = 2100.0
+            {sphere}
+            [[source]]
+            position = [110.0, 155.0, 30.0]
+            force = [0.0, 0.0, 1e9]
+            wavelet = {{ kind = "ricker", frequency = 12.0 }}
+            [[source]]
+            position = [240.0, 150.0, 30.0]
+            force = [1e9, 0.0, 0.0]
+            wavelet = {{ kind = "ricker", frequency = 12.0 }}
+            [receivers]
+            components = ["vx", "vy", "vz"]
+            [[receivers.line]]
+            from = [90.0, 120.0, 0.0]
+            to = [260.0, 120.0, 0.0]
+            count = 18
+            [[receivers.line]]
+            from = [90.0, 190.0, 0.0]
+            to = [260.0, 190.0, 0.0]
+            count = 18
+            [[receivers.line]]
+            from = [175.0, 90.0, 0.0]
+            to = [175.0, 220.0, 0.0]
+            count = 14
+            [inversion]
+            observed = "unused"
+            iterations = 3
+            fixed_above = 60.0
+            "#
+        )
+    };
+    let sphere = "[[model.sphere]]\ncenter = [175.0, 155.0, 115.0]\nradius = 40.0\n\
+                  vp = 2700.0\nvs = 1500.0\nrho = 2100.0";
+    let base = std::path::Path::new(".");
+    let truth = Config::from_toml(&model(sphere)).unwrap();
+    let observed: Vec<Vec<Vec<f32>>> = (0..truth.sources.len())
+        .map(|s| {
+            let mut sim = Simulation::new(&truth.shot(s).unwrap(), base).unwrap();
+            sim.run(None, false).unwrap();
+            sim.receivers.traces
+        })
+        .collect();
+    let true_model =
+        Model::from_config(Simulation::grid(&truth).unwrap(), &truth.model, base).unwrap();
+
+    let cfg = Config::from_toml(&model("")).unwrap();
+    let settings = cfg.inversion.clone().unwrap();
+    let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let mut inversion = Inversion::new(&cfg, start.clone(), observed, &settings).unwrap();
+    // The model error inside the sphere, relative to the anomaly.
+    let inside: Vec<usize> = (0..true_model.vp.len())
+        .filter(|&n| true_model.vp[n] != start.vp[n])
+        .collect();
+    let error = |m: &Model, values: fn(&Model) -> &Vec<f32>| {
+        let num: f64 = inside
+            .iter()
+            .map(|&n| (values(m)[n] - values(&true_model)[n]).powi(2) as f64)
+            .sum();
+        let den: f64 = inside
+            .iter()
+            .map(|&n| (values(&start)[n] - values(&true_model)[n]).powi(2) as f64)
+            .sum();
+        (num / den).sqrt()
+    };
+    let first = inversion.misfit();
+    println!(
+        "inversion: {} unknowns, misfit {first:.4e}",
+        inversion.unknowns()
+    );
+    for _ in 0..settings.iterations {
+        let it = inversion
+            .iterate()
+            .unwrap()
+            .expect("a step that lowers the misfit");
+        println!(
+            "inversion, iteration {}: misfit {:.1}% of the start, step {:.2}, {} trial(s), \
+             largest change {:.1}%, sphere vp error {:.1}%, vs error {:.1}%",
+            it.iteration,
+            100.0 * it.misfit / first,
+            it.step,
+            it.trials,
+            100.0 * it.largest_change,
+            100.0 * error(&inversion.model, |m| &m.vp),
+            100.0 * error(&inversion.model, |m| &m.vs),
+        );
+    }
+    // Measured: 17.9% of the misfit left, vs error 91.8% (5 iterations: 6.6%, 82.7%).
+    let last = inversion.misfit() / first;
+    let vs = error(&inversion.model, |m| &m.vs);
+    assert!(last < 0.2 && vs < 0.93, "misfit {last}, vs error {vs}");
+}
