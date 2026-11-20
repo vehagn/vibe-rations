@@ -5,6 +5,7 @@
 //! fourth order in space and second order (leapfrog) in time. Convolutional PMLs absorb waves
 //! at the sides and bottom, and the top is either absorbing or a free surface (stress imaging).
 
+pub mod adjoint;
 pub mod config;
 pub mod cpml;
 pub mod fd;

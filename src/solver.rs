@@ -281,6 +281,25 @@ impl Solver {
         self
     }
 
+    /// The same solver at rest: the model, time step, layers and stencil, with every field and
+    /// every CPML memory variable zero and no steps taken.
+    pub fn at_rest(&self) -> Self {
+        Self {
+            grid: self.grid,
+            dt: self.dt,
+            free_surface: self.free_surface,
+            model: self.model.clone(),
+            material: self.material.clone(),
+            fields: Fields::zeros(self.grid.padded_len()),
+            cpml: self.cpml.clone(),
+            psi_v: self.psi_v.each_ref().map(|p| vec![0.0; p.len()]),
+            psi_s: self.psi_s.each_ref().map(|p| vec![0.0; p.len()]),
+            stencil: self.stencil.clone(),
+            sponge: self.sponge.clone(),
+            step: 0,
+        }
+    }
+
     /// Bytes the solver holds.
     pub fn memory_bytes(&self) -> usize {
         let padded = 17 * self.grid.padded_len();
@@ -578,7 +597,7 @@ impl Solver {
     }
 
     /// Mirrors σzz, σxz and σyz across the free surface with the opposite sign.
-    fn mirror_stress(&mut self) {
+    pub(crate) fn mirror_stress(&mut self) {
         let len = self.grid.plane_len();
         let s = self.grid.halo;
         let f = &mut self.fields;
@@ -652,6 +671,57 @@ impl Solver {
                 }
             }
         }
+    }
+
+    /// How a residual in component `c` at `node` enters the adjoint wavefield: the transpose of
+    /// [`Solver::receiver_op`], times the material the update applies there (dt/ρ for a
+    /// velocity, dt·C for a stress), divided by the cell's volume and share as a source is.
+    ///
+    /// A velocity residual is then a unit force: the same operator as a force source of 1 N.
+    /// A pressure residual is an isotropic stress source dt·K/V per unit, K = λ + 2μ/3; on the
+    /// free surface, where σzz = 0, it loads σxx and σyy with the plane-stress modulus instead.
+    /// See the `adjoint` module for why.
+    pub fn adjoint_op(&self, c: crate::receiver::Component, node: [usize; 3]) -> PointOp {
+        use crate::receiver::Component;
+        let g = self.grid;
+        let volume = g.cell_volume() as f32;
+        let plane = g.plane_len();
+        let m = &self.material;
+        let mut op = self.receiver_op(c, node);
+        match c {
+            Component::Vx | Component::Vy | Component::Vz => {
+                let b = m.buoyancy(match c {
+                    Component::Vx => 0,
+                    Component::Vy => 1,
+                    _ => 2,
+                });
+                for (f, i, w) in &mut op.terms {
+                    *w *= b[*i] / (volume * self.cell_share(*f, *i / plane - g.halo));
+                }
+            }
+            Component::P => {
+                let p = g.idx(node[0], node[1], node[2]);
+                let (l, l2) = (m.lam[p], m.l2m[p]);
+                // The row sums of the update's stiffness: what the stress update does with an
+                // isotropic strain, as in update_stress.
+                let (horizontal, vertical) = if self.free_surface && node[2] == 0 {
+                    let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
+                    ((l2 - q) + (l - q), 0.0)
+                } else {
+                    (l2 + 2.0 * l, l2 + 2.0 * l)
+                };
+                let scale = 1.0 / (3.0 * volume * self.cell_share(Field::Sxx, node[2]));
+                op.terms = [
+                    (Field::Sxx, p, horizontal * scale),
+                    (Field::Syy, p, horizontal * scale),
+                    (Field::Szz, p, vertical * scale),
+                ]
+                .into_iter()
+                .filter(|t| t.2 != 0.0)
+                .collect();
+            }
+        }
+        op
     }
 
     /// A component's value at a node now.
