@@ -44,7 +44,10 @@ host and you can read the PNGs there.
 ## Toolchain
 
 Rust is pinned twice and both must agree: the `FROM` line of `.devcontainer/Containerfile`
-(`rust:1.99.1-trixie`) and `rust-toolchain.toml`. To upgrade, bump both and rebuild:
+(`rust:1.99.1-trixie`) and `rust-toolchain.toml`. The web app adds three more pins, each in
+`.devcontainer/Containerfile` and `web/Containerfile` alike: `WASM_BINDGEN_VERSION` (equal to
+the `wasm-bindgen` version in `web/Cargo.toml`), `WASM_THREADS_TOOLCHAIN` (also the default in
+`web/build.sh`), and the `rust` base image. To upgrade any, bump every copy and rebuild:
 
 ```bash
 docker compose -f .devcontainer/compose.yaml up --detach --build --wait
@@ -58,3 +61,6 @@ docker compose -f .devcontainer/compose.yaml up --detach --build --wait
 - A stale build after changing the Containerfile: rebuild as above. The volumes survive;
   `docker compose -f .devcontainer/compose.yaml down --volumes` clears them too.
 - Git runs on the host (it has the maintainer's identity); the container is for building.
+- Compile in the container; running what it builds on the host is fine and often better,
+  since the host has more cores. The web app is the main case: `just in web`, then
+  `just serve` on the host and open http://localhost:8088.

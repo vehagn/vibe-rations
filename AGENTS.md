@@ -20,6 +20,8 @@ opens a shell there instead.
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
+| `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
+| `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
 ## Skills
 
@@ -33,6 +35,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 | `debug-instability` | A run blows up or doesn't drain |
 | `conventional-commit` | Committing work |
 | `fwi-literature` | Looking up the theory: adjoints, kernels, misfits, PML, free surface |
+| `web-app` | Changing, building, testing or deploying the browser front end |
 
 ## Map
 
@@ -50,6 +53,14 @@ src/
   snapshot.rs    sections and volumes during a run
   simulation.rs  a run set up from a configuration; outputs
   image.rs, npy.rs
+web/
+  src/lib.rs     wasm-bindgen wrapper (Simulator) over a plain-Rust View with native tests
+  www/           the page: index.html, app.js (UI), worker.js (runs the solver), style.css
+  build.sh       builds web/dist: single-threaded and threaded WebAssembly, page, examples
+  sws.toml       static-web-server settings, with the cross-origin isolation headers
+  Containerfile  the hosted image
+deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
+.github/workflows/  ci.yaml (`just ci`), web.yaml (builds and pushes the image)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   cli.rs         the binary, run as a process
@@ -77,6 +88,26 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Threads in the browser** need four things, each of which failed once: (1) a std built
+  with atomics: nightly `-Z build-std=panic_abort,std`, pinned in `web/build.sh` and both
+  Containerfiles; (2) explicit linker flags for an imported, shared memory and the TLS
+  exports (`--shared-memory --import-memory --max-memory --export=__wasm_init_tls …`).
+  rustc doesn't add them, and without them initThreadPool fails with "Memory could not be
+  cloned"; (3) wasm-bindgen-rayon's worker helper imports `'../../..'`, which only bundlers
+  resolve, so `build.sh` rewrites it to the module file; (4) a cross-origin-isolated page
+  (COOP/COEP in `web/sws.toml`). Without isolation the page falls back to the
+  single-threaded build.
+- **Browser speeds:** 51 Mcell/s on one thread with SIMD128 (about native per core),
+  234 Mcell/s on 10 threads. The built-in browser pane runs as a background page while it
+  is hidden and gets throttled (down to 6–7 Mcell/s), so only measure speed with it visible.
+- **Web rendering:** sections are interpolated (bilinear, on values) up to ~600 px before
+  colouring, because interpolating colours left dotted white zero crossings. The colour
+  scale never drops below 5% of the largest it has had this run, so the picture fades as
+  energy leaves instead of blowing up the residue. Drawing a section costs ~2 ms.
+- **`web/dist` is emptied, not deleted**, on each build: `just serve` bind-mounts it, and a
+  mount of a deleted directory serves 404s until the server restarts.
+- **Compute:** compile in the dev container; running what it builds on the host is fine (the
+  maintainer wants the extra cores), e.g. the web app in a browser on the host.
 - **Physics test baselines** (fail if they get worse; update this list if they get better):
   explosion vs analytic 0.7–1.6%; point force vs Stokes 0.3–0.8%; free-surface P doubling
   1.9%; CPML reflection 0.015% of peak without a free surface, 0.18% along one; reciprocity

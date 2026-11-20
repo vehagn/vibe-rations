@@ -33,6 +33,7 @@ Then, in the container:
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
 | `just run <config>` | Runs a simulation |
+| `just web` | Builds the web app into `web/dist` |
 
 ```bash
 just run examples/explosion.toml
@@ -43,6 +44,37 @@ shell (`just in ci`). `just dev down` stops the container and keeps its volumes.
 
 Working on the code with an agent: [AGENTS.md](AGENTS.md) has the conventions and the
 notes behind the numerics, and `.claude/skills/` has task guides.
+
+## Web app
+
+The same solver, compiled to WebAssembly, runs in the browser: pick an example or edit its
+TOML, run and pause, and watch a section of any field on any plane while the gather fills in.
+The visitor's computer does all the work, in a Web Worker; the server only hands out files,
+so it costs next to nothing to host.
+
+```bash
+just in web     # build web/dist in the dev container
+just serve      # on the host: http://localhost:8088, with the production server and headers
+```
+
+When the page is cross-origin isolated (the server sends `Cross-Origin-Opener-Policy:
+same-origin` and `Cross-Origin-Embedder-Policy: require-corp`), the solver runs rayon on one
+Web Worker per core; otherwise it runs on one thread. `?threads=N` picks the number, and
+`?example=layered` an example. Measured on a 10-core Apple Silicon Mac with the explosion
+example: one thread 51 Mcell/s, ten threads 234 Mcell/s.
+
+**Hosting.** `web/Containerfile` builds a 4 MB image: static-web-server, non-root, read-only
+root filesystem, with the headers above (`web/sws.toml`). GitHub Actions publish it to
+`ghcr.io/vehagn/vibe-rations-web` for amd64 and arm64 on every push to `main`
+(`.github/workflows/web.yaml`). `deploy/kubernetes/` has a Kustomization with a Deployment,
+Service and Gateway API HTTPRoute; set the hostname, then
+
+```bash
+kubectl apply -k deploy/kubernetes
+```
+
+The threaded build needs a std built with atomics, so it uses a pinned nightly toolchain
+(`-Z build-std`) next to the stable one; the single-threaded build stays on stable.
 
 ## Configuration
 
