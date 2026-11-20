@@ -20,3 +20,4 @@ pub mod snapshot;
 pub mod solver;
 pub mod source;
 pub mod tdt;
+pub mod view;

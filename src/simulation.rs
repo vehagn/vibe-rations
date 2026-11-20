@@ -429,6 +429,18 @@ impl Simulation {
         }
     }
 
+    /// Advances one step like [`Simulation::advance`], then writes the snapshots that fall
+    /// due into `dir`, which must exist.
+    pub fn advance_writing(&mut self, dir: &Path) -> Result<()> {
+        self.advance();
+        for s in &self.snapshots {
+            if s.due(self.solver.step) {
+                s.write(dir, &self.solver)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Steps still to take.
     pub fn remaining(&self) -> usize {
         self.steps.saturating_sub(self.solver.step)
@@ -495,13 +507,9 @@ impl Simulation {
         let mut last_report = start;
         let cells = self.solver.grid.interior_len() as f64;
         for n in 0..self.steps {
-            self.advance();
-            if let Some(dir) = &snap_dir {
-                for s in &self.snapshots {
-                    if s.due(n + 1) {
-                        s.write(dir, &self.solver)?;
-                    }
-                }
+            match &snap_dir {
+                Some(dir) => self.advance_writing(dir)?,
+                None => self.advance(),
             }
             let done = n + 1;
             let now = Instant::now();

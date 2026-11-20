@@ -114,6 +114,18 @@ pub fn write_gather(path: &Path, receivers: usize, samples: usize, data: &[f32])
     write_png(path, w, h, &rgb)
 }
 
+/// RGBA pixels as a PNG file in memory.
+pub fn png_rgba(w: usize, h: usize, rgba: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w as u32, h as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(rgba)?;
+    writer.finish()?;
+    Ok(out)
+}
+
 fn write_png(path: &Path, w: usize, h: usize, rgb: &[u8]) -> Result<()> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), w as u32, h as u32);
