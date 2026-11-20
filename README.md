@@ -38,6 +38,7 @@ Then, in the container:
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
 | `just run <config>` | Runs a simulation |
+| `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
 | `just web` | Builds the web app into `web/dist` |
 
 ```bash
@@ -122,6 +123,20 @@ In the output directory:
 ```python
 import numpy as np
 vz, t = np.load("out/explosion/vz.npy"), np.load("out/explosion/time.npy")
+```
+
+`gradient` compares the configured model's traces with observed ones (`<component>.npy` from
+an earlier `run`, sampled the same way: give both configurations the same `[time] dt`) by
+the L2 misfit, `--balance` weighting each component by its observed energy, and adds:
+
+- `grad_vp.npy`, `grad_vs.npy`, `grad_rho.npy`: $\partial\chi/\partial v_p$, $\partial\chi /
+  \partial v_s$ and $\partial\chi/\partial\rho$ at every node, shape (nz, ny, nx) like model
+  files; approximate inside the absorbing layers
+- `gradient.json`: the misfit, the component weights and the checkpoints' size
+
+```bash
+just run truth.toml --out out/observed
+just gradient guess.toml out/observed --balance --out out/gradient
 ```
 
 ## Numerics
@@ -257,6 +272,7 @@ wave speed, which breaks down in heterogeneous models.
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.039% / 0.21% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 1.5 \times 10^{-6}$ of peak |
 | Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 6 \times 10^{-8}$ |
+| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed (orders 4 and 8) | $\le 1.7 \times 10^{-4}$ |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI
@@ -270,9 +286,12 @@ Planned next, following Fichtner (2011), ch. 7–11:
    is the exact transpose of the discrete forward run, not just of the wave equation: the
    dot-product test holds to $6 \times 10^{-8}$ with the source and receivers outside the
    absorbing layers.
-2. **Gradients.** Zero-lag correlations of the forward and adjoint wavefields for $\lambda$,
-   $\mu$ and $\rho$, reparametrised to $v_p$, $v_s$ and $\rho$ (Köhn et al. 2012 on the
-   trade-offs).
+2. **Gradients** (done: `src/gradient.rs`). Zero-lag correlations of the forward and
+   adjoint wavefields for $\lambda$, $\mu$ and $\rho$, reparametrised to $v_p$, $v_s$ and
+   $\rho$ (Köhn et al. 2012 on the trade-offs), taken through the solver's own material
+   averaging and free surface, so they are the gradient of the discrete run: finite
+   differences agree to $10^{-4}$ outside the absorbing layers. The forward field is replayed
+   exactly from checkpoints for now.
 3. **Forward wavefield during the adjoint run.** The interior scheme is time-reversible, so
    it can be rebuilt backward from boundary values saved just inside the layers (Dussaud et
    al. 2008; Aaker et al. 2020) instead of being stored; checkpointing is the fallback.

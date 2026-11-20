@@ -216,6 +216,99 @@ layers (`check` already warns).
 
 **Reproduce:** `the_adjoint_run_is_the_transpose_of_the_forward_run`, in `just physics`.
 
+## 2026-11-20 — Gradients with respect to ρ, λ and μ
+
+**Question.** The gradient of a misfit with respect to the model, exact for the discrete
+forward run rather than for the wave equation, so that what it gets wrong can later be put
+down to the physics and the reconstruction of the forward field, not to the adjoint.
+
+**Theory.** Write the forward step as two equations,
+$v^{n+\frac12} - v^{n-\frac12} = B\,(D\sigma^{n} + f^{n})$ and
+$\sigma^{n+1} - \sigma^{n} = M e^{n+\frac12} + g^{n}$, with $e = D'v$ the strain rate the stress
+update applies the stiffness to. Their Lagrange multipliers follow from the weighted adjoint of
+the previous entry: $\hat\lambda_v = W B^{-1} \tilde v$ and $\hat\lambda_\sigma = -W \tilde\varepsilon$,
+where the adjoint strain
+
+$$
+\tilde\varepsilon^{n} = \tilde\varepsilon^{n+1} + D'\tilde v^{n+\frac12} - W^{-1} r_\sigma^{n},
+\qquad \tilde\varepsilon^{N} = -W^{-1} r_\sigma^{N},
+$$
+
+sums the adjoint strain rates backwards, with the pressure residuals ($-W^{-1} r_\sigma = \delta /
+(3W)$ on the normal components); the adjoint stress is $\tilde\sigma = M\tilde\varepsilon$. Since
+the forward equations hold, the derivative of the misfit is that of the Lagrangian with respect
+to the material alone:
+
+$$
+\frac{\partial\chi}{\partial B} = \sum_n \frac{W\, \tilde v^{n+\frac12}\,(v^{n+\frac12} - v^{n-\frac12})}{B^{2}},
+\qquad
+\frac{\partial\chi}{\partial M} = -\sum_n W\, \tilde\varepsilon^{n+1} \otimes e^{n+\frac12},
+$$
+
+the zero-lag correlations of the density and stiffness kernels [@tromp2005; @fichtner2006;
+@fichtner2011]. Forces drop out of the first because they enter as $B f$; moment tensors don't
+involve the material. The chain rule then goes through the material averaging: $B = 2\Delta t /
+(\rho_1 + \rho_2)$, so each node gets $-W \sum_n \tilde v \,\Delta v / (2\Delta t)$; $l2m =
+\Delta t(\lambda + 2\mu)$ and $lam = \Delta t\,\lambda$ at the nodes; the shear moduli are
+$\Delta t$ times the harmonic mean $H$ of four nodes' $\mu$, $\partial H / \partial \mu_q = H^2 /
+(4\mu_q^2)$; on the free surface $\sigma_{xx}$ and $\sigma_{yy}$ use the plane-stress $a = l2m -
+lam^2/l2m$ and $b = lam - lam^2/l2m$. The velocity parametrisation follows from
+$\lambda = \rho(v_p^2 - 2v_s^2)$, $\mu = \rho v_s^2$.
+
+The adjoint strain is summed rather than recovered from the adjoint stress as
+$M^{-1}\tilde\sigma$: $M$ is singular in fluids, and its inverse cancels digits where
+$\mu \ll \lambda$.
+
+**Forward field.** The correlations need the forward velocities backwards in time. Here they
+are replayed from checkpoints of the solver's state (fields and CPML memory) every $K$ steps,
+$K = \lceil\sqrt{3N}\rceil$ by default, which about minimises the checkpoints plus one
+segment's velocities. The replay is bit for bit (the updates don't depend on how rayon
+splits the work), so it adds no error: a baseline for the boundary-value reconstruction to be
+measured against. It costs one more forward run.
+
+**Test** (`tests/physics.rs`). A free surface, two layers and a sphere; a force and an
+explosion; ten receivers (eight on the surface) recording $v_x$, $v_y$, $v_z$ and $p$ every
+second step for 0.35 s; the misfit $\tfrac12 \sum_c \|d_c - d_c^{obs}\|^2 / \|d_c^{obs}\|^2$
+against data from a different sphere. Each of $v_p$, $v_s$ and $\rho$ is perturbed as
+$m(1 + h u)$ with $u$ uniform in $[-1, 1]$ at every node outside the layers ($v_p$ only below
+the fastest, which sets $\Delta t$ and the layers' damping), and the central difference of the
+misfit compared with the gradient's prediction.
+
+**Results.** The plain central differences converge on the gradient exactly as $h^2$: for
+$v_p$ at order 4 they are off by 12.8%, 3.2%, 0.79% and 0.18% at $h = 1.6\times10^{-2}$,
+$8\times10^{-3}$, $4\times10^{-3}$ and $2\times10^{-3}$, then single-precision round-off takes
+over (0.1% at $10^{-3}$ and below). Richardson's extrapolation from $h = 1.6\times10^{-2}$ and
+$8 \times 10^{-3}$ removes the $h^2$ term:
+
+| Perturbed | Misfit | Order 4 | Order 8 |
+|---|---|---|---|
+| every node | all components | $v_p$ $1.7\times10^{-4}$, $v_s$ $1.6\times10^{-6}$, $\rho$ $1.5\times10^{-5}$ | $6.5\times10^{-5}$, $5.8\times10^{-6}$, $1.2\times10^{-5}$ |
+| the free surface only | all components | $1.5\times10^{-5}$, $1.2\times10^{-4}$, $2.9\times10^{-6}$ | $2.8\times10^{-4}$, $7.3\times10^{-7}$, $1.0\times10^{-5}$ |
+| every node | pressure only | $4.2\times10^{-5}$, $3.2\times10^{-4}$, $1.4\times10^{-5}$ | $1.1\times10^{-4}$, $9.9\times10^{-5}$, $3.4\times10^{-6}$ |
+
+What is left is the extrapolation's own error ($h^4$ terms where the misfit is most nonlinear:
+$v_s$ with pressure alone, whose plain differences were 95% off) and round-off. Nothing
+suggests an error in the gradient at the $10^{-4}$ level, at the free surface, through the
+pressure residuals, or through the force's buoyancy.
+
+**Cost.** On `examples/explosion.toml` (101 × 101 × 67 nodes, 1510 steps, a sphere in the
+observed model) a gradient took 5.1 times a forward run: the forward run, its replay, the
+adjoint run and two strain-rate passes per step. The checkpoints (every 68 steps) and one
+segment's velocities held 1.66 GiB against the forward run's 0.08 GiB: about
+$2\sqrt{27 N}$ padded arrays, growing as $\sqrt{N}$. `examples/layered.toml` (4456 steps)
+would need about 6 GiB, which is what reconstructing the forward field instead would save.
+
+**Decision.** `gradient::gradient` computes $\partial\chi/\partial\rho$, $\partial\chi/\partial
+\lambda$ and $\partial\chi/\partial\mu$ at the nodes (and $v_p$, $v_s$, $\rho$ through
+`Gradient::velocities`) with checkpointed replay. Inside the absorbing layers the strain rates
+leave out the CPML and the layers aren't self-adjoint, so the gradient there is approximate;
+models are usually held fixed there anyway.
+
+**Reproduce:** `the_gradient_matches_finite_differences`, in `just physics`. The surface-only and
+pressure-only rows came from the same test with the perturbation restricted to $k = 0$ and the
+velocity components' weights set to zero. The cost: `just run` of the example with a sphere
+added and `dt = 5.3e-4`, then `just gradient` of the example itself against it.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
@@ -228,7 +321,9 @@ layers (`check` already warns).
 - **Error propagation into adjoint fields and gradients.** Forward-field error (dispersion,
   interfaces, free surface, layers), reconstruction error (time-reversed propagation in single
   precision; the non-reversible layers [@dussaud2008; @aaker2020]), and their effect on
-  gradients and inversions [@tromp2005; @fichtner2006; @fichtner2011]. Adjoint consistency
-  is settled (the dot-product entry above). Still to measure: gradients against finite
-  differences, and the accuracy study repeated for gradients as a function of stencil order,
-  $C$ and ppw.
+  gradients and inversions [@tromp2005; @fichtner2006; @fichtner2011]. Settled: adjoint
+  consistency (the dot-product entry) and the gradient of the discrete run against finite
+  differences (the gradient entry), with an exactly replayed forward field. Still to
+  measure: the reconstruction error of a boundary-value reconstruction against that replay,
+  and the accuracy study repeated for gradients (against the gradient of the exact wave
+  equation, e.g. a fine-grid reference) as a function of stencil order, $C$ and ppw.

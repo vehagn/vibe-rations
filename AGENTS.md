@@ -23,6 +23,7 @@ opens a shell there instead.
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
+| `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -44,8 +45,9 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run | check
+  main.rs        the CLI: run | check | gradient
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
+  gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
@@ -107,6 +109,17 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Gradients are those of the discrete run** (`gradient::gradient`): the multipliers of the
+  forward equations are $W B^{-1} \tilde v$ and $-W \tilde\varepsilon$, with the adjoint
+  strain $\tilde\varepsilon$ *summed* from the adjoint strain rates (not $M^{-1}\tilde\sigma$:
+  singular in fluids, cancels digits where $\mu \ll \lambda$), then the chain rule through
+  the material averaging and the free surface's plane-stress moduli. Finite differences agree
+  to $\le 1.7 \times 10^{-4}$ only after Richardson's extrapolation: plain central
+  differences in single precision have an $h^2$ error of percents down to $h \approx
+  2 \times 10^{-3}$, below which round-off takes over. In a finite-difference check, keep
+  $v_p$ below the model's fastest: it sets $\Delta t$ (via the Courant fraction) and the
+  layers' damping. The forward field is replayed from checkpoints (`Solver::state`,
+  `restore`), bit for bit.
 - **The adjoint is the forward solver run backwards** (`Adjoint`), not separate kernels.
   Transposing the discrete step gives the same step in reversed order with $\tilde v =
   \lambda_v$, $\tilde\sigma = -\lambda_\sigma$. Adjoint step $m$ pairs with forward step
@@ -127,7 +140,8 @@ doesn't show.
   Stokes 0.07–0.18%; free-surface P doubling 2.4%; CPML reflection $3.9 \times 10^{-4}$ of the
   peak without a free surface, $2.1 \times 10^{-3}$ along one; reciprocity
   $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the adjoint dot-product test
-  $\le 6 \times 10^{-8}$; the 9 s soft-sediment run drains to
+  $\le 6 \times 10^{-8}$; gradients against extrapolated finite differences
+  $\le 1.7 \times 10^{-4}$; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. At order 4 with $C = 0.85$ they were 0.7–1.6%,
   0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
 - **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at
