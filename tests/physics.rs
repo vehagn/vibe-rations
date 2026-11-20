@@ -217,18 +217,20 @@ fn layer_reflection(free_surface: bool) -> f64 {
     worst_overall
 }
 
+/// Measured: order 4 at courant 0.85, 1.5e-4 of the peak; order 8 at 0.3 (the default),
+/// 3.9e-4 (about -68 dB): longer stencils reach further across the layers' inner edge.
 #[test]
 fn absorbing_layers_reflect_little() {
     let worst = layer_reflection(false);
-    assert!(worst < 3e-4, "{worst}");
+    assert!(worst < 4.5e-4, "{worst}");
 }
 
 /// Along a free surface the side layers also damp plainly, to stay stable, which costs some
-/// reflection.
+/// reflection. Measured: 1.8e-3 at order 4, 2.1e-3 at order 8 (the default).
 #[test]
 fn absorbing_layers_reflect_little_along_a_free_surface() {
     let worst = layer_reflection(true);
-    assert!(worst < 2e-3, "{worst}");
+    assert!(worst < 2.4e-3, "{worst}");
 }
 
 /// Swapping a point force and a receiver gives the same trace, with the components swapped
@@ -363,7 +365,8 @@ fn long_run(order: usize) {
         peak = peak.max(sim.solver.peak_velocity());
     }
     assert!(peak > 0.0 && peak.is_finite());
-    let steps = 8000;
+    // Nine seconds, whatever the time step.
+    let steps = (9.0 / sim.solver.dt) as usize;
     for n in 0..steps {
         sim.step();
         if n % 500 == 0 {

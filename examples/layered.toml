@@ -5,14 +5,14 @@
 #   just run examples/layered.toml
 
 [grid]
-points = [161, 161, 101]
-spacing = 20.0
+points = [129, 129, 81]
+spacing = 25.0  # 4.3 points per shortest S wavelength, enough for eighth order
 
 [time]
 duration = 2.5
 
 [boundary]
-pml_width = 20
+pml_width = 16
 
 [[model.layer]]  # sediments
 top = 0.0
@@ -45,7 +45,7 @@ components = ["vx", "vy", "vz"]
 [[receivers.line]]
 from = [400.0, 1600.0, 0.0]
 to = [2800.0, 1600.0, 0.0]
-count = 121
+count = 97  # one per node
 
 [[snapshot]]
 field = "vz"

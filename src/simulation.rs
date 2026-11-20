@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::config::{Config, Format, PlaneKind};
+use crate::config::{Config, Format, PlaneKind, default_courant};
 use crate::cpml::PmlSettings;
 use crate::fd::Stencil;
 use crate::grid::Grid;
@@ -21,8 +21,16 @@ use crate::snapshot::Snapshot;
 use crate::solver::Solver;
 use crate::source::{Mechanism, Source};
 
-/// Fewer grid points than this per shortest wavelength and numerical dispersion shows.
-pub const MIN_POINTS_PER_WAVELENGTH: f64 = 5.0;
+/// Fewer grid points than this per shortest wavelength and numerical dispersion shows: a few
+/// percent of misfit after ten wavelengths at the default time step (README, "Accuracy").
+pub fn min_points_per_wavelength(order: usize) -> f64 {
+    match order {
+        2 => 10.0,
+        4 => 5.0,
+        6 => 4.5,
+        _ => 4.0,
+    }
+}
 
 /// The largest stable time step: the Courant–Friedrichs–Lewy limit of the staggered scheme,
 /// dt ≤ 1 / (vp_max Σ|cₙ| √(1/dx² + 1/dy² + 1/dz²)).
@@ -121,7 +129,10 @@ impl Simulation {
                 dt
             }
             None => {
-                let c = cfg.time.courant;
+                let c = cfg
+                    .time
+                    .courant
+                    .unwrap_or_else(|| default_courant(cfg.scheme.order));
                 ensure!(c > 0.0 && c <= 1.0, "courant must be in (0, 1]");
                 c * dt_stable
             }
@@ -132,10 +143,12 @@ impl Simulation {
         let slowest = model.slowest_wave();
         let h_max = grid.h.iter().copied().fold(0.0, f64::max);
         let ppw = slowest / f_max / h_max;
-        if ppw < MIN_POINTS_PER_WAVELENGTH {
+        let min_ppw = min_points_per_wavelength(cfg.scheme.order);
+        if ppw < min_ppw {
             warnings.push(format!(
                 "only {ppw:.1} grid points per shortest wavelength ({slowest} m/s at {f_max:.1} Hz); \
-                 {MIN_POINTS_PER_WAVELENGTH} or more keeps numerical dispersion small"
+                 at order {} {min_ppw} or more keeps numerical dispersion small",
+                cfg.scheme.order
             ));
         }
 
@@ -552,12 +565,22 @@ mod tests {
 
     #[test]
     fn steps_at_a_fraction_of_the_stability_limit() {
+        // Eighth order by default, at 0.3 of the limit.
         let sim = setup(BASE).unwrap();
         let i = &sim.info;
-        assert!((i.dt - 0.85 * i.dt_stable).abs() < 1e-15);
+        assert_eq!(i.order, 8);
+        assert!((i.dt - 0.3 * i.dt_stable).abs() < 1e-15);
         assert_eq!(sim.steps, (0.05 / i.dt).ceil() as usize);
         assert_eq!(i.samples, sim.steps);
         assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+        // Fourth order steps at 0.85, where its time and space errors partly cancel.
+        let fourth = setup(&format!("{BASE}\n[scheme]\norder = 4")).unwrap();
+        assert!((fourth.info.dt - 0.85 * fourth.info.dt_stable).abs() < 1e-15);
+        // A grid fine enough for eighth order is too coarse for second.
+        let ppw = i.points_per_wavelength;
+        assert!(ppw >= min_points_per_wavelength(8) && ppw < min_points_per_wavelength(2));
+        let second = setup(&format!("{BASE}\n[scheme]\norder = 2")).unwrap();
+        assert_eq!(second.info.warnings.len(), 1, "{:?}", second.info.warnings);
         let t = sim.sample_times();
         assert!((t[0] - 0.5 * i.dt).abs() < 1e-15);
         assert!((t[1] - t[0] - i.dt).abs() < 1e-15);

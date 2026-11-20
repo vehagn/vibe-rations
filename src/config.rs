@@ -80,13 +80,16 @@ pub struct TimeConfig {
     pub duration: f64,
     /// Time step, in seconds. By default `courant` times the stability limit.
     pub dt: Option<f64>,
-    /// Fraction of the stability limit to step at when `dt` is not given.
-    #[serde(default = "default_courant")]
-    pub courant: f64,
+    /// Fraction of the stability limit to step at when `dt` is not given; by default
+    /// [`default_courant`] for the stencil order.
+    pub courant: Option<f64>,
 }
 
-fn default_courant() -> f64 {
-    0.85
+/// The time step that suits a stencil order, as a fraction of the stability limit. Up to
+/// fourth order a large step is best, because its time error partly cancels the spatial one;
+/// longer stencils only pay off with a small step (README, "Accuracy").
+pub fn default_courant(order: usize) -> f64 {
+    if order <= 4 { 0.85 } else { 0.3 }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,8 +149,9 @@ fn default_pml_sponge() -> f64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemeConfig {
-    /// Order of the staggered spatial derivatives: 2, 4, ..., 16. Higher orders resolve waves
-    /// with fewer grid points, but only pay off with a smaller `courant` (see the README).
+    /// Order of the staggered spatial derivatives: 2, 4, ..., 16. Eighth order with the time
+    /// step at 0.3 of the limit needs about half the grid points per wavelength of fourth
+    /// order for the same accuracy (README, "Accuracy").
     #[serde(default = "default_order")]
     pub order: usize,
 }
@@ -161,7 +165,7 @@ impl Default for SchemeConfig {
 }
 
 fn default_order() -> usize {
-    4
+    8
 }
 
 /// The elastic model: horizontal layers or `.npy` files, then optional spheres on top.
@@ -447,7 +451,10 @@ mod tests {
         let c = Config::from_toml(MINIMAL).unwrap();
         assert_eq!(c.boundary.pml_width, 20);
         assert!(c.boundary.free_surface);
-        assert_eq!(c.time.courant, 0.85);
+        assert_eq!(c.scheme.order, 8);
+        assert_eq!(c.time.courant, None);
+        assert_eq!(default_courant(8), 0.3);
+        assert_eq!(default_courant(4), 0.85);
         assert_eq!(c.receivers.components.len(), 3);
         assert_eq!(c.output.dir, PathBuf::from("out"));
         let w = c.sources[0].wavelet.wavelet().unwrap();
