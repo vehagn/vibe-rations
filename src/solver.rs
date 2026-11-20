@@ -1,4 +1,5 @@
-//! The time stepper: fourth-order staggered-grid velocity–stress finite differences.
+//! The time stepper: staggered-grid velocity–stress finite differences, fourth order in space
+//! by default (any even order up to 16 with [`Solver::with_stencil`]), second order in time.
 //!
 //! Where each quantity lives, for the cell whose padded index is that of node (i, j, k):
 //!
@@ -35,8 +36,8 @@
 use rayon::prelude::*;
 
 use crate::cpml::{CpmlAxis, PmlSettings, Stagger};
-use crate::fd;
-use crate::grid::{Grid, HALO};
+use crate::fd::Stencil;
+use crate::grid::Grid;
 use crate::model::Model;
 
 /// The nine wavefield arrays, padded.
@@ -213,6 +214,8 @@ pub struct Solver {
     /// velocity (stress update). See [`planes`] for the layout.
     psi_v: [Vec<f32>; 3],
     psi_s: [Vec<f32>; 3],
+    /// The spatial derivative operator.
+    pub stencil: Stencil,
     /// Factors along x, y and z for the plain damping inside the side layers, if any.
     sponge: Option<[Vec<f32>; 3]>,
     /// Steps taken.
@@ -259,8 +262,23 @@ impl Solver {
             psi_v: sizes.map(|s| vec![0.0; s]),
             psi_s: sizes.map(|s| vec![0.0; s]),
             sponge,
+            stencil: Stencil::taylor(4).expect("order 4 exists"),
             step: 0,
         }
+    }
+
+    /// Uses `stencil` for the spatial derivatives. The grid's halo must be at least its
+    /// half-length; choose the time step from its [`Stencil::sum_abs`].
+    pub fn with_stencil(mut self, stencil: Stencil) -> Self {
+        assert!(
+            stencil.half_length() <= self.grid.halo,
+            "a stencil of order {} needs a halo of {}, not {}",
+            stencil.order(),
+            stencil.half_length(),
+            self.grid.halo
+        );
+        self.stencil = stencil;
+        self
     }
 
     /// Bytes the solver holds.
@@ -323,6 +341,8 @@ impl Solver {
         let (sxx, syy, szz, sxy, sxz, syz) =
             (&sxx[..], &syy[..], &szz[..], &sxy[..], &sxz[..], &syz[..]);
         let m = &self.material;
+        let st = &self.stencil;
+        let halo = g.halo;
         let [cx, cy, cz] = &self.cpml;
         let wx = cx.width();
         planes(&g, [vx, vy, vz], &mut self.psi_v, &self.cpml)
@@ -340,15 +360,15 @@ impl Solver {
                     let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
                     for j in 0..ny {
                         let r = g.idx(0, j, kz);
-                        fd::forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
-                        fd::backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
-                        fd::backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
-                        fd::backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
-                        fd::forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
-                        fd::backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
-                        fd::backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
-                        fd::backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
-                        fd::forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
+                        st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
+                        st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
+                        st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
+                        st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
+                        st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
+                        st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
+                        st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
+                        st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
+                        st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
 
                         if let Some(p) = psi_x.as_deref_mut() {
                             let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
@@ -369,7 +389,7 @@ impl Solver {
                             cz.apply_across(s, d8, p2, Stagger::Half);
                         }
 
-                        let o = (j + HALO) * nxt + HALO;
+                        let o = (j + halo) * nxt + halo;
                         add_sum(&mut vx[o..o + nx], &m.bx[r..r + nx], d0, d1, d2);
                         add_sum(&mut vy[o..o + nx], &m.by[r..r + nx], d3, d4, d5);
                         add_sum(&mut vz[o..o + nx], &m.bz[r..r + nx], d6, d7, d8);
@@ -398,6 +418,8 @@ impl Solver {
         } = &mut self.fields;
         let (vx, vy, vz) = (&vx[..], &vy[..], &vz[..]);
         let m = &self.material;
+        let st = &self.stencil;
+        let halo = g.halo;
         let [cx, cy, cz] = &self.cpml;
         let wx = cx.width();
         planes(
@@ -421,19 +443,19 @@ impl Solver {
                 let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
                 for j in 0..ny {
                     let r = g.idx(0, j, kz);
-                    fd::backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
-                    fd::backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
+                    st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
+                    st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
                     if surface {
                         d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
                     } else {
-                        fd::backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
+                        st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
                     }
-                    fd::forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
-                    fd::forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
-                    fd::forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
-                    fd::forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
-                    fd::forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
-                    fd::forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+                    st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
+                    st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
+                    st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
+                    st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
+                    st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
+                    st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
 
                     if let Some(p) = psi_x.as_deref_mut() {
                         let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
@@ -454,7 +476,7 @@ impl Solver {
                         cz.apply_across(s, d7, p2, Stagger::Half);
                     }
 
-                    let o = (j + HALO) * nxt + HALO;
+                    let o = (j + halo) * nxt + halo;
                     let lam = &m.lam[r..r + nx];
                     let l2m = &m.l2m[r..r + nx];
                     let (sxx, syy, szz) = (
@@ -494,6 +516,7 @@ impl Solver {
             return;
         };
         let g = self.grid;
+        let halo = g.halo;
         let [nx, ny, nz] = g.n;
         let (len, nxt) = (g.plane_len(), g.padded()[0]);
         let [fx, fy, fz] = factors;
@@ -503,12 +526,12 @@ impl Solver {
             &mut f.vx, &mut f.vy, &mut f.vz, &mut f.sxx, &mut f.syy, &mut f.szz, &mut f.sxy,
             &mut f.sxz, &mut f.syz,
         ] {
-            v[HALO * len..(HALO + nz) * len]
+            v[g.halo * len..(g.halo + nz) * len]
                 .par_chunks_mut(len)
                 .enumerate()
                 .for_each(|(kz, plane)| {
                     for j in 0..ny {
-                        let o = (j + HALO) * nxt + HALO;
+                        let o = (j + halo) * nxt + halo;
                         let row = &mut plane[o..o + nx];
                         let yz = fy[j] * fz[kz];
                         if yz < 1.0 {
@@ -543,9 +566,9 @@ impl Solver {
     /// Mirrors vx, vy and vz across the free surface with the same sign.
     fn mirror_velocity(&mut self) {
         let len = self.grid.plane_len();
-        let s = HALO; // the surface plane
+        let s = self.grid.halo; // the surface plane, and how many planes the stencils reach above
         let f = &mut self.fields;
-        for m in 1..=HALO {
+        for m in 1..=s {
             // vx and vy sit on their plane: s - m mirrors s + m.
             mirror_plane(&mut f.vx, len, s - m, s + m, 1.0);
             mirror_plane(&mut f.vy, len, s - m, s + m, 1.0);
@@ -557,9 +580,9 @@ impl Solver {
     /// Mirrors σzz, σxz and σyz across the free surface with the opposite sign.
     fn mirror_stress(&mut self) {
         let len = self.grid.plane_len();
-        let s = HALO;
+        let s = self.grid.halo;
         let f = &mut self.fields;
-        for m in 1..=HALO {
+        for m in 1..=s {
             mirror_plane(&mut f.szz, len, s - m, s + m, -1.0);
             mirror_plane(&mut f.sxz, len, s - m, s + m - 1, -1.0);
             mirror_plane(&mut f.syz, len, s - m, s + m - 1, -1.0);
@@ -752,7 +775,8 @@ fn planes<'a, const N: usize>(
 ) -> Vec<Plane<'a, N>> {
     let [nx, ny, nz] = g.n;
     let len = g.plane_len();
-    let mut out = out.map(|v| v[HALO * len..(HALO + nz) * len].chunks_mut(len));
+    let halo = g.halo;
+    let mut out = out.map(|v| v[halo * len..(halo + nz) * len].chunks_mut(len));
     let [px, py, pz] = psi;
     let mut px = (!px.is_empty()).then(move || px.chunks_mut(ny * 3 * cpml[0].width()));
     let mut py = (!py.is_empty()).then(move || py.chunks_mut(cpml[1].width() * 3 * nx));

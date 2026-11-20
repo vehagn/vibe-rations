@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::config::{Config, Format, PlaneKind};
 use crate::cpml::PmlSettings;
-use crate::fd::STENCIL_SUM;
+use crate::fd::Stencil;
 use crate::grid::Grid;
 use crate::image;
 use crate::model::Model;
@@ -24,11 +24,11 @@ use crate::source::{Mechanism, Source};
 /// Fewer grid points than this per shortest wavelength and numerical dispersion shows.
 pub const MIN_POINTS_PER_WAVELENGTH: f64 = 5.0;
 
-/// The largest stable time step: the Courant–Friedrichs–Lewy limit of the fourth-order
-/// staggered scheme, dt ≤ 1 / (vp_max (|c1| + |c2|) √(1/dx² + 1/dy² + 1/dz²)).
-pub fn stable_dt(grid: &Grid, vp_max: f64) -> f64 {
+/// The largest stable time step: the Courant–Friedrichs–Lewy limit of the staggered scheme,
+/// dt ≤ 1 / (vp_max Σ|cₙ| √(1/dx² + 1/dy² + 1/dz²)).
+pub fn stable_dt(grid: &Grid, vp_max: f64, stencil: &Stencil) -> f64 {
     let s: f64 = grid.h.iter().map(|h| 1.0 / (h * h)).sum();
-    1.0 / (vp_max * STENCIL_SUM * s.sqrt())
+    1.0 / (vp_max * stencil.sum_abs() * s.sqrt())
 }
 
 pub struct Simulation {
@@ -61,6 +61,8 @@ pub struct RunInfo {
     pub points_per_wavelength: f64,
     pub pml_width: usize,
     pub free_surface: bool,
+    /// Order of the spatial derivatives.
+    pub order: usize,
     pub memory_bytes: usize,
     pub sources: Vec<SourceInfo>,
     pub receivers: usize,
@@ -84,7 +86,8 @@ pub struct SourceInfo {
 impl Simulation {
     /// Sets up a run; `base` is the directory relative paths in the configuration start from.
     pub fn new(cfg: &Config, base: &Path) -> Result<Self> {
-        let grid = cfg.grid.grid()?;
+        let stencil = Stencil::taylor(cfg.scheme.order)?;
+        let grid = cfg.grid.grid()?.with_halo(stencil.half_length());
         let model = Model::from_config(grid, &cfg.model, base)?;
         let mut warnings = Vec::new();
 
@@ -107,7 +110,7 @@ impl Simulation {
             .fold(0.0, f64::max);
 
         let [_, vp_max] = model.vp_range();
-        let dt_stable = stable_dt(&grid, vp_max);
+        let dt_stable = stable_dt(&grid, vp_max, &stencil);
         let dt = match cfg.time.dt {
             Some(dt) => {
                 ensure!(dt > 0.0, "dt must be positive");
@@ -160,7 +163,7 @@ impl Simulation {
             vp_max,
             sponge: b.pml_sponge,
         };
-        let solver = Solver::new(model, dt, w, b.free_surface, &pml);
+        let solver = Solver::new(model, dt, w, b.free_surface, &pml).with_stencil(stencil);
         let in_pml = |node: [usize; 3]| {
             node.iter()
                 .zip(&solver.cpml)
@@ -265,6 +268,7 @@ impl Simulation {
             points_per_wavelength: ppw,
             pml_width: w,
             free_surface: b.free_surface,
+            order: cfg.scheme.order,
             memory_bytes: solver.memory_bytes(),
             sources: source_info,
             receivers: receivers.nodes.len(),
@@ -450,8 +454,8 @@ impl RunInfo {
         );
         let _ = writeln!(
             s,
-            "accuracy  {:.1} points per shortest wavelength ({:.0} m/s at {:.1} Hz)",
-            self.points_per_wavelength, self.slowest_wave, self.max_frequency
+            "accuracy  {:.1} points per shortest wavelength ({:.0} m/s at {:.1} Hz), order-{} stencils",
+            self.points_per_wavelength, self.slowest_wave, self.max_frequency, self.order
         );
         let top = if self.free_surface {
             "free surface on top"
@@ -500,7 +504,11 @@ mod tests {
     fn stability_limit_matches_the_uniform_grid_formula() {
         let g = Grid::new([10; 3], [10.0; 3]);
         let expect = 10.0 / (3000.0 * (9.0 / 8.0 + 1.0 / 24.0) * 3f64.sqrt());
-        assert!((stable_dt(&g, 3000.0) - expect).abs() < 1e-15);
+        let fourth = Stencil::taylor(4).unwrap();
+        assert!((stable_dt(&g, 3000.0, &fourth) - expect).abs() < 1e-15);
+        // Longer stencils have larger coefficient sums, so shorter steps.
+        let eighth = Stencil::taylor(8).unwrap();
+        assert!(stable_dt(&g, 3000.0, &eighth) < stable_dt(&g, 3000.0, &fourth));
     }
 
     #[test]

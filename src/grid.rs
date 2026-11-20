@@ -1,9 +1,5 @@
 //! The computational grid: the interior nodes the user sees, padded by a halo.
 
-/// Nodes beyond the interior on every side. The fourth-order stencil reaches two nodes past
-/// the one it updates; the halo stays zero, or holds the free surface's mirror images.
-pub const HALO: usize = 2;
-
 /// A regular grid. Node (i, j, k) sits at (i·dx, j·dy, k·dz). z points down; with a free
 /// surface, z = 0 is the surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -12,16 +8,29 @@ pub struct Grid {
     pub n: [usize; 3],
     /// Spacing along x, y and z, in metres.
     pub h: [f64; 3],
+    /// Nodes beyond the interior on every side of a padded array. A stencil reaches its
+    /// half-length past the node it updates; the halo stays zero, or holds the free surface's
+    /// mirror images.
+    pub halo: usize,
 }
 
 impl Grid {
+    /// A grid with a two-node halo, enough for the fourth-order stencil.
     pub fn new(n: [usize; 3], h: [f64; 3]) -> Self {
-        Self { n, h }
+        Self { n, h, halo: 2 }
+    }
+
+    /// The same grid with a halo `halo` nodes wide (at least two).
+    pub fn with_halo(self, halo: usize) -> Self {
+        Self {
+            halo: halo.max(2),
+            ..self
+        }
     }
 
     /// Nodes along each axis of a padded array.
     pub fn padded(&self) -> [usize; 3] {
-        self.n.map(|n| n + 2 * HALO)
+        self.n.map(|n| n + 2 * self.halo)
     }
 
     /// Distance in memory between neighbouring nodes along each axis of a padded array.
@@ -49,8 +58,8 @@ impl Grid {
     /// Index of interior node (i, j, k) in a padded array, x fastest.
     #[inline]
     pub fn idx(&self, i: usize, j: usize, k: usize) -> usize {
-        let p = self.padded();
-        ((k + HALO) * p[1] + j + HALO) * p[0] + i + HALO
+        let (p, h) = (self.padded(), self.halo);
+        ((k + h) * p[1] + j + h) * p[0] + i + h
     }
 
     /// Index of node (i, j, k) in an interior-only array, x fastest.
@@ -89,6 +98,14 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wider_halo_pads_more() {
+        let g = Grid::new([3, 4, 5], [1.0; 3]).with_halo(8);
+        assert_eq!(g.padded(), [19, 20, 21]);
+        assert_eq!(g.idx(0, 0, 0), (8 * 20 + 8) * 19 + 8);
+        assert_eq!(Grid::new([3, 4, 5], [1.0; 3]).with_halo(1).halo, 2);
+    }
 
     #[test]
     fn indexes_skip_the_halo() {

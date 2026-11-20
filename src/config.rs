@@ -17,6 +17,8 @@ pub struct Config {
     pub time: TimeConfig,
     #[serde(default)]
     pub boundary: BoundaryConfig,
+    #[serde(default)]
+    pub scheme: SchemeConfig,
     pub model: ModelConfig,
     #[serde(default, rename = "source")]
     pub sources: Vec<SourceConfig>,
@@ -138,6 +140,28 @@ fn default_pml_power() -> f64 {
 }
 fn default_pml_sponge() -> f64 {
     0.2
+}
+
+/// The numerical scheme.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemeConfig {
+    /// Order of the staggered spatial derivatives: 2, 4, ..., 16. Higher orders resolve waves
+    /// with fewer grid points, but only pay off with a smaller `courant` (see the README).
+    #[serde(default = "default_order")]
+    pub order: usize,
+}
+
+impl Default for SchemeConfig {
+    fn default() -> Self {
+        Self {
+            order: default_order(),
+        }
+    }
+}
+
+fn default_order() -> usize {
+    4
 }
 
 /// The elastic model: horizontal layers or `.npy` files, then optional spheres on top.

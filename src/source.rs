@@ -168,7 +168,7 @@ impl Source {
         // as much.
         let plane = g.plane_len();
         for (field, index, w) in &mut terms {
-            *w /= solver.cell_share(*field, *index / plane - crate::grid::HALO);
+            *w /= solver.cell_share(*field, *index / plane - g.halo);
         }
         Self {
             node,
