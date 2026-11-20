@@ -561,3 +561,164 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
     );
     e
 }
+
+/// The gradient is that of the solver's forward run: perturbing vp, vs or ρ at every node
+/// outside the absorbing layers by random amounts changes the misfit as the gradient says,
+/// to within the finite difference's own error. The model has a free surface, two layers and
+/// a sphere; a force and an explosion; receivers on the surface and at depth recording every
+/// component, every second step.
+///
+/// Measured, extrapolated (orders 4 / 8): vp 1.7e-4 / 6.5e-5, vs 1.6e-6 / 5.8e-6, ρ 1.5e-5 /
+/// 1.2e-5. The plain central differences are off by 2e-3 to 2e-1 at these steps, falling 4×
+/// per halving: their own h² error, with nothing beneath it.
+#[test]
+fn the_gradient_matches_finite_differences() {
+    for order in [4, 8] {
+        gradient_check(order);
+    }
+}
+
+fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
+    let [vp, vs, rho] = sphere;
+    format!(
+        r#"
+        [grid]
+        points = [48, 40, 36]
+        spacing = 10.0
+        [time]
+        duration = 0.35
+        [boundary]
+        pml_width = 8
+        [scheme]
+        order = {order}
+        [output]
+        record_every = 2
+        [[model.layer]]
+        top = 0.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 155.0
+        vp = 3000.0
+        vs = 1700.0
+        rho = 2300.0
+        [[model.sphere]]
+        center = [240.0, 200.0, 120.0]
+        radius = 35.0
+        vp = {vp}
+        vs = {vs}
+        rho = {rho}
+        [[source]]
+        position = [150.0, 160.0, 60.0]
+        force = [3e8, 0.0, 1e9]
+        wavelet = {{ kind = "ricker", frequency = 14.0 }}
+        [[source]]
+        position = [330.0, 230.0, 210.0]
+        explosion = 2e12
+        wavelet = {{ kind = "ricker", frequency = 14.0, delay = 0.1 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        [[receivers.line]]
+        from = [100.0, 200.0, 0.0]
+        to = [380.0, 200.0, 0.0]
+        count = 8
+        [[receivers.point]]
+        position = [240.0, 120.0, 180.0]
+        [[receivers.point]]
+        position = [300.0, 280.0, 90.0]
+        "#
+    )
+}
+
+fn gradient_check(order: usize) {
+    use vibe_rations::config::Config;
+    use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let observed = simulate(&gradient_model(order, [1900.0, 950.0, 1950.0]))
+        .receivers
+        .traces;
+    let weights = balancing_weights(&observed);
+    let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
+    let cfg = Config::from_toml(&gradient_model(order, [2050.0, 1000.0, 2000.0])).unwrap();
+    let base = std::path::Path::new(".");
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let misfit_of = |model: Model| {
+        let mut sim = Simulation::with_model(&cfg, model).unwrap();
+        sim.run(None, false).unwrap();
+        misfit(&sim.receivers.traces).unwrap().0
+    };
+
+    let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+    let run = gradient(&mut sim, |r| misfit(&r.traces), None).unwrap();
+    let [g_vp, g_vs, g_rho] = run.gradient.velocities(&model);
+
+    // Every node outside the layers; vp only below the fastest, which sets dt and the layers.
+    let g = model.grid;
+    let [nx, ny, nz] = g.n;
+    let pml = 8;
+    let vp_max = model.vp_range()[1] as f32;
+    let inside = |i: usize, j: usize, k: usize| {
+        (pml..nx - pml).contains(&i) && (pml..ny - pml).contains(&j) && k < nz - pml
+    };
+    for (name, grad, seed) in [("vp", &g_vp, 3), ("vs", &g_vs, 4), ("rho", &g_rho, 5)] {
+        let u: Vec<f64> = noise(g.interior_len(), seed)
+            .iter()
+            .map(|v| 2.0 * v - 1.0)
+            .collect();
+        let values = |m: &Model| match name {
+            "vp" => m.vp.clone(),
+            "vs" => m.vs.clone(),
+            _ => m.rho.clone(),
+        };
+        let base_values = values(&model);
+        let mut mask = vec![0.0f64; g.interior_len()];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let n = g.interior_idx(i, j, k);
+                    if inside(i, j, k) && !(name == "vp" && base_values[n] >= vp_max) {
+                        mask[n] = u[n];
+                    }
+                }
+            }
+        }
+        // The change the gradient predicts for m → m (1 + h u), per unit h.
+        let predicted: f64 = (0..mask.len())
+            .map(|n| grad[n] * base_values[n] as f64 * mask[n])
+            .sum();
+        let perturbed = |h: f64| {
+            let mut m = model.clone();
+            let target = match name {
+                "vp" => &mut m.vp,
+                "vs" => &mut m.vs,
+                _ => &mut m.rho,
+            };
+            for (v, &w) in target.iter_mut().zip(&mask) {
+                *v = (*v as f64 * (1.0 + h * w)) as f32;
+            }
+            m
+        };
+        // Central differences at h and h/2, then Richardson's extrapolation to cancel their
+        // h² error: smaller steps drown in single-precision round-off first.
+        let h = 1.6e-2;
+        let [coarse, fine] =
+            [h, h / 2.0].map(|h| (misfit_of(perturbed(h)) - misfit_of(perturbed(-h))) / (2.0 * h));
+        let extrapolated = (4.0 * fine - coarse) / 3.0;
+        let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
+        println!(
+            "gradient, order {order}, {name}: predicted {predicted:.6e}; finite differences \
+             off by {:.1e} (h {h:.1e}) and {:.1e} (h/2), extrapolated by {:.1e}",
+            e(coarse),
+            e(fine),
+            e(extrapolated)
+        );
+        assert!(
+            e(extrapolated) < 3e-4,
+            "{name}, order {order}: {}",
+            e(extrapolated)
+        );
+    }
+}
