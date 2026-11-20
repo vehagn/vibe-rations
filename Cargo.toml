@@ -7,9 +7,21 @@ description = "3D elastic seismic wave simulator: a staggered-grid finite-differ
 license = "BSD-3-Clause"
 publish = false
 
+[workspace]
+members = [".", "web"]
+
+[[bin]]
+name = "vibe-rations"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The command-line program; the web app builds the library without it.
+cli = ["dep:clap"]
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 png = "0.18"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }

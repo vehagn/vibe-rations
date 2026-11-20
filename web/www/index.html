@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>vibe-rations</title>
+    <meta name="description" content="3D elastic seismic waves, simulated in your browser with WebAssembly.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 16h5l3-9 5 18 4-14 3 8 2-3h6' fill='none' stroke='%23d1495b' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="style.css">
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <h1>vibe-rations</h1>
+        <p>3D elastic waves, computed in your browser</p>
+      </div>
+      <span id="status" class="status" data-kind="busy">Loading the solver…</span>
+    </header>
+
+    <main>
+      <aside>
+        <section>
+          <h2>Scenario</h2>
+          <label class="field">Example <select id="example"></select></label>
+          <p id="example-description" class="hint"></p>
+          <details>
+            <summary>Configuration (TOML)</summary>
+            <textarea id="editor" spellcheck="false" autocomplete="off" aria-label="Configuration"></textarea>
+            <div class="row">
+              <button id="apply">Apply</button>
+              <a class="hint" href="https://github.com/vehagn/vibe-rations/tree/main/examples" target="_blank" rel="noopener">Reference</a>
+            </div>
+          </details>
+          <div id="error" class="error" role="alert" hidden></div>
+        </section>
+
+        <section>
+          <h2>Run</h2>
+          <div class="row">
+            <button id="run" class="primary" disabled>Run</button>
+            <button id="reset">Reset</button>
+          </div>
+          <progress id="progress" max="1" value="0"></progress>
+          <dl class="stats">
+            <dt>Time</dt><dd id="stat-time">–</dd>
+            <dt>Step</dt><dd id="stat-step">–</dd>
+            <dt>Speed</dt><dd id="stat-speed">–</dd>
+            <dt>Left</dt><dd id="stat-left">–</dd>
+          </dl>
+        </section>
+
+        <section>
+          <h2>View</h2>
+          <div class="field">
+            Field
+            <div class="segmented" role="radiogroup" aria-label="Field">
+              <label><input type="radio" name="field" value="vx"><span>vx</span></label>
+              <label><input type="radio" name="field" value="vy"><span>vy</span></label>
+              <label><input type="radio" name="field" value="vz" checked><span>vz</span></label>
+              <label><input type="radio" name="field" value="p"><span>p</span></label>
+            </div>
+          </div>
+          <div class="field">
+            Plane
+            <div class="segmented" role="radiogroup" aria-label="Plane">
+              <label><input type="radio" name="plane" value="xz" checked><span>xz</span></label>
+              <label><input type="radio" name="plane" value="yz"><span>yz</span></label>
+              <label><input type="radio" name="plane" value="xy"><span>xy</span></label>
+            </div>
+          </div>
+          <label class="field">
+            <span class="split">Position <output id="position-label"></output></span>
+            <input id="position" type="range" min="0" max="0" value="0">
+          </label>
+          <label class="field">
+            <span class="split">Gain <output id="gain-label">×1</output></span>
+            <input id="gain" type="range" min="-3" max="5" step="0.25" value="0">
+          </label>
+          <label class="field">Gather <select id="gather-component"></select></label>
+        </section>
+
+        <section>
+          <h2>Model and grid</h2>
+          <dl id="info" class="info"></dl>
+          <ul id="warnings" class="warnings"></ul>
+        </section>
+
+        <section>
+          <h2>Download</h2>
+          <div class="row">
+            <button id="download-section">Section (PNG)</button>
+            <button id="download-traces">Traces (.npy)</button>
+          </div>
+        </section>
+      </aside>
+
+      <div id="views" class="views">
+        <figure class="panel">
+          <figcaption id="section-title">Wavefield</figcaption>
+          <canvas id="section" class="section"></canvas>
+          <div class="legend" aria-hidden="true">
+            <span id="legend-min"></span>
+            <span class="bar"></span>
+            <span id="legend-max"></span>
+          </div>
+        </figure>
+        <figure id="gather-panel" class="panel">
+          <figcaption>Gather: each receiver's trace, scaled to its own peak</figcaption>
+          <canvas id="gather" class="gather"></canvas>
+        </figure>
+      </div>
+    </main>
+
+    <footer>
+      Fourth-order staggered-grid finite differences, run as WebAssembly on this computer; nothing
+      is sent anywhere. Space starts and pauses.
+      <a href="https://github.com/vehagn/vibe-rations" target="_blank" rel="noopener">Source</a>
+    </footer>
+  </body>
+</html>

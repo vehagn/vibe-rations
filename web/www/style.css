@@ -1,0 +1,369 @@
+:root {
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #1d232b;
+  --muted: #5b6573;
+  --line: #d9dee5;
+  --accent: #c8323f;
+  --accent-ink: #ffffff;
+  --blue: #2f5fd0;
+  --ok: #1f8a4c;
+  --warn: #a86a00;
+  --error-bg: #fdecec;
+  --error-ink: #8a1c1c;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151a;
+    --panel: #1b2027;
+    --ink: #e6e9ee;
+    --muted: #9aa4b2;
+    --line: #313843;
+    --accent: #e0525e;
+    --error-bg: #3a1d1f;
+    --error-ink: #ffb4b4;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.45 var(--font);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.brand p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.status::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status[data-kind="ready"]::before { background: var(--blue); }
+.status[data-kind="running"]::before { background: var(--ok); animation: pulse 1s ease-in-out infinite; }
+.status[data-kind="done"]::before { background: var(--ok); }
+.status[data-kind="error"]::before { background: var(--accent); }
+.status[data-kind="busy"]::before { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+
+@keyframes pulse {
+  50% { opacity: 0.3; }
+}
+
+main {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px 20px;
+  align-items: start;
+}
+
+aside {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+section,
+.panel {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.split {
+  display: flex;
+  justify-content: space-between;
+}
+
+output {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+select,
+button,
+textarea {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+select {
+  padding: 5px 8px;
+}
+
+button {
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  min-width: 90px;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+details summary {
+  margin-top: 8px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+textarea {
+  width: 100%;
+  height: 320px;
+  margin: 8px 0;
+  padding: 8px;
+  font: 12px/1.4 var(--mono);
+  resize: vertical;
+}
+
+.error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error-ink);
+  white-space: pre-wrap;
+}
+
+progress {
+  width: 100%;
+  height: 8px;
+  margin: 10px 0 6px;
+  accent-color: var(--accent);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.info dd {
+  text-align: left;
+}
+
+.warnings {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--warn);
+}
+
+.warnings:empty {
+  display: none;
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented label {
+  flex: 1;
+}
+
+.segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented span {
+  display: block;
+  padding: 4px 0;
+  text-align: center;
+  cursor: pointer;
+  font-family: var(--mono);
+}
+
+.segmented label + label span {
+  border-left: 1px solid var(--line);
+}
+
+.segmented input:checked + span {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.segmented input:focus-visible + span {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.views {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+figcaption {
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+
+canvas {
+  display: block;
+  width: 100%;
+}
+
+canvas.section {
+  height: min(62vh, 640px);
+}
+
+canvas.gather {
+  height: min(42vh, 420px);
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.legend .bar {
+  width: 220px;
+  height: 10px;
+  border-radius: 3px;
+  /* The section's colours along the value: the colour follows √|value|, so half colour is a
+     quarter of the clip. */
+  background: linear-gradient(
+    to right,
+    #0000ff,
+    #4040ff 21.875%,
+    #8080ff 37.5%,
+    #bfbfff 46.875%,
+    #ffffff 50%,
+    #ffbfbf 53.125%,
+    #ff8080 62.5%,
+    #ff4040 78.125%,
+    #ff0000
+  );
+  border: 1px solid var(--line);
+}
+
+footer {
+  padding: 4px 20px 20px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+a {
+  color: var(--blue);
+}
+
+@media (max-width: 860px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+
+  canvas.section {
+    height: 52vh;
+  }
+}

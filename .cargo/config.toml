@@ -1,0 +1,3 @@
+# WebAssembly SIMD (supported by every current browser) lets LLVM vectorise the update loops.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

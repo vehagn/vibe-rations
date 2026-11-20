@@ -1,4 +1,4 @@
-# Recipes run inside the dev container, except `dev` and `in`, which run on the host.
+# Recipes run inside the dev container, except `dev`, `in` and `serve`, which run on the host.
 #
 # The container engine for `just dev` and `just in`, e.g. ENGINE=podman. Any Compose
 # implementation works, e.g. COMPOSE=docker-compose.
@@ -41,12 +41,12 @@ ci: lint test
 # All tests, optimised: the physics tests run whole simulations (about 20 s).
 [group("check")]
 test *args:
-    cargo test --release {{ args }}
+    cargo test --release --workspace {{ args }}
 
-# Unit tests only: every module's tests and the CLI and example checks (a few seconds).
+# Unit tests only: every module's tests (the web crate's too) and the CLI and example checks.
 [group("check")]
 unit *args:
-    cargo test --release --lib --bins --test cli --test examples {{ args }}
+    cargo test --release --workspace --lib --bins --test cli --test examples {{ args }}
 
 # The physics tests, one at a time, printing their misfits and reflections.
 [group("check")]
@@ -57,7 +57,8 @@ physics *args:
 [group("check")]
 lint:
     cargo fmt --check
-    cargo clippy --release --all-targets -- -D warnings
+    cargo clippy --release --workspace --all-targets -- -D warnings
+    cargo clippy --release --package vibe-rations-web --target wasm32-unknown-unknown -- -D warnings
 
 # Formats the code.
 [group("check")]
@@ -68,6 +69,21 @@ fmt:
 [group("check")]
 doc:
     cargo doc --no-deps
+
+# Builds the web app into web/dist: the solver as WebAssembly, the page and the examples.
+[group("web")]
+web:
+    web/build.sh
+
+# Serves web/dist on the host with the production server and headers, at
+# http://localhost:8088. Build it first with `just in web`.
+[group("web")]
+serve port="8088":
+    {{ engine }} run --rm --name vibe-rations-web-dev -p 127.0.0.1:{{ port }}:8080 \
+      -v "{{ justfile_directory() }}/web/dist:/public:ro" \
+      -v "{{ justfile_directory() }}/web/sws.toml:/etc/sws.toml:ro" \
+      -e SERVER_CONFIG_FILE=/etc/sws.toml \
+      ghcr.io/static-web-server/static-web-server:2.44.3
 
 # Run a simulation, e.g. `just run examples/explosion.toml`
 [group("simulate")]
