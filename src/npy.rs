@@ -2,7 +2,7 @@
 //! Arrays are C-ordered (last index fastest).
 
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -51,9 +51,88 @@ fn header(shape: &[usize], len: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Reads a C-ordered float32 or float64 array: its shape and values.
+/// Reads an array of float32 or float64 values, as float32.
 pub fn read(path: &Path) -> Result<(Vec<usize>, Vec<f32>)> {
     let bytes = fs::read(path)?;
+    let h = parse_header(&bytes)?;
+    let count: usize = h.shape.iter().product();
+    let data = &bytes[h.data_start..];
+    let width = if h.wide { 8 } else { 4 };
+    ensure!(
+        data.len() == width * count,
+        "expected {count} float{} values",
+        8 * width
+    );
+    Ok((h.shape, decode(data, h.wide)))
+}
+
+/// An array read a piece at a time, as float32: for scanning files too large to hold.
+pub struct Stream {
+    pub shape: Vec<usize>,
+    reader: BufReader<File>,
+    wide: bool,
+    left: usize,
+}
+
+/// Opens an array for reading in pieces.
+pub fn stream(path: &Path) -> Result<Stream> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut prefix = vec![0u8; 10];
+    reader.read_exact(&mut prefix).context("not an .npy file")?;
+    ensure!(prefix.starts_with(b"\x93NUMPY"), "not an .npy file");
+    let len = match prefix[6] {
+        1 => u16::from_le_bytes([prefix[8], prefix[9]]) as usize,
+        2 | 3 => {
+            let mut more = [0u8; 2];
+            reader.read_exact(&mut more).context("truncated header")?;
+            prefix.extend(more);
+            u32::from_le_bytes(prefix[8..12].try_into()?) as usize
+        }
+        v => bail!("unsupported .npy version {v}"),
+    };
+    let start = prefix.len();
+    prefix.resize(start + len, 0);
+    reader
+        .read_exact(&mut prefix[start..])
+        .context("truncated header")?;
+    let h = parse_header(&prefix)?;
+    let left = h.shape.iter().product();
+    Ok(Stream {
+        shape: h.shape,
+        reader,
+        wide: h.wide,
+        left,
+    })
+}
+
+impl Stream {
+    /// The next `max` values or fewer, into `out`; false once there are none left.
+    pub fn next_chunk(&mut self, out: &mut Vec<f32>, max: usize) -> Result<bool> {
+        out.clear();
+        let n = max.min(self.left);
+        if n == 0 {
+            return Ok(false);
+        }
+        let mut bytes = vec![0u8; n * if self.wide { 8 } else { 4 }];
+        self.reader
+            .read_exact(&mut bytes)
+            .context("the file ends before its data does")?;
+        out.extend(decode(&bytes, self.wide));
+        self.left -= n;
+        Ok(true)
+    }
+}
+
+/// An array's shape and element type, and where its data starts.
+struct Header {
+    shape: Vec<usize>,
+    /// float64 rather than float32.
+    wide: bool,
+    data_start: usize,
+}
+
+/// Parses the header at the start of `bytes`, which must hold all of it.
+fn parse_header(bytes: &[u8]) -> Result<Header> {
     ensure!(
         bytes.len() >= 10 && bytes.starts_with(b"\x93NUMPY"),
         "not an .npy file"
@@ -68,7 +147,11 @@ pub fn read(path: &Path) -> Result<(Vec<usize>, Vec<f32>)> {
     };
     ensure!(bytes.len() >= start + len, "truncated header");
     let header = std::str::from_utf8(&bytes[start..start + len])?;
-    let descr = quoted(after(header, "descr")?)?;
+    let wide = match quoted(after(header, "descr")?)? {
+        "<f4" => false,
+        "<f8" => true,
+        other => bail!("unsupported dtype {other}; use little-endian float32 or float64"),
+    };
     ensure!(
         after(header, "fortran_order")?.starts_with("False"),
         "Fortran-ordered arrays aren't supported; save with numpy.ascontiguousarray"
@@ -82,28 +165,28 @@ pub fn read(path: &Path) -> Result<(Vec<usize>, Vec<f32>)> {
         .map(str::parse)
         .collect::<Result<_, _>>()
         .context("malformed shape")?;
-    let count: usize = shape.iter().product();
-    let data = &bytes[start + len..];
-    let values: Vec<f32> = match descr {
-        "<f4" => {
-            ensure!(data.len() == 4 * count, "expected {count} float32 values");
-            data.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&b| f32::from_le_bytes(b))
-                .collect()
-        }
-        "<f8" => {
-            ensure!(data.len() == 8 * count, "expected {count} float64 values");
-            data.as_chunks::<8>()
-                .0
-                .iter()
-                .map(|&b| f64::from_le_bytes(b) as f32)
-                .collect()
-        }
-        other => bail!("unsupported dtype {other}; use little-endian float32 or float64"),
-    };
-    Ok((shape, values))
+    Ok(Header {
+        shape,
+        wide,
+        data_start: start + len,
+    })
+}
+
+/// Little-endian float32 or float64 values, as float32.
+fn decode(data: &[u8], wide: bool) -> Vec<f32> {
+    if wide {
+        data.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&b| f64::from_le_bytes(b) as f32)
+            .collect()
+    } else {
+        data.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| f32::from_le_bytes(b))
+            .collect()
+    }
 }
 
 /// The text after `'key':` in a header dictionary.
@@ -142,7 +225,15 @@ mod tests {
             let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
             assert_eq!((10 + header_len) % 64, 0);
             assert_eq!(to_bytes(&shape, &data).unwrap(), bytes);
-            assert_eq!(read(&path).unwrap(), (shape, data));
+            assert_eq!(read(&path).unwrap(), (shape.clone(), data.clone()));
+            // In pieces, the same values.
+            let mut s = stream(&path).unwrap();
+            assert_eq!(s.shape, shape);
+            let (mut all, mut chunk) = (Vec::new(), Vec::new());
+            while s.next_chunk(&mut chunk, 5).unwrap() {
+                all.extend_from_slice(&chunk);
+            }
+            assert_eq!(all, data);
         }
         fs::remove_dir_all(dir).unwrap();
     }
@@ -160,6 +251,9 @@ mod tests {
         let path = dir.join("b.npy");
         fs::write(&path, bytes).unwrap();
         assert_eq!(read(&path).unwrap(), (vec![2], vec![1.5, -2.0]));
+        let mut chunk = Vec::new();
+        assert!(stream(&path).unwrap().next_chunk(&mut chunk, 10).unwrap());
+        assert_eq!(chunk, vec![1.5, -2.0]);
         fs::remove_dir_all(dir).unwrap();
     }
 }
