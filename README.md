@@ -524,13 +524,23 @@ Planned next, following Fichtner (2011), ch. 7–11:
    averaging and free surface, so they are the gradient of the discrete run: finite
    differences agree to $10^{-4}$ outside the absorbing layers. The forward field is replayed
    exactly from checkpoints for now.
-3. **Forward wavefield during the adjoint run.** The interior scheme is time-reversible, so
-   it can be rebuilt backward from boundary values saved just inside the layers (Dussaud et
-   al. 2008; Aaker et al. 2020) instead of being stored; checkpointing is the fallback.
+3. **Forward wavefield during the adjoint run** (done: `gradient --reconstruct`,
+   `Strategy::Reconstruct`). The interior scheme is time-reversible, so the field is rebuilt
+   backwards (`Solver::step_back_with`) from a band saved around the layers, as deep as the
+   stencil reaches (Dussaud et al. 2008; Aaker et al. 2020), instead of replayed from
+   checkpoints. Saved for the whole run, the band needs more memory than checkpoints on
+   small grids ($B N$ against $\sqrt N$) and less on large ones; saved for segments, each
+   replayed from a checkpoint at its start, it halves a gradient's memory on
+   `examples/layered.toml` (1.68 against 3.64 GiB) and cuts it by two thirds on a
+   $1001 \times 1001 \times 401$ grid, for about 15% more time. It isn't bit-exact, so
+   checkpoints stay the default.
 4. **Error propagation.** How numerical error in the forward field (dispersion, the
-   interface, free-surface and boundary errors above) and in the reconstruction (round-off in
-   single precision, the non-reversible absorbing layers) carries into the adjoint field, the
-   gradient and the inversion. The tools: dot-product and reciprocity tests for adjoint
+   interface, free-surface and boundary errors above) and in the reconstruction carries into
+   the adjoint field, the gradient and the inversion. The reconstruction's part is measured
+   (research log, "Rebuilding the forward wavefield backwards"; `just drift`): it is
+   single-precision round-off, $10^{-7}$–$10^{-6}$ of the gradient's largest value, growing
+   while the rebuilt field is loud rather than with run length, order or time step, and the
+   layers and the free surface add nothing to it. The tools: dot-product and reciprocity tests for adjoint
    consistency, gradient checks against finite differences, and the accuracy study repeated
    for gradients. With the time-dispersion transform, the adjoint source is the transposed
    transform of the residuals; since the transformed traces equal the time-continuous ones

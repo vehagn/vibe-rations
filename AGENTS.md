@@ -19,13 +19,14 @@ opens a shell there instead.
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
 | `just memory <config>` | The memory a run needs, part by part, without building it (`--gradient`, `--invert`: those runs') | instant |
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
-| `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
+| `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces (`--reconstruct`: rebuild the forward field backwards) | |
 | `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
@@ -51,7 +52,8 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 src/
   main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
-  gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
+  gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay or the field
+                 rebuilt backwards (Strategy), correlations
   inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
@@ -86,6 +88,7 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  reconstruction.rs  the rebuilt wavefield's drift (ignored; `just drift`)
   common/        closed-form solutions and setup helpers the two share
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
@@ -122,6 +125,23 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Rebuilding the forward wavefield backwards** (`gradient_with`, `Strategy::Reconstruct`,
+  `gradient --reconstruct`; the log's 2026-11-20 entry). `Solver::step_back_with` undoes a
+  step with the same arithmetic, the kernels taking a sign of ±1 (which keeps the forward step
+  bit for bit) and skipping the CPML; `Band` supplies what its stencils read from outside the
+  nodes outside the layers: velocities on the whole shell L deep, edges included (the
+  gradient's strain rates just outside the region read them), stresses on the faces they are
+  differentiated across. Records are of the state *before* each step. The band is saved for
+  segments, each replayed from a checkpoint at its start, which resets the drift; the whole
+  run as one segment needs no replay but more memory than checkpoints except on large grids.
+  The drift is single-precision round-off, $10^{-7}$–$10^{-6}$ of the gradient, set by the
+  loudest stretch of the field in a segment; the layers and the free surface add nothing
+  (rigid walls drift the same), water five times more (not traced). Inside the layers the
+  rebuilt field and gradient mean nothing. **Checkpoints stay the default**, also in the
+  inversion: switching is a separate decision. When `gradient` gains an array, add it to
+  both `Plan::gradient_memory` and `Plan::reconstruction_memory`; when the step gains an
+  operation, `step_back_with` must undo it in reverse order (`steps_back_inside_the_band`
+  and `the_rebuilt_wavefield_follows_the_run` catch a miss).
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients
   would otherwise change with every model it tries) as well as $\Delta t$ and
@@ -285,7 +305,10 @@ doesn't show.
   $\le 2.8 \times 10^{-4}$ (order 4's $v_p$, whose directional derivative is small; order 8
   $\le 1.6 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
   anomaly after 3 iterations, and its gradient matches finite differences to
-  $4.0 \times 10^{-6}$ (at $h = 10^{-2}$); the 9 s soft-sediment run drains to
+  $4.0 \times 10^{-6}$ (at $h = 10^{-2}$); the rebuilt wavefield retraces the run to
+  $\le 1.2 \times 10^{-6}$ of each array's peak and its gradient the replay's to
+  $\le 7.1 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
+  the replay's numbers (order 8 $\le 1.6 \times 10^{-5}$); the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
   for these long waves), 0.001–0.008%, 2.53%, the same layers, $\le 7 \times 10^{-7}$. With
   the time error kept at $C = 0.3$ (the default before): 0.07–0.19%, 0.03–0.09%, 2.40%,
