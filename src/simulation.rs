@@ -94,9 +94,32 @@ pub struct SourceInfo {
 impl Simulation {
     /// Sets up a run; `base` is the directory relative paths in the configuration start from.
     pub fn new(cfg: &Config, base: &Path) -> Result<Self> {
+        let model = Model::from_config(Self::grid(cfg)?, &cfg.model, base)?;
+        Self::with_model(cfg, model)
+    }
+
+    /// The grid a configuration describes, with the halo its stencil needs: what a model
+    /// for [`Simulation::with_model`] must be on.
+    pub fn grid(cfg: &Config) -> Result<Grid> {
         let stencil = Stencil::taylor(cfg.scheme.order)?;
-        let grid = cfg.grid.grid()?.with_halo(stencil.half_length());
-        let model = Model::from_config(grid, &cfg.model, base)?;
+        Ok(cfg.grid.grid()?.with_halo(stencil.half_length()))
+    }
+
+    /// Sets up a run of `model` instead of the configuration's own, e.g. a model being
+    /// inverted for. Everything else, the time step included, comes from the configuration
+    /// and the model as for [`Simulation::new`].
+    pub fn with_model(cfg: &Config, model: Model) -> Result<Self> {
+        let stencil = Stencil::taylor(cfg.scheme.order)?;
+        let grid = Self::grid(cfg)?;
+        ensure!(
+            model.grid == grid,
+            "the model's grid ({:?} nodes, halo {}) isn't the configuration's ({:?}, halo {})",
+            model.grid.n,
+            model.grid.halo,
+            grid.n,
+            grid.halo
+        );
+        model.validate()?;
         let mut warnings = Vec::new();
 
         ensure!(
@@ -610,6 +633,27 @@ mod tests {
         assert!(e.contains("no [[source]]"), "{e}");
         let e = error(&format!("{BASE}\n[output]\nrecord_every = 0"));
         assert!(e.contains("record_every"), "{e}");
+    }
+
+    #[test]
+    fn runs_a_model_given_in_memory_on_the_configured_grid() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        let grid = Simulation::grid(&cfg).unwrap();
+        assert_eq!(grid.halo, 4);
+        let model = Model::homogeneous(grid, 2500.0, 1200.0, 2100.0);
+        let sim = Simulation::with_model(&cfg, model).unwrap();
+        assert_eq!(sim.info.vp_range, [2500.0, 2500.0]);
+        let wrong = Model::homogeneous(
+            Grid::new([30, 30, 31], [10.0; 3]).with_halo(4),
+            2500.0,
+            1200.0,
+            2100.0,
+        );
+        let e = format!("{:#}", Simulation::with_model(&cfg, wrong).err().unwrap());
+        assert!(e.contains("grid"), "{e}");
+        let mut bad = Model::homogeneous(grid, 2500.0, 1200.0, 2100.0);
+        bad.vp[0] = -1.0;
+        assert!(Simulation::with_model(&cfg, bad).is_err());
     }
 
     #[test]
