@@ -69,6 +69,9 @@ const on = {
     updateProgress(f);
     draw();
   },
+  estimate({ id, memory, error }) {
+    if (id === state.estimate) showMemory(memory, error);
+  },
   npy({ component, bytes }) {
     download(new Blob([bytes], { type: "application/octet-stream" }), `${component}.npy`);
   },
@@ -114,7 +117,32 @@ function describe(toml) {
   return lines.join(" ");
 }
 
+/// Asks the worker what a configuration would need in memory; the latest answer is shown.
+function estimate(toml) {
+  state.estimate = (state.estimate ?? 0) + 1;
+  worker.postMessage({ type: "estimate", toml, id: state.estimate });
+}
+
+function showMemory(memory, error) {
+  const box = $("#memory");
+  // A configuration that doesn't parse says why when it is applied.
+  box.hidden = Boolean(error);
+  if (error) return;
+  const over = memory.peak > memory.limit;
+  box.dataset.over = over;
+  $("#memory-total").textContent = over
+    ? `Memory: ${formatBytes(memory.peak)}, more than a browser can give (${formatBytes(memory.limit)})`
+    : `Memory: ${formatBytes(memory.peak)} of the browser's ${formatBytes(memory.limit)}`;
+  $("#memory-parts").replaceChildren(
+    ...memory.parts.flatMap(({ what, bytes, transient }) => [
+      Object.assign(document.createElement("dt"), { textContent: formatBytes(bytes) }),
+      Object.assign(document.createElement("dd"), { textContent: transient ? `${what} (only then)` : what }),
+    ]),
+  );
+}
+
 function load(toml) {
+  estimate(toml);
   state.info = null;
   state.section?.bitmap.close();
   state.gather?.bitmap.close();
@@ -202,6 +230,12 @@ $("#apply").addEventListener("click", () => {
   load($("#editor").value);
 });
 $("#reset").addEventListener("click", () => load($("#editor").value));
+// The memory estimate follows the configuration as it is typed.
+let typing;
+$("#editor").addEventListener("input", () => {
+  clearTimeout(typing);
+  typing = setTimeout(() => estimate($("#editor").value), 300);
+});
 $("#run").addEventListener("click", () => worker.postMessage({ type: state.running ? "pause" : "run" }));
 document.addEventListener("keydown", (e) => {
   if (e.key === " " && !["TEXTAREA", "INPUT", "SELECT", "BUTTON"].includes(document.activeElement?.tagName)) {
@@ -398,7 +432,7 @@ function showInfo(info) {
     ],
     ["Boundary", `${info.pml_width}-node layers${info.free_surface ? ", free surface" : ""}`],
     ["Receivers", `${info.receivers} × ${info.samples} samples`],
-    ["Memory", `${(info.memory_bytes / 2 ** 20).toFixed(0)} MiB`],
+    ["Memory", formatBytes(info.memory_bytes)],
   ];
   $("#info").replaceChildren(
     ...rows.flatMap(([k, v]) => [
@@ -438,6 +472,18 @@ function clearError() {
 }
 
 // ---------------------------------------------------------------------------- formatting
+
+/// Bytes for people, as the solver writes them: B, KiB, MiB or GiB.
+function formatBytes(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let v = bytes;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u += 1;
+  }
+  return u === 0 ? `${bytes} B` : `${v < 10 ? v.toFixed(2) : v.toFixed(0)} ${units[u]}`;
+}
 
 function formatLength(m) {
   return Math.abs(m) >= 2000 ? `${+(m / 1000).toFixed(2)} km` : `${+m.toFixed(1)} m`;

@@ -200,6 +200,24 @@ textarea {
   resize: vertical;
 }
 
+.memory {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.memory summary {
+  cursor: pointer;
+}
+
+.memory[data-over="true"] summary {
+  color: var(--accent);
+}
+
+.memory dl {
+  margin-top: 4px;
+}
+
 .error {
   margin-top: 10px;
   padding: 8px 10px;

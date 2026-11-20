@@ -110,6 +110,14 @@ const handlers = {
       }
     }
   },
+  // The memory a configuration would need, worked out without setting it up.
+  async estimate({ toml, id }) {
+    try {
+      send({ type: "estimate", id, memory: JSON.parse(Simulator.estimateMemory(toml)) });
+    } catch (e) {
+      send({ type: "estimate", id, error: String(e?.message ?? e) });
+    }
+  },
   async npy({ component }) {
     try {
       const bytes = sim.tracesNpy(component);

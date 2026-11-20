@@ -10,6 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use vibe_rations::config::{Config, PlaneKind};
 use vibe_rations::image;
+use vibe_rations::memory::{self, Memory};
 use vibe_rations::npy;
 use vibe_rations::receiver::Component;
 use vibe_rations::simulation::Simulation;
@@ -76,6 +77,16 @@ fn js(e: anyhow::Error) -> JsError {
 
 #[wasm_bindgen]
 impl Simulator {
+    /// The memory a configuration would need, as JSON (`memory::Memory`: parts, resident,
+    /// peak, plus the browser's limit), without setting it up.
+    #[wasm_bindgen(js_name = estimateMemory)]
+    pub fn estimate_memory(config: &str) -> Result<String, JsError> {
+        let m = estimate(config).map_err(js)?;
+        let mut value = serde_json::to_value(&m).expect("Memory serialises");
+        value["limit"] = serde_json::json!(BROWSER_LIMIT);
+        Ok(value.to_string())
+    }
+
     /// Sets up a run from a TOML configuration.
     #[wasm_bindgen(constructor)]
     pub fn new(config: &str) -> Result<Simulator, JsError> {
@@ -165,12 +176,36 @@ fn component(name: &str) -> Result<Component> {
     })
 }
 
+/// What WebAssembly can address: 4 GiB. The page refuses runs that would need more, less a
+/// margin for the program and the pictures, before setting them up.
+pub const BROWSER_LIMIT: u64 = 4 << 30;
+const MARGIN: u64 = 128 << 20;
+
+/// The memory a configuration would need in the browser, part by part, without setting it up.
+pub fn estimate(config: &str) -> Result<Memory> {
+    let cfg = browser_config(config)?;
+    memory::estimate(&cfg, Path::new("."))
+}
+
+fn browser_config(config: &str) -> Result<Config> {
+    let cfg = Config::from_toml(config)?;
+    ensure!(
+        cfg.model.files.is_none(),
+        "the browser can't read model files; use [[model.layer]]s and [[model.sphere]]s"
+    );
+    Ok(cfg)
+}
+
 impl View {
     pub fn new(config: &str) -> Result<Self> {
-        let cfg = Config::from_toml(config)?;
+        let cfg = browser_config(config)?;
+        let m = memory::estimate(&cfg, Path::new("."))?;
         ensure!(
-            cfg.model.files.is_none(),
-            "the browser can't read model files; use [[model.layer]]s and [[model.sphere]]s"
+            m.peak + MARGIN <= BROWSER_LIMIT,
+            "this run needs {} of memory, and a browser gives WebAssembly at most {}; use a \
+             smaller grid, or the command-line program",
+            memory::human(m.peak),
+            memory::human(BROWSER_LIMIT)
         );
         Ok(Self {
             sim: Simulation::new(&cfg, Path::new("."))?,
@@ -410,6 +445,22 @@ mod tests {
             info["receiver_positions"][4],
             serde_json::json!([180.0, 100.0, 0.0])
         );
+    }
+
+    #[test]
+    fn estimates_memory_and_refuses_runs_too_large_for_the_browser() {
+        let m = estimate(CONFIG).unwrap();
+        assert_eq!(m, View::new(CONFIG).unwrap().sim.info.memory);
+        let e = format!("{:#}", View::new(&grown(CONFIG)).err().unwrap());
+        assert!(e.contains("at most 4.00 GiB"), "{e}");
+        assert!(estimate(&grown(CONFIG)).unwrap().peak > BROWSER_LIMIT);
+    }
+
+    /// The test configuration on a grid far too large for a browser.
+    fn grown(text: &str) -> String {
+        let start = text.find("points = [").unwrap();
+        let end = start + text[start..].find(']').unwrap() + 1;
+        format!("{}points = [800, 800, 800]{}", &text[..start], &text[end..])
     }
 
     #[test]
