@@ -1,0 +1,426 @@
+% Every work cited in this repository: code comments, README, AGENTS.md, skills, tests and the
+% research log (docs/research-log.md). Keep it complete: whoever cites anything anywhere adds
+% the entry here, with the key used in the text.
+%
+% Checked 2026-11-20: every DOI against its Crossref record (title, journal, volume, issue,
+% pages); entries without a DOI against the paper or the publisher's page. A `note` marks what
+% is still unchecked.
+
+% ---------------------------------------------------------------------------------------------
+% Finite differences, boundaries and sources
+
+@article{virieux1986,
+  author  = {Virieux, Jean},
+  title   = {{P-SV} wave propagation in heterogeneous media: Velocity-stress finite-difference method},
+  journal = {Geophysics},
+  year    = {1986},
+  volume  = {51},
+  number  = {4},
+  pages   = {889--901},
+  doi     = {10.1190/1.1442147},
+}
+
+@article{levander1988,
+  author  = {Levander, Alan R.},
+  title   = {Fourth-order finite-difference {P-SV} seismograms},
+  journal = {Geophysics},
+  year    = {1988},
+  volume  = {53},
+  number  = {11},
+  pages   = {1425--1436},
+  doi     = {10.1190/1.1442422},
+}
+
+@article{graves1996,
+  author  = {Graves, Robert W.},
+  title   = {Simulating seismic wave propagation in {3D} elastic media using staggered-grid finite differences},
+  journal = {Bulletin of the Seismological Society of America},
+  year    = {1996},
+  volume  = {86},
+  number  = {4},
+  pages   = {1091--1106},
+}
+
+@article{holberg1987,
+  author  = {Holberg, Olav},
+  title   = {Computational aspects of the choice of operator and sampling interval for numerical differentiation in large-scale simulation of wave phenomena},
+  journal = {Geophysical Prospecting},
+  year    = {1987},
+  volume  = {35},
+  number  = {6},
+  pages   = {629--655},
+  doi     = {10.1111/j.1365-2478.1987.tb00841.x},
+}
+
+@article{liu2011,
+  author  = {Liu, Yang and Sen, Mrinal K.},
+  title   = {Scalar wave equation modeling with time-space domain dispersion-relation-based staggered-grid finite-difference schemes},
+  journal = {Bulletin of the Seismological Society of America},
+  year    = {2011},
+  volume  = {101},
+  number  = {1},
+  pages   = {141--159},
+  doi     = {10.1785/0120100041},
+}
+
+@article{moczo2011,
+  author  = {Moczo, Peter and Kristek, Jozef and Galis, Martin and Chaljub, Emmanuel and Etienne, Vincent},
+  title   = {{3-D} finite-difference, finite-element, discontinuous-{Galerkin} and spectral-element schemes analysed for their accuracy with respect to {P}-wave to {S}-wave speed ratio},
+  journal = {Geophysical Journal International},
+  year    = {2011},
+  volume  = {187},
+  number  = {3},
+  pages   = {1645--1667},
+  note    = {Cited as Moczo et al. (2010) in Fichtner (2011)},
+}
+
+@article{mittet2002,
+  author  = {Mittet, Rune},
+  title   = {Free-surface boundary conditions for elastic staggered-grid modeling schemes},
+  journal = {Geophysics},
+  year    = {2002},
+  volume  = {67},
+  number  = {5},
+  pages   = {1616--1623},
+  doi     = {10.1190/1.1512752},
+}
+
+@article{mittet2017,
+  author  = {Mittet, Rune},
+  title   = {On the internal interfaces in finite-difference schemes},
+  journal = {Geophysics},
+  year    = {2017},
+  volume  = {82},
+  number  = {4},
+  pages   = {T159--T182},
+  doi     = {10.1190/geo2016-0477.1},
+}
+
+@article{kristek2002,
+  author  = {Kristek, Jozef and Moczo, Peter and Archuleta, Ralph J.},
+  title   = {Efficient methods to simulate planar free surface in the {3D} 4th-order staggered-grid finite-difference schemes},
+  journal = {Studia Geophysica et Geodaetica},
+  year    = {2002},
+  volume  = {46},
+  number  = {2},
+  pages   = {355--381},
+  doi     = {10.1023/A:1019866422821},
+}
+
+@article{hicks2002,
+  author  = {Hicks, Graham J.},
+  title   = {Arbitrary source and receiver positioning in finite-difference schemes using {Kaiser} windowed sinc functions},
+  journal = {Geophysics},
+  year    = {2002},
+  volume  = {67},
+  number  = {1},
+  pages   = {156--166},
+  doi     = {10.1190/1.1451454},
+}
+
+@article{collino2001,
+  author  = {Collino, Francis and Tsogka, Chrysoula},
+  title   = {Application of the perfectly matched absorbing layer model to the linear elastodynamic problem in anisotropic heterogeneous media},
+  journal = {Geophysics},
+  year    = {2001},
+  volume  = {66},
+  number  = {1},
+  pages   = {294--307},
+  doi     = {10.1190/1.1444908},
+}
+
+@article{komatitsch2007,
+  author  = {Komatitsch, Dimitri and Martin, Roland},
+  title   = {An unsplit convolutional perfectly matched layer improved at grazing incidence for the seismic wave equation},
+  journal = {Geophysics},
+  year    = {2007},
+  volume  = {72},
+  number  = {5},
+  pages   = {SM155--SM167},
+  doi     = {10.1190/1.2757586},
+}
+
+@article{festa2005,
+  author  = {Festa, Gaetano and Delavaud, Elise and Vilotte, Jean-Pierre},
+  title   = {Interaction between surface waves and absorbing boundaries for wave propagation in geological basins: {2D} numerical simulations},
+  journal = {Geophysical Research Letters},
+  year    = {2005},
+  volume  = {32},
+  number  = {20},
+  doi     = {10.1029/2005GL024091},
+}
+
+@article{mezafajardo2008,
+  author  = {Meza-Fajardo, Kristel C. and Papageorgiou, Apostolos S.},
+  title   = {A nonconvolutional, split-field, perfectly matched layer for wave propagation in isotropic and anisotropic elastic media: Stability analysis},
+  journal = {Bulletin of the Seismological Society of America},
+  year    = {2008},
+  volume  = {98},
+  number  = {4},
+  pages   = {1811--1836},
+  doi     = {10.1785/0120070223},
+}
+
+@article{pekeris1955,
+  author  = {Pekeris, Chaim L.},
+  title   = {The seismic surface pulse},
+  journal = {Proceedings of the National Academy of Sciences},
+  year    = {1955},
+  volume  = {41},
+  number  = {7},
+  pages   = {469--480},
+  doi     = {10.1073/pnas.41.7.469},
+}
+
+@book{aki2002,
+  author    = {Aki, Keiiti and Richards, Paul G.},
+  title     = {Quantitative Seismology},
+  edition   = {2},
+  publisher = {University Science Books},
+  address   = {Sausalito, California},
+  year      = {2002},
+}
+
+@book{fichtner2011,
+  author    = {Fichtner, Andreas},
+  title     = {Full Seismic Waveform Modelling and Inversion},
+  publisher = {Springer},
+  address   = {Berlin, Heidelberg},
+  series    = {Advances in Geophysical and Environmental Mechanics and Mathematics},
+  year      = {2011},
+  doi       = {10.1007/978-3-642-15807-0},
+}
+
+% ---------------------------------------------------------------------------------------------
+% Wavefield reconstruction for gradients
+
+@inproceedings{dussaud2008,
+  author    = {Dussaud, Eric and Symes, William W. and Williamson, Paul and Lemaistre, Laurent and Singer, Paul and Denel, Bertrand and Cherrett, Adam},
+  title     = {Computational strategies for reverse-time migration},
+  booktitle = {SEG Technical Program Expanded Abstracts 2008},
+  publisher = {Society of Exploration Geophysicists},
+  year      = {2008},
+  pages     = {2267--2271},
+  note      = {Author list and pages from memory; not yet checked against the SEG record},
+}
+
+@article{aaker2020,
+  author  = {Aaker, Ole Edvard and Raknes, Espen Birger and Arntsen, B{\o}rge},
+  title   = {Elastodynamic full waveform inversion on {GPUs} with time-space tiling and wavefield reconstruction},
+  journal = {The Journal of Supercomputing},
+  year    = {2020},
+  volume  = {77},
+  number  = {3},
+  pages   = {2416--2457},
+  doi     = {10.1007/s11227-020-03352-5},
+}
+
+% ---------------------------------------------------------------------------------------------
+% Full waveform inversion
+
+@article{tarantola1984,
+  author  = {Tarantola, Albert},
+  title   = {Inversion of seismic reflection data in the acoustic approximation},
+  journal = {Geophysics},
+  year    = {1984},
+  volume  = {49},
+  number  = {8},
+  pages   = {1259--1266},
+  doi     = {10.1190/1.1441754},
+}
+
+@article{tarantola1986,
+  author  = {Tarantola, Albert},
+  title   = {A strategy for nonlinear elastic inversion of seismic reflection data},
+  journal = {Geophysics},
+  year    = {1986},
+  volume  = {51},
+  number  = {10},
+  pages   = {1893--1903},
+  doi     = {10.1190/1.1442046},
+}
+
+@article{tarantola1988,
+  author  = {Tarantola, Albert},
+  title   = {Theoretical background for the inversion of seismic waveforms including elasticity and attenuation},
+  journal = {Pure and Applied Geophysics},
+  year    = {1988},
+  volume  = {128},
+  number  = {1--2},
+  pages   = {365--399},
+  doi     = {10.1007/BF01772605},
+}
+
+@article{gauthier1986,
+  author  = {Gauthier, Odile and Virieux, Jean and Tarantola, Albert},
+  title   = {Two-dimensional nonlinear inversion of seismic waveforms: Numerical results},
+  journal = {Geophysics},
+  year    = {1986},
+  volume  = {51},
+  number  = {7},
+  pages   = {1387--1403},
+  doi     = {10.1190/1.1442188},
+}
+
+@article{mora1987,
+  author  = {Mora, Peter},
+  title   = {Nonlinear two-dimensional elastic inversion of multioffset seismic data},
+  journal = {Geophysics},
+  year    = {1987},
+  volume  = {52},
+  number  = {9},
+  pages   = {1211--1228},
+  doi     = {10.1190/1.1442384},
+}
+
+@article{tromp2005,
+  author  = {Tromp, Jeroen and Tape, Carl and Liu, Qinya},
+  title   = {Seismic tomography, adjoint methods, time reversal and banana-doughnut kernels},
+  journal = {Geophysical Journal International},
+  year    = {2005},
+  volume  = {160},
+  number  = {1},
+  pages   = {195--216},
+  doi     = {10.1111/j.1365-246X.2004.02453.x},
+}
+
+@article{fichtner2006,
+  author  = {Fichtner, Andreas and Bunge, Hans-Peter and Igel, Heiner},
+  title   = {The adjoint method in seismology: {I}. {Theory}},
+  journal = {Physics of the Earth and Planetary Interiors},
+  year    = {2006},
+  volume  = {157},
+  number  = {1--2},
+  pages   = {86--104},
+  doi     = {10.1016/j.pepi.2006.03.016},
+}
+
+@article{fichtner2011hessian,
+  author  = {Fichtner, Andreas and Trampert, Jeannot},
+  title   = {Hessian kernels of seismic data functionals based upon adjoint techniques},
+  journal = {Geophysical Journal International},
+  year    = {2011},
+  volume  = {185},
+  number  = {2},
+  pages   = {775--798},
+  doi     = {10.1111/j.1365-246X.2011.04966.x},
+}
+
+@article{fichtner2011resolution,
+  author  = {Fichtner, Andreas and Trampert, Jeannot},
+  title   = {Resolution analysis in full waveform inversion},
+  journal = {Geophysical Journal International},
+  year    = {2011},
+  volume  = {187},
+  number  = {3},
+  pages   = {1604--1624},
+  doi     = {10.1111/j.1365-246X.2011.05218.x},
+}
+
+@article{fichtner2013,
+  author  = {Fichtner, Andreas and Trampert, Jeannot and Cupillard, Paul and Saygin, Erdinc and Taymaz, Tuncay and Capdeville, Yann and Villase{\~n}or, Antonio},
+  title   = {Multiscale full waveform inversion},
+  journal = {Geophysical Journal International},
+  year    = {2013},
+  volume  = {194},
+  number  = {1},
+  pages   = {534--556},
+  doi     = {10.1093/gji/ggt118},
+  note    = {Author list from memory; volume, pages and DOI checked against the paper},
+}
+
+@article{pratt1998,
+  author  = {Pratt, R. Gerhard and Shin, Changsoo and Hicks, Graham J.},
+  title   = {{Gauss-Newton} and full {Newton} methods in frequency-space seismic waveform inversion},
+  journal = {Geophysical Journal International},
+  year    = {1998},
+  volume  = {133},
+  number  = {2},
+  pages   = {341--362},
+}
+
+@article{epanomeritakis2008,
+  author  = {Epanomeritakis, Ioannis and Ak{\c{c}}elik, Volkan and Ghattas, Omar and Bielak, Jacobo},
+  title   = {A {Newton-CG} method for large-scale three-dimensional elastic full-waveform seismic inversion},
+  journal = {Inverse Problems},
+  year    = {2008},
+  volume  = {24},
+  number  = {3},
+  pages   = {034015},
+  doi     = {10.1088/0266-5611/24/3/034015},
+}
+
+@article{metivier2013,
+  author  = {M{\'e}tivier, Ludovic and Brossier, Romain and Virieux, Jean and Operto, St{\'e}phane},
+  title   = {Full waveform inversion and the truncated {Newton} method},
+  journal = {SIAM Journal on Scientific Computing},
+  year    = {2013},
+  volume  = {35},
+  number  = {2},
+  pages   = {B401--B437},
+  doi     = {10.1137/120877854},
+}
+
+@article{kohn2012,
+  author  = {K{\"o}hn, Daniel and De Nil, Denise and Kurzmann, Andr{\'e} and Przebindowska, Anna and Bohlen, Thomas},
+  title   = {On the influence of model parametrization in elastic full waveform tomography},
+  journal = {Geophysical Journal International},
+  year    = {2012},
+  volume  = {191},
+  number  = {1},
+  pages   = {325--345},
+  doi     = {10.1111/j.1365-246X.2012.05633.x},
+}
+
+@article{operto2013,
+  author  = {Operto, St{\'e}phane and Gholami, Yaser and Prieux, Vincent and Ribodetti, Alessandra and Brossier, Romain and M{\'e}tivier, Ludovic and Virieux, Jean},
+  title   = {A guided tour of multiparameter full-waveform inversion with multicomponent data: From theory to practice},
+  journal = {The Leading Edge},
+  year    = {2013},
+  volume  = {32},
+  number  = {9},
+  pages   = {1040--1054},
+  doi     = {10.1190/tle32091040.1},
+}
+
+@article{butzer2013,
+  author  = {Butzer, Sven and Kurzmann, Andr{\'e} and Bohlen, Thomas},
+  title   = {{3D} elastic full-waveform inversion of small-scale heterogeneities in transmission geometry},
+  journal = {Geophysical Prospecting},
+  year    = {2013},
+  volume  = {61},
+  number  = {6},
+  pages   = {1238--1251},
+  doi     = {10.1111/1365-2478.12065},
+}
+
+@article{raknes2015,
+  author  = {Raknes, Espen Birger and Arntsen, B{\o}rge and Weibull, Wiktor},
+  title   = {Three-dimensional elastic full waveform inversion using seismic data from the {Sleipner} area},
+  journal = {Geophysical Journal International},
+  year    = {2015},
+  volume  = {202},
+  number  = {3},
+  pages   = {1877--1894},
+  doi     = {10.1093/gji/ggv258},
+}
+
+@misc{engquist2014,
+  author        = {Engquist, Bj{\"o}rn and Froese, Brittany D.},
+  title         = {Application of the {Wasserstein} metric to seismic signals},
+  year          = {2013},
+  eprint        = {1311.4581},
+  archivePrefix = {arXiv},
+  primaryClass  = {math-ph},
+  note          = {Published in Communications in Mathematical Sciences, 2014 (volume and pages not yet checked)},
+}
+
+@inproceedings{yang2016,
+  author    = {Yang, Yunan and Engquist, Bj{\"o}rn and Sun, Junzhe},
+  title     = {Convexity of the quadratic {Wasserstein} metric as a misfit function for full-waveform inversion},
+  booktitle = {SEG Technical Program Expanded Abstracts 2016},
+  publisher = {Society of Exploration Geophysicists},
+  year      = {2016},
+  pages     = {1385},
+  note      = {First page checked against the paper; last page not},
+}
