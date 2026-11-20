@@ -694,6 +694,46 @@ The checks refuse receivers next to the layers, so they can't drift into measuri
 `the_gradient_matches_finite_differences*`).
 
 
+## 2026-11-20 — A gradient run's memory, counted beforehand
+
+**Question.** `run` and `check` refuse runs that won't fit, but `gradient` checked only the
+forward run's memory, so it could set out on a run many times larger and fail partway. What
+does a gradient run hold, and what dominates it?
+
+**Method.** `memory::Plan::gradient_memory` counts what `gradient::gradient` holds at its
+peak, while the forward run is replayed: the forward run, the adjoint's solver (a full copy,
+material and model included) and its residuals, a copy of the pressure residuals, the
+observed traces, $\lceil N/k \rceil$ checkpoints (the wavefield and the CPML memory), $k + 1$
+velocity triples for one segment, the correlation sums (8 doubles per padded node) and the
+forward and adjoint strains (12 arrays). `gradient::Run::memory_bytes` now sums the arrays a
+real run holds at that moment, and `gradient` frees the replay before it makes the gradient,
+so the output never adds to the peak. The test compares the two with and without pressure,
+the time-dispersion transform and a free surface (with its sponge), at the default interval
+and at one that leaves a short last segment.
+
+**Results.** Exact, byte for byte, in all four. Per padded node the checkpoints and the
+segment take $4\,(9 \lceil N/k \rceil + 3(k + 1))$ bytes, about $24\sqrt{3N} \approx
+42\sqrt N$ at $k = \lceil\sqrt{3N}\rceil$, against about 108 for the whole forward run.
+`examples/layered.toml` with the defaults (1,611 steps, checkpoints every 70): 3.63 GiB against
+147 MiB, of which 1.85 GiB checkpoints, 1.33 GiB the segment, 145 MiB the adjoint's solver,
+102 MiB the sums and 76 MiB the strains. The same model on $1001 \times 1001 \times 401$
+nodes: 795 GiB (the forward run: 32 GiB). With the time error kept at $C = 0.3$ (4,456 steps)
+the previous entry's estimate was over 6 GiB, so the new defaults' larger step also cut the
+gradient's memory by $\sqrt{N}$.
+
+**Decision.** `gradient` refuses runs that don't fit before allocating anything;
+`vibe-rations memory --gradient` itemises them; `gradient.json`'s `memory_bytes` is what the
+run held, with the observed traces, and equals the plan. At 25 times the forward run's
+memory for 1,611 steps, growing as $\sqrt N$, storing the forward field is what limits gradient
+runs on one machine: the case for rebuilding it backwards from boundary values (roadmap step
+3), for checkpointing that trades memory for recomputation, or for checkpoints on disk. The
+adjoint's solver could also share the forward solver's material and model, 44 bytes per node,
+which is small next to them.
+
+**Reproduce:** `just unit counts_what_a_gradient_run_allocates`;
+`just memory examples/layered.toml --gradient`.
+
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

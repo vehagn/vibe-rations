@@ -80,6 +80,18 @@ fn memory_itemises_a_model_without_building_it() {
     for part in ["wavefield", "material", "model", "traces", "at most"] {
         assert!(text.contains(part), "no {part} in\n{text}");
     }
+    // A gradient run holds the adjoint's solver, checkpoints and a replayed segment too.
+    let out = vibe(&["memory", "--gradient", "examples/explosion.toml"]);
+    let gradient = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", stderr(&out));
+    for part in [
+        "adjoint's solver",
+        "checkpoints",
+        "replayed segment",
+        "strains",
+    ] {
+        assert!(gradient.contains(part), "no {part} in\n{gradient}");
+    }
     let dir = scratch("memory");
     let huge = dir.join("huge.toml");
     fs::write(
@@ -178,6 +190,11 @@ fn gradient_writes_one_array_per_parameter() {
     };
     let out = args(&observed);
     assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("memory --gradient"),
+        "{}",
+        stderr(&out)
+    );
     for name in ["vp", "vs", "rho"] {
         let bytes = fs::read(grad.join(format!("grad_{name}.npy"))).unwrap();
         assert!(bytes.starts_with(b"\x93NUMPY"), "grad_{name}.npy");

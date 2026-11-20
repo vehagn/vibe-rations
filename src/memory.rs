@@ -4,8 +4,10 @@
 //! Every large array is counted exactly, from the same quantities the run uses: the wavefield
 //! and material on the padded grid, the model on the interior, the CPML memory variables, the
 //! sources' pre-warped time series, the traces, and the copy a volume snapshot makes while it is
-//! written. What is left (the program, the stencil and receiver operators, per-thread scratch
-//! rows) is a few MiB.
+//! written. A gradient run ([`crate::gradient::gradient`]) holds much more: a second solver for
+//! the adjoint, the residuals, checkpoints of the forward wavefield, one replayed segment of its
+//! velocities, the correlation sums and the forward and adjoint strains. What is left (the
+//! program, the stencil and receiver operators, per-thread scratch rows) is a few MiB.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -15,14 +17,16 @@ use serde::Serialize;
 
 use crate::config::{Config, PlaneKind};
 use crate::fd::Stencil;
+use crate::gradient::checkpoint_interval;
 use crate::grid::Grid;
 use crate::model::Model;
+use crate::receiver::Component;
 use crate::simulation::timing;
 
 /// One part of a run's memory.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Part {
-    pub what: &'static str,
+    pub what: String,
     pub bytes: u64,
     /// Held only for a moment (while a snapshot is written), not for the whole run.
     pub transient: bool,
@@ -52,6 +56,8 @@ pub struct Plan {
     pub warped_sources: usize,
     /// Receivers times recorded components.
     pub traces: usize,
+    /// Receivers recording pressure: a gradient run keeps a second copy of their residuals.
+    pub pressure_traces: usize,
     pub samples: usize,
     pub volume_snapshots: bool,
 }
@@ -73,59 +79,113 @@ impl Plan {
                 0
             },
             traces: receivers * cfg.receivers.components.len(),
+            pressure_traces: if cfg.receivers.components.contains(&Component::P) {
+                receivers
+            } else {
+                0
+            },
             samples: steps.div_ceil(cfg.output.record_every.max(1)),
             volume_snapshots: cfg.snapshots.iter().any(|s| s.plane == PlaneKind::Volume),
         })
     }
 
+    /// The memory of a forward run.
     pub fn memory(&self) -> Memory {
+        let mut parts = self.forward_parts();
+        if self.volume_snapshots {
+            // The nodes (three indices each), their values and their shading.
+            parts.push(Part {
+                what: "a volume snapshot, while it is written".into(),
+                bytes: (24 + 4 + 4) * self.grid.interior_len() as u64,
+                transient: true,
+            });
+        }
+        Memory::of(parts)
+    }
+
+    /// The memory of a gradient run ([`crate::gradient::gradient`]) with a checkpoint every
+    /// `checkpoint_every` steps (by default the interval that about minimises it), and of the
+    /// observed traces the `gradient` command reads. It peaks while the forward run is
+    /// replayed: on top of the forward run (which writes no snapshots then), the adjoint's
+    /// solver and residuals, every checkpoint, one segment's velocities, the correlation sums
+    /// and the two strains. All but the sums are freed before the gradient is put together.
+    pub fn gradient_memory(&self, checkpoint_every: Option<usize>) -> Memory {
+        let padded = self.grid.padded_len() as u64;
+        let every = checkpoint_interval(self.steps, checkpoint_every);
+        let checkpoints = self.steps.div_ceil(every);
+        // The segment holds the velocities before its first step and after each of the others.
+        let segment = if self.steps == 0 { 0 } else { every + 1 };
+        let mut parts = self.forward_parts();
+        parts.extend([
+            part(
+                "the adjoint's solver, the same again",
+                self.solver_bytes(),
+            ),
+            part("observed traces", 4 * (self.traces * self.samples) as u64),
+            part("residuals", 4 * (self.traces * self.samples) as u64),
+            part(
+                "pressure residuals, as they enter the adjoint strain",
+                4 * (self.pressure_traces * self.samples) as u64,
+            ),
+            part(
+                format!("checkpoints: {checkpoints}, every {every} steps, of the wavefield and layers' memory"),
+                checkpoints as u64 * 4 * (9 * padded + self.psi()),
+            ),
+            part(
+                format!("a replayed segment: {segment} copies of the velocities"),
+                segment as u64 * 4 * 3 * padded,
+            ),
+            part("correlation sums: 8 per padded node, in double precision", 8 * 8 * padded),
+            part("forward and adjoint strains: 12 arrays on the padded grid", 4 * 12 * padded),
+        ]);
+        Memory::of(parts)
+    }
+
+    /// The parts of a forward run held throughout: the solver's, the sources' and the traces.
+    fn forward_parts(&self) -> Vec<Part> {
         let g = &self.grid;
-        let [nx, ny, nz] = g.n.map(|n| n as u64);
         let padded = g.padded_len() as u64;
         let interior = g.interior_len() as u64;
-        let [w0, w1, w2] = self.layer_nodes.map(|w| w as u64);
-        // Three memory variables per slab node, for velocities and for stresses.
-        let psi = 2 * 3 * (nz * ny * w0 + nz * w1 * nx + w2 * ny * nx);
-        let sponge = if self.sponge { nx + ny + nz } else { 0 };
-        let mut parts = vec![
+        vec![
             part("wavefield: 9 arrays on the padded grid", 4 * 9 * padded),
             part("material: 8 arrays on the padded grid", 4 * 8 * padded),
             part("model: vp, vs and rho", 4 * 3 * interior),
-            part("absorbing layers' memory", 4 * (psi + sponge)),
+            part(
+                "absorbing layers' memory",
+                4 * (self.psi() + self.sponge_factors()),
+            ),
             part(
                 "sources' pre-warped time series",
                 8 * (self.warped_sources * self.steps) as u64,
             ),
             part("traces", 4 * (self.traces * self.samples) as u64),
-        ];
-        if self.volume_snapshots {
-            // The nodes (three indices each), their values and their shading.
-            parts.push(Part {
-                what: "a volume snapshot, while it is written",
-                bytes: (24 + 4 + 4) * interior,
-                transient: true,
-            });
-        }
-        parts.retain(|p| p.bytes > 0);
-        let resident = parts.iter().filter(|p| !p.transient).map(|p| p.bytes).sum();
-        let peak = resident
-            + parts
-                .iter()
-                .filter(|p| p.transient)
-                .map(|p| p.bytes)
-                .max()
-                .unwrap_or(0);
-        Memory {
-            parts,
-            resident,
-            peak,
-        }
+        ]
+    }
+
+    /// Bytes of a solver (`Solver::memory_bytes`).
+    fn solver_bytes(&self) -> u64 {
+        let padded = self.grid.padded_len() as u64;
+        let interior = self.grid.interior_len() as u64;
+        4 * ((9 + 8) * padded + 3 * interior + self.psi() + self.sponge_factors())
+    }
+
+    /// The CPML memory variables: three per slab node, for velocities and for stresses.
+    fn psi(&self) -> u64 {
+        let [nx, ny, nz] = self.grid.n.map(|n| n as u64);
+        let [w0, w1, w2] = self.layer_nodes.map(|w| w as u64);
+        2 * 3 * (nz * ny * w0 + nz * w1 * nx + w2 * ny * nx)
+    }
+
+    /// The sponge's damping factors, one per node along each axis.
+    fn sponge_factors(&self) -> u64 {
+        let [nx, ny, nz] = self.grid.n.map(|n| n as u64);
+        if self.sponge { nx + ny + nz } else { 0 }
     }
 }
 
-fn part(what: &'static str, bytes: u64) -> Part {
+fn part(what: impl Into<String>, bytes: u64) -> Part {
     Part {
-        what,
+        what: what.into(),
         bytes,
         transient: false,
     }
@@ -136,11 +196,25 @@ fn part(what: &'static str, bytes: u64) -> Part {
 /// spheres, or from its files read through a piece at a time. `base` is the directory relative
 /// paths start from.
 pub fn estimate(cfg: &Config, base: &Path) -> Result<Memory> {
+    Ok(plan(cfg, base)?.memory())
+}
+
+/// The memory a gradient run of `cfg` would need ([`Plan::gradient_memory`]), worked out like
+/// [`estimate`].
+pub fn estimate_gradient(
+    cfg: &Config,
+    base: &Path,
+    checkpoint_every: Option<usize>,
+) -> Result<Memory> {
+    Ok(plan(cfg, base)?.gradient_memory(checkpoint_every))
+}
+
+fn plan(cfg: &Config, base: &Path) -> Result<Plan> {
     let taylor = Stencil::taylor(cfg.scheme.order)?;
     let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
     let [vp_max, slowest] = Model::extremes(grid, &cfg.model, base)?;
     let t = timing(cfg, &grid, vp_max, slowest)?;
-    Ok(Plan::new(cfg, grid, t.steps)?.memory())
+    Plan::new(cfg, grid, t.steps)
 }
 
 /// Memory the system can still give this process (Linux): /proc/meminfo's MemAvailable, or
@@ -181,6 +255,24 @@ pub fn human(bytes: u64) -> String {
 }
 
 impl Memory {
+    /// The totals of `parts`, without those that hold nothing.
+    fn of(mut parts: Vec<Part>) -> Self {
+        parts.retain(|p| p.bytes > 0);
+        let resident = parts.iter().filter(|p| !p.transient).map(|p| p.bytes).sum();
+        let peak = resident
+            + parts
+                .iter()
+                .filter(|p| p.transient)
+                .map(|p| p.bytes)
+                .max()
+                .unwrap_or(0);
+        Self {
+            parts,
+            resident,
+            peak,
+        }
+    }
+
     /// A table for people, one part a line, then the totals.
     pub fn table(&self) -> String {
         let mut s = String::new();
@@ -193,7 +285,9 @@ impl Memory {
                 if p.transient { " (only then)" } else { "" }
             );
         }
-        let _ = writeln!(s, "  {:>10}  held throughout the run", human(self.resident));
+        if self.peak > self.resident {
+            let _ = writeln!(s, "  {:>10}  held throughout the run", human(self.resident));
+        }
         let _ = write!(s, "  {:>10}  at most, plus a few MiB", human(self.peak));
         s
     }
@@ -279,6 +373,41 @@ mod tests {
             } else {
                 assert_eq!(m.peak, m.resident);
             }
+        }
+    }
+
+    /// A gradient run's plan counts what `gradient` holds at its peak, with the observed
+    /// traces: with and without pressure, the transform, a free surface (and its sponge), and
+    /// with the default interval and one that leaves a short last segment.
+    #[test]
+    fn counts_what_a_gradient_run_allocates() {
+        let free_surface = BASE.replace("pml_width = 8", "pml_width = 8\nfree_surface = true");
+        let velocity_only = BASE.replace(r#"["vx", "vz", "p"]"#, r#"["vx", "vz"]"#);
+        for (text, every) in [
+            (BASE.to_string(), None),
+            (
+                format!("{BASE}\n[scheme]\nremove_time_dispersion = false\norder = 4"),
+                None,
+            ),
+            (free_surface, Some(7)),
+            (velocity_only, Some(1000)),
+        ] {
+            let cfg = Config::from_toml(&text).unwrap();
+            let m = estimate_gradient(&cfg, Path::new("."), every).unwrap();
+            let mut s = sim(&text);
+            let observed = s.receivers.traces.clone();
+            let weights = vec![1.0; observed.len()];
+            let run = crate::gradient::gradient(
+                &mut s,
+                |r| crate::gradient::l2_misfit(&r.traces, &observed, &weights),
+                every,
+            )
+            .unwrap();
+            let held = run.memory_bytes + 4 * observed.iter().map(Vec::len).sum::<usize>();
+            assert_eq!(m.peak, held as u64, "{every:?}\n{}", m.table());
+            assert_eq!(m.peak, m.resident);
+            let forward = estimate(&cfg, Path::new(".")).unwrap();
+            assert!(m.peak > 3 * forward.peak);
         }
     }
 

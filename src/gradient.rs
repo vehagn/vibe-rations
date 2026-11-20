@@ -131,9 +131,19 @@ pub struct Run {
     pub misfit: f64,
     /// Steps between checkpoints.
     pub checkpoint_every: usize,
-    /// The most memory the run held at once: both solvers, the checkpoints, one replayed
-    /// segment's velocities and the correlations.
+    /// The most memory the run held at once, counted from its arrays: the forward run, the
+    /// adjoint run with its residuals, the checkpoints, one replayed segment's velocities, the
+    /// correlation sums and the strains. [`crate::memory::Plan::gradient_memory`] works it out
+    /// beforehand (with the observed traces, which are the caller's).
     pub memory_bytes: usize,
+}
+
+/// Steps between checkpoints: `requested`, or by default ⌈√(3N)⌉, which about minimises the
+/// memory of ⌈N/k⌉ checkpoints of nine arrays and a replayed segment of k + 1 velocity triples.
+pub fn checkpoint_interval(steps: usize, requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or_else(|| ((3 * steps) as f64).sqrt().ceil() as usize)
+        .clamp(1, steps.max(1))
 }
 
 /// The correlations summed over the run, on the padded grid, per position: the density
@@ -142,7 +152,7 @@ pub struct Run {
 type Sums = Vec<[f64; 8]>;
 
 /// Runs `sim` (fresh, at step 0) forward, recording its receivers and keeping a checkpoint
-/// every `checkpoint_every` steps (by default √(3N), which about minimises memory); hands the
+/// every `checkpoint_every` steps (by default [`checkpoint_interval`]'s); hands the
 /// receivers to `adjoint_source`, which returns the misfit and its derivative with respect to
 /// every sample (e.g. [`l2_misfit`]); then runs the adjoint backwards, replaying the forward
 /// run a segment at a time from the checkpoints, and correlates the two. The receivers'
@@ -161,9 +171,7 @@ pub fn gradient(
 ) -> Result<Run> {
     ensure!(sim.solver.step == 0, "the forward run must start at rest");
     let steps = sim.steps;
-    let every = checkpoint_every
-        .unwrap_or_else(|| ((3 * steps) as f64).sqrt().ceil() as usize)
-        .clamp(1, steps.max(1));
+    let every = checkpoint_interval(steps, checkpoint_every);
 
     // Forward, keeping the state at the start of every segment.
     let mut checkpoints: Vec<State> = Vec::with_capacity(steps.div_ceil(every));
@@ -199,11 +207,16 @@ pub fn gradient(
     pressure.add(&mut adjoint_strain, steps);
 
     let mut segment: Vec<[Vec<f32>; 3]> = Vec::with_capacity(every + 1);
-    // Besides the checkpoints and the segment: both solvers, the sums and the two strains.
-    let fixed = sim.solver.memory_bytes()
-        + adjoint.solver.memory_bytes()
-        + std::mem::size_of::<[f64; 8]>() * len
-        + 4 * 12 * len;
+    // Besides the checkpoints and the segment: both runs, the sums and the two strains.
+    let fixed = sim.memory_bytes()
+        + adjoint.memory_bytes()
+        + pressure.memory_bytes()
+        + std::mem::size_of_val(sums.as_slice())
+        + 4 * strain
+            .iter()
+            .chain(&adjoint_strain)
+            .map(Vec::len)
+            .sum::<usize>();
     let mut peak_bytes = 0;
     for (s, checkpoint) in checkpoints.iter().enumerate().rev() {
         let start = s * every;
@@ -251,6 +264,15 @@ pub fn gradient(
         }
     }
 
+    // The gradient's own arrays mustn't come on top of the replay's.
+    drop((
+        checkpoints,
+        segment,
+        strain,
+        adjoint_strain,
+        adjoint,
+        pressure,
+    ));
     Ok(Run {
         gradient: to_nodes(&sim.solver, &sums),
         misfit,
@@ -304,6 +326,10 @@ impl PressureResiduals {
             samples: r.samples,
             record_every: sim.record_every,
         }
+    }
+
+    fn memory_bytes(&self) -> usize {
+        4 * self.values.as_ref().map_or(0, Vec::len)
     }
 
     /// Adds -W⁻¹ r_σ⁽ⁿ⁾, the residual of the pressure read from σ⁽ⁿ⁾ (recorded after forward

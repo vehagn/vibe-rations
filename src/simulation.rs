@@ -578,6 +578,18 @@ impl Simulation {
         }
     }
 
+    /// Bytes the run holds: its solver's, the sources' pre-warped series and the traces
+    /// (the arrays [`crate::memory::Plan`] counts beforehand).
+    pub fn memory_bytes(&self) -> usize {
+        let series: usize = self
+            .sources
+            .iter()
+            .map(|s| s.series.as_ref().map_or(0, Vec::len))
+            .sum();
+        let traces: usize = self.receivers.traces.iter().map(Vec::len).sum();
+        self.solver.memory_bytes() + 8 * series + 4 * traces
+    }
+
     /// Whether the traces have been un-warped ([`Simulation::finish`] with
     /// `remove_time_dispersion`), so that they differ from the samples the solver recorded.
     pub fn traces_unwarped(&self) -> bool {

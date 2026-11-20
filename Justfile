@@ -133,5 +133,5 @@ tunnel host port="8089":
 
 # The memory a simulation needs, part by part, worked out without setting it up
 [group("simulate")]
-memory config:
-    cargo run --release -- memory {{ config }}
+memory config *args:
+    cargo run --release -- memory {{ config }} {{ args }}

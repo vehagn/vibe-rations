@@ -60,6 +60,11 @@ pub struct Adjoint {
 }
 
 impl Adjoint {
+    /// Bytes its solver and residuals hold.
+    pub fn memory_bytes(&self) -> usize {
+        self.solver.memory_bytes() + 4 * self.residuals.iter().map(Vec::len).sum::<usize>()
+    }
+
     /// Sets up the adjoint run for `sim`'s receivers, at rest, with `residuals` in the layout
     /// of [`crate::receiver::Receivers::traces`]: one array per recorded component,
     /// (receivers, samples), each the derivative of the misfit with respect to that sample as

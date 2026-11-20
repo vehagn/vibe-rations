@@ -102,6 +102,10 @@ enum Command {
     Memory {
         /// The TOML configuration.
         config: PathBuf,
+        /// The memory of `gradient` instead, which keeps checkpoints of the forward run and
+        /// runs the adjoint beside it.
+        #[arg(long)]
+        gradient: bool,
     },
 }
 
@@ -192,7 +196,7 @@ fn run() -> Result<()> {
         Command::Run {
             config, out, quiet, ..
         } => {
-            let (cfg, sim) = load(&config)?;
+            let (cfg, sim, _) = load(&config, false)?;
             let mut sim = sim;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
@@ -201,7 +205,7 @@ fn run() -> Result<()> {
             eprintln!("wrote {}", out.display());
         }
         Command::Check { config } => {
-            let (_, sim) = load(&config)?;
+            let (_, sim, _) = load(&config, false)?;
             report(&sim);
         }
         Command::Serve {
@@ -266,10 +270,9 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Command::Memory { config } => {
+        Command::Memory { config, gradient } => {
             let cfg = Config::load(&config)?;
-            let m = memory::estimate(&cfg, base(&config))
-                .with_context(|| format!("planning {}", config.display()))?;
+            let m = plan(&cfg, &config, gradient)?;
             println!("{}", m.table());
             if let Some(free) = memory::available() {
                 println!("  {:>10}  available now", memory::human(free));
@@ -281,9 +284,14 @@ fn run() -> Result<()> {
             out,
             balance,
         } => {
-            let (cfg, mut sim) = load(&config)?;
+            let (cfg, mut sim, planned) = load(&config, true)?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
+            eprintln!(
+                "gradient  {} at most, with the checkpoints and the adjoint run; \
+                 `vibe-rations memory --gradient` itemises it",
+                memory::human(planned.peak)
+            );
             let next_to_layers = sim.receivers_next_to_layers();
             if next_to_layers > 0 {
                 eprintln!(
@@ -326,11 +334,13 @@ fn run() -> Result<()> {
                 let single: Vec<f32> = values.iter().map(|&v| v as f32).collect();
                 npy::write(&out.join(format!("grad_{name}.npy")), &shape, &single)?;
             }
+            // What the run held at its peak, with the observed traces: what the plan counts.
+            let held = run.memory_bytes + 4 * data.iter().map(Vec::len).sum::<usize>();
             let summary = serde_json::json!({
                 "misfit": run.misfit,
                 "weights": weights,
                 "checkpoint_every": run.checkpoint_every,
-                "memory_bytes": run.memory_bytes,
+                "memory_bytes": held,
                 "receivers_next_to_layers": next_to_layers,
             });
             std::fs::write(
@@ -338,10 +348,10 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&summary)? + "\n",
             )?;
             eprintln!(
-                "misfit {:.6e}; checkpoints every {} steps; {:.2} GiB at most",
+                "misfit {:.6e}; checkpoints every {} steps; {} at most",
                 run.misfit,
                 run.checkpoint_every,
-                run.memory_bytes as f64 / (1u64 << 30) as f64
+                memory::human(held as u64)
             );
             eprintln!("wrote {}", out.display());
         }
@@ -368,10 +378,21 @@ fn base(path: &Path) -> &Path {
 }
 
 /// Sets a run up, after making sure it fits in the memory available, if that can be known.
-fn load(path: &Path) -> Result<(Config, Simulation)> {
+/// The memory the run `cfg` (loaded from `path`) needs, or a gradient run of it.
+fn plan(cfg: &Config, path: &Path, gradient: bool) -> Result<memory::Memory> {
+    let m = if gradient {
+        memory::estimate_gradient(cfg, base(path), None)
+    } else {
+        memory::estimate(cfg, base(path))
+    };
+    m.with_context(|| format!("planning {}", path.display()))
+}
+
+/// Loads and sets up the simulation `path` describes, once its memory (a gradient run's if
+/// `gradient`), which it returns too, is known to fit.
+fn load(path: &Path, gradient: bool) -> Result<(Config, Simulation, memory::Memory)> {
     let cfg = Config::load(path)?;
-    let m = memory::estimate(&cfg, base(path))
-        .with_context(|| format!("planning {}", path.display()))?;
+    let m = plan(&cfg, path, gradient)?;
     if let Some(free) = memory::available() {
         ensure!(
             m.peak <= free,
@@ -384,7 +405,7 @@ fn load(path: &Path) -> Result<(Config, Simulation)> {
     }
     let sim = Simulation::new(&cfg, base(path))
         .with_context(|| format!("setting up {}", path.display()))?;
-    Ok((cfg, sim))
+    Ok((cfg, sim, m))
 }
 
 fn report(sim: &Simulation) {

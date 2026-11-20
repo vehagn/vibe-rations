@@ -23,7 +23,7 @@ opens a shell there instead.
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
-| `just memory <config>` | The memory a run needs, part by part, without building it | instant |
+| `just memory <config>` | The memory a run needs, part by part, without building it (`--gradient`: a gradient run's) | instant |
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
 | `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
@@ -162,9 +162,13 @@ doesn't show.
   gains a large array, add it to `memory::Plan` and to `Solver::memory_bytes`. `run` and
   `check` refuse runs larger than `MemAvailable`; the web app refuses runs over 4 GiB. A
   volume snapshot briefly needs 32 bytes per node (a node list, values and shading), which
-  could be cut. A gradient run holds more: a second solver, the checkpoints and a replayed
-  segment (`gradient::Run::memory_bytes` reports it afterwards); `memory::estimate` doesn't
-  count that yet.
+  could be cut. A gradient run (`Plan::gradient_memory`, `memory --gradient`, checked by
+  `gradient` before it allocates) holds the adjoint's solver, residuals, checkpoints and a
+  replayed segment besides: about $42\sqrt N$ bytes per padded node at the default interval,
+  25 times the forward run for `examples/layered.toml`. `counts_what_a_gradient_run_allocates`
+  compares it with `gradient::Run::memory_bytes`, which sums the arrays a real run holds at
+  its peak; when `gradient` gains an array, add it to both. `gradient` frees the replay before
+  making the gradient, so the output never adds to the peak.
 - **Stencil coefficients are optimised by default** (`[scheme] coefficients`, opt out with
   `"taylor"`; `Stencil::optimised`). With the time error removed, the phase error per node,
   $\lvert \mathbf K \rvert - \lvert \mathbf k \rvert h$, is the whole error, so the

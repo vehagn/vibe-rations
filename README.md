@@ -37,7 +37,7 @@ Then, in the container:
 | `just lint` | rustfmt and clippy with `-D warnings` |
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
-| `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory") |
+| `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory"); `--gradient` for a gradient run |
 | `just remote-up <host>`, `just tunnel <host>` | On the host: start the solver server on a remote machine, and reach it (see "Remote runs") |
 | `just run <config>` | Runs a simulation |
 | `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
@@ -136,9 +136,9 @@ the L2 misfit, `--balance` weighting each component by its observed energy, and 
   \partial v_s$ and $\partial\chi/\partial\rho$ at every node, shape (nz, ny, nx) like model
   files; approximate inside the absorbing layers
 - `gradient.json`: the misfit, the component weights, the checkpoint interval, the most
-  memory the run held, and how many receivers sit next to the layers (which makes the
-  gradient approximate: move them further in, as many nodes as the stencil reaches, four at
-  order 8)
+  memory the run held (with the observed traces: what `memory --gradient` works out
+  beforehand), and how many receivers sit next to the layers (which makes the gradient
+  approximate: move them further in, as many nodes as the stencil reaches, four at order 8)
 
 The misfit is of the traces as `run` writes them, free of leapfrog's time error by default;
 the gradient takes it back through the transform's transpose. Give the observed and the
@@ -178,10 +178,22 @@ which sets the number of steps and samples, comes from the model's extremes, rea
 layers and spheres, or from its `.npy` files a piece at a time. A test checks that the count
 matches what a run allocates, byte for byte.
 
-`run` and `check` refuse a run that needs more than the machine has available (Linux's
-`MemAvailable`, or a container's memory limit) before allocating anything. The web app shows
-the estimate under the configuration as it is edited, and refuses runs above the 4 GiB a
-browser gives WebAssembly; the server below has no such limit.
+A gradient run holds much more, and `just memory <config> --gradient` counts it: besides the
+forward run, a second solver for the adjoint, the observed traces and the residuals,
+$\lceil N/k \rceil$ checkpoints of the wavefield and the layers' memory (36 bytes per padded
+node each), $k + 1$ copies of the velocities for the segment being replayed (12 bytes per node
+each), and the correlation sums and the two strains (112 bytes per node). The default
+interval $k = \lceil\sqrt{3N}\rceil$ about minimises the checkpoints and the segment
+together, at about $24\sqrt{3N} \approx 42\sqrt N$ bytes per node, so for
+`examples/layered.toml` (1,611 steps) a gradient takes 3.63 GiB against the forward run's
+147 MiB, and on the grid above 795 GiB. Rebuilding the forward field backwards instead of
+storing it (the roadmap's step 3) is what would cut that. A second test checks this count
+against a real gradient run.
+
+`run`, `check` and `gradient` refuse a run that needs more than the machine has available
+(Linux's `MemAvailable`, or a container's memory limit) before allocating anything. The web
+app shows the estimate under the configuration as it is edited, and refuses runs above the
+4 GiB a browser gives WebAssembly; the server below has no such limit.
 
 ## Remote runs
 
