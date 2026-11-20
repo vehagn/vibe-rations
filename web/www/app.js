@@ -1,5 +1,8 @@
-// The page: picks a configuration, hands it to the solver in worker.js, and draws what comes
-// back. All the computing happens in the worker, on this machine.
+// The page: picks a configuration, hands it to a solver, and draws what comes back. The solver
+// is WebAssembly in worker.js, on this machine, or, when `vibe-rations serve` served the page,
+// the server (remote.js); both answer the same messages.
+
+import { RemoteSolver, findServer, listRuns } from "./remote.js";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -24,21 +27,42 @@ const state = {
 const workerUrl = new URL("./worker.js", import.meta.url);
 const askedThreads = new URLSearchParams(location.search).get("threads");
 if (askedThreads) workerUrl.searchParams.set("threads", askedThreads);
-const worker = new Worker(workerUrl, { type: "module" });
-worker.onmessage = ({ data }) => on[data.type]?.(data);
-worker.onerror = (e) => showError(`The solver failed to start: ${e.message}`);
+let worker;
+
+/// Starts the solver: "browser" (WebAssembly here) or "server" (the one that served the page).
+function useSolver(kind) {
+  worker?.terminate();
+  worker = kind === "server" ? new RemoteSolver() : new Worker(workerUrl, { type: "module" });
+  worker.onmessage = ({ data }) => on[data.type]?.(data);
+  worker.onerror = (e) => showError(`The solver failed to start: ${e.message}`);
+  state.compute = kind;
+  $("#server-runs-field").hidden = kind !== "server";
+}
 
 // The example list; set at the end of this module, before any message can arrive.
 let examplesLoaded;
 
 const on = {
-  async ready({ threads, isolated }) {
+  async ready({ threads, isolated, server }) {
     await examplesLoaded;
-    $("#stat-threads").textContent = threads > 1 ? `${threads}` : isolated ? "1" : "1 (page not isolated)";
+    $("#stat-threads").textContent =
+      (threads > 1 ? `${threads}` : isolated ? "1" : "1 (page not isolated)") + (server ? " on the server" : "");
     setStatus("ready", "Solver ready");
-    loadExample($("#example").value);
+    if (server) refreshRuns();
+    // Switching solvers keeps the configuration being edited.
+    if (state.switched) load($("#editor").value);
+    else loadExample($("#example").value);
+    state.switched = true;
   },
-  loaded({ info }) {
+  loaded({ info, toml, name }) {
+    if (toml !== undefined) {
+      // An attached run: show its configuration, and its example if it is one.
+      if ([...$("#example").options].some((o) => o.value === name)) $("#example").value = name;
+      $("#editor").value = toml;
+      $("#example-description").textContent = describe(toml);
+      estimate(toml);
+    }
+    if (state.compute === "server") refreshRuns();
     state.info = info;
     clearError();
     setupView(info);
@@ -50,6 +74,7 @@ const on = {
     sendView();
   },
   state({ running, done }) {
+    if (state.compute === "server" && state.running && !running) refreshRuns();
     state.running = running;
     $("#run").textContent = running ? "Pause" : state.step > 0 && !done ? "Resume" : "Run";
     $("#run").disabled = !state.info || (done ?? false) || state.step >= state.totalSteps;
@@ -128,11 +153,17 @@ function showMemory(memory, error) {
   // A configuration that doesn't parse says why when it is applied.
   box.hidden = Boolean(error);
   if (error) return;
-  const over = memory.peak > memory.limit;
+  const server = memory.where === "server";
+  const limit = memory.limit == null ? null : formatBytes(memory.limit);
+  const over = memory.limit != null && memory.peak > memory.limit;
   box.dataset.over = over;
   $("#memory-total").textContent = over
-    ? `Memory: ${formatBytes(memory.peak)}, more than a browser can give (${formatBytes(memory.limit)})`
-    : `Memory: ${formatBytes(memory.peak)} of the browser's ${formatBytes(memory.limit)}`;
+    ? server
+      ? `Memory: ${formatBytes(memory.peak)}, more than the server has available (${limit})`
+      : `Memory: ${formatBytes(memory.peak)}, more than a browser can give (${limit})`
+    : server
+      ? `Memory: ${formatBytes(memory.peak)}` + (limit ? ` of the server's ${limit} available` : " on the server")
+      : `Memory: ${formatBytes(memory.peak)} of the browser's ${limit}`;
   $("#memory-parts").replaceChildren(
     ...memory.parts.flatMap(({ what, bytes, transient }) => [
       Object.assign(document.createElement("dt"), { textContent: formatBytes(bytes) }),
@@ -149,7 +180,30 @@ function load(toml) {
   state.section = state.gather = null;
   $("#run").disabled = true;
   setStatus("busy", "Setting up");
-  worker.postMessage({ type: "load", toml });
+  worker.postMessage({ type: "load", toml, name: $("#example").value || "page.toml" });
+}
+
+/// Fills the list of runs on the server, to attach to.
+async function refreshRuns() {
+  const select = $("#server-runs");
+  try {
+    const runs = await listRuns();
+    const progress = (r) => (r.total_steps ? ` ${Math.round((100 * r.step) / r.total_steps)}%` : "");
+    select.replaceChildren(
+      Object.assign(document.createElement("option"), { value: "", textContent: `${runs.length} run(s) on the server…` }),
+      ...runs
+        .filter((r) => r.info)
+        .map((r) =>
+          Object.assign(document.createElement("option"), {
+            value: r.id,
+            textContent: `${r.name.replace(/\.toml$/, "")} · ${r.phase}${r.phase === "done" ? "" : progress(r)}${r.live ? "" : " (results only)"}`,
+            disabled: !r.live,
+          }),
+        ),
+    );
+  } catch (e) {
+    showError(`Listing the server's runs: ${e.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------- view
@@ -230,6 +284,24 @@ $("#apply").addEventListener("click", () => {
   load($("#editor").value);
 });
 $("#reset").addEventListener("click", () => load($("#editor").value));
+for (const input of document.querySelectorAll('input[name="compute"]')) {
+  input.addEventListener("change", () => {
+    if (!input.checked) return;
+    state.running = false;
+    setStatus("busy", "Switching the solver");
+    useSolver(input.value);
+  });
+}
+$("#server-runs").addEventListener("focus", refreshRuns);
+$("#server-runs").addEventListener("change", (e) => {
+  if (!e.target.value) return;
+  state.section?.bitmap.close();
+  state.gather?.bitmap.close();
+  state.section = state.gather = null;
+  setStatus("busy", "Attaching");
+  worker.postMessage({ type: "attach", id: e.target.value });
+  e.target.value = "";
+});
 // The memory estimate follows the configuration as it is typed.
 let typing;
 $("#editor").addEventListener("input", () => {
@@ -510,4 +582,14 @@ function download(blob, name) {
 }
 
 examplesLoaded = loadExamples();
+
+// Served by `vibe-rations serve`: offer its solver, and use it.
+const server = await findServer();
+if (server) {
+  $("#compute").hidden = false;
+  $('input[name="compute"][value="server"]').checked = true;
+  useSolver("server");
+} else {
+  useSolver("browser");
+}
 await examplesLoaded;
