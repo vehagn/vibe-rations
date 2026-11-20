@@ -590,10 +590,10 @@ impl Solver {
     }
 
     /// Weights on the interior indices along `axis` that interpolate a quantity stored half a
-    /// node forward of each node (at m + ½ for index m) onto node `at`: Lagrange interpolation
-    /// from the 2L values around the node, L the stencil's half-length (the cubic
-    /// (-1, 9, 9, -1)/16 at order 4), from fewer near the ends, and a linear extrapolation on
-    /// the first node. Along z with a free surface, values above it are its mirror images, with
+    /// node forward of each node (at m + ½ for index m) onto node `at`: the stencil's own
+    /// interpolation from the 2L values around the node, L its half-length (for Taylor
+    /// coefficients Lagrange's, the cubic (-1, 9, 9, -1)/16 at order 4), Lagrange from fewer
+    /// near the ends, and a linear extrapolation on the first node. Along z with a free surface, values above it are its mirror images, with
     /// sign `parity` (+1 for vz, -1 for σxz and σyz), so the interpolation reaches up to the
     /// surface.
     pub fn stagger_weights(&self, axis: usize, at: usize, parity: f32) -> Vec<(usize, f32)> {
@@ -605,7 +605,18 @@ impl Solver {
         let raw: Vec<(isize, f32)> = if m == 0 {
             vec![(0, 1.5), (1, -0.5)]
         } else {
-            let w = midpoint_weights(m);
+            let w: Vec<f32> = if m == self.stencil.half_length() {
+                self.stencil
+                    .interpolation()
+                    .iter()
+                    .map(|&w| w as f32)
+                    .collect()
+            } else {
+                crate::fd::midpoint_weights(m)
+                    .iter()
+                    .map(|&w| w as f32)
+                    .collect()
+            };
             let m = m as isize;
             (-m..m)
                 .map(|o| (o, w[if o < 0 { -o - 1 } else { o } as usize]))
@@ -792,23 +803,6 @@ fn planes<'a, const N: usize>(
             psi_z: cpml[2]
                 .slab(kz)
                 .and_then(|_| pz.as_mut().and_then(Iterator::next)),
-        })
-        .collect()
-}
-
-/// Lagrange weights at 0 for values at ±½, ±3/2, ..., ±(m - ½), for the value at k - ½ (and
-/// its mirror) in place k - 1.
-fn midpoint_weights(m: usize) -> Vec<f32> {
-    let points: Vec<f64> = (1..=m).map(|k| k as f64 - 0.5).collect();
-    points
-        .iter()
-        .map(|&x| {
-            points
-                .iter()
-                .flat_map(|&y| [y, -y])
-                .filter(|&y| y != x)
-                .map(|y| -y / (x - y))
-                .product::<f64>() as f32
         })
         .collect()
 }

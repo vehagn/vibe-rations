@@ -11,17 +11,24 @@
 
 #![allow(clippy::needless_range_loop)]
 
+use std::f64::consts::PI;
+
 use anyhow::{Result, ensure};
 
 /// The longest stencil offered: 16 points.
 pub const MAX_ORDER: usize = 16;
 
-/// A staggered first-derivative operator.
+/// A staggered first-derivative operator, with the weights that interpolate staggered values
+/// onto a node over the same span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stencil {
     coefficients: Vec<f64>,
     /// The same, in single precision for the kernels.
     single: Vec<f32>,
+    /// Weights w₁..w_L of the values at ±(n - ½) nodes that interpolate onto the node.
+    interpolation: Vec<f64>,
+    /// For optimised coefficients, the largest k·h they were designed for.
+    band: Option<f64>,
 }
 
 impl Stencil {
@@ -45,11 +52,135 @@ impl Stencil {
                 a / (2 * n - 1) as f64
             })
             .collect();
+        Ok(Self::from_parts(coefficients, midpoint_weights(l), None))
+    }
+
+    /// Coefficients chosen for wavenumbers up to `band` = k·h < π rather than for the
+    /// longest waves: those that minimise the largest phase error per node,
+    /// | |K| - |k|·h |, over every direction of propagation in 3D and every |k|·h up to the
+    /// band, weighted by (|k|·h/band)^-2 so that longer waves get less of it, with the
+    /// derivative still exact for linear functions. With leapfrog's time error removed that
+    /// error is all there is: over a distance D it turns a wave's phase by D/h times as much.
+    ///
+    /// Spreading the error over a band too wide for the stencil would make every wave worse,
+    /// the longest included. So the (weighted) error is capped at `tolerance` per node: if the
+    /// band can't be had within it, the band shrinks to the widest that can ([`Stencil::band`]
+    /// says which). The interpolation weights are chosen the same way over that band, for the
+    /// largest amplitude error.
+    ///
+    /// Designed by Lawson's algorithm (Rice & Usow 1968) on the linearised error, in the
+    /// manner of Holberg (1987), who bounded the group-velocity error the same way. Order 2
+    /// has nothing to choose and is Taylor's.
+    pub fn optimised(order: usize, band: f64, tolerance: f64) -> Result<Self> {
+        let taylor = Self::taylor(order)?;
+        ensure!(
+            band > 0.0 && band < PI,
+            "the band, k·h, must be in (0, π), not {band}"
+        );
+        ensure!(tolerance > 0.0, "the tolerance must be positive");
+        let l = order / 2;
+        if l == 1 {
+            return Ok(taylor);
+        }
+        // Unknowns c₂..c_L; c₁ = 1 - Σ (2n-1) cₙ keeps the derivative exact for linear functions.
+        let design = |b: f64| minimax(&derivative_rows(l, b));
+        let (mut rest, worst) = design(band);
+        let mut band = band;
+        if worst > tolerance {
+            // The widest band within the tolerance, by bisection; Taylor's if none is.
+            let (mut lo, mut hi) = (0.0, band);
+            for _ in 0..16 {
+                let mid = 0.5 * (lo + hi);
+                let (x, e) = design(mid);
+                if e <= tolerance {
+                    (lo, rest) = (mid, x);
+                } else {
+                    hi = mid;
+                }
+            }
+            if lo == 0.0 {
+                return Ok(taylor);
+            }
+            band = lo;
+        }
+        let mut coefficients = vec![
+            1.0 - (2..=l)
+                .zip(&rest)
+                .map(|(n, c)| (2 * n - 1) as f64 * c)
+                .sum::<f64>(),
+        ];
+        coefficients.extend(rest);
+        // Unknowns w₂..w_L; w₁ = ½ - Σ wₙ keeps a constant exact.
+        let (rest, _) = minimax(&interpolation_rows(l, band));
+        let mut interpolation = vec![0.5 - rest.iter().sum::<f64>()];
+        interpolation.extend(rest);
+        Ok(Self::from_parts(coefficients, interpolation, Some(band)))
+    }
+
+    fn from_parts(coefficients: Vec<f64>, interpolation: Vec<f64>, band: Option<f64>) -> Self {
         let single = coefficients.iter().map(|&c| c as f32).collect();
-        Ok(Self {
+        Self {
             coefficients,
             single,
-        })
+            interpolation,
+            band,
+        }
+    }
+
+    /// For optimised coefficients, the largest k·h they were designed for.
+    pub fn band(&self) -> Option<f64> {
+        self.band
+    }
+
+    /// Weights w₁..w_L for the values at ±(n - ½) nodes that interpolate onto the node:
+    /// Lagrange's for Taylor coefficients, optimised over the band for optimised ones.
+    pub fn interpolation(&self) -> &[f64] {
+        &self.interpolation
+    }
+
+    /// The largest phase error per node, | |K| - |k|h |, over every direction (sampled densely)
+    /// and every |k|·h up to `band`, computed exactly rather than linearised.
+    pub fn phase_error(&self, band: f64) -> f64 {
+        let directions = directions(12);
+        let mut worst = 0.0f64;
+        for s in 1..=200 {
+            let xi = band * s as f64 / 200.0;
+            for d in &directions {
+                let k: f64 = d
+                    .iter()
+                    .map(|&di| self.response(xi * di).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                worst = worst.max((k - xi).abs());
+            }
+        }
+        worst
+    }
+
+    /// The largest relative amplitude error of the interpolation onto a node, up to `band`.
+    pub fn interpolation_error(&self, band: f64) -> f64 {
+        (1..=400)
+            .map(|s| {
+                let x = band * s as f64 / 400.0;
+                let r: f64 = self
+                    .interpolation
+                    .iter()
+                    .enumerate()
+                    .map(|(n, w)| 2.0 * w * ((n as f64 + 0.5) * x).cos())
+                    .sum();
+                (r - 1.0).abs()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// K(x) = 2 Σ cₙ sin((2n-1) x/2): what the operator makes of a wave with k·h = x along
+    /// its axis, in units of 1/h.
+    pub fn response(&self, x: f64) -> f64 {
+        self.coefficients
+            .iter()
+            .enumerate()
+            .map(|(n, c)| 2.0 * c * ((2 * n + 1) as f64 * x / 2.0).sin())
+            .sum()
     }
 
     /// Its order of accuracy.
@@ -94,6 +225,181 @@ impl Stencil {
             accumulate(out, a, hi, lo, k == 0);
         }
     }
+}
+
+/// Lagrange weights at 0 for values at ±½, ±3/2, ..., ±(m - ½): the value at k - ½ (and its
+/// mirror) gets weight k - 1.
+pub fn midpoint_weights(m: usize) -> Vec<f64> {
+    let points: Vec<f64> = (1..=m).map(|k| k as f64 - 0.5).collect();
+    points
+        .iter()
+        .map(|&x| {
+            points
+                .iter()
+                .flat_map(|&y| [y, -y])
+                .filter(|&y| y != x)
+                .map(|y| -y / (x - y))
+                .product::<f64>()
+        })
+        .collect()
+}
+
+/// Unit vectors with d₁ ≥ d₂ ≥ d₃ ≥ 0, which stand for every direction: the errors are the
+/// same under permutations and sign changes. From the axis to the diagonal, (1, i/m, j/m)
+/// normalised for 0 ≤ j ≤ i ≤ m.
+fn directions(m: usize) -> Vec<[f64; 3]> {
+    let mut out = Vec::new();
+    for i in 0..=m {
+        for j in 0..=i {
+            let v = [1.0, i as f64 / m as f64, j as f64 / m as f64];
+            let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            out.push(v.map(|x| x / norm));
+        }
+    }
+    out
+}
+
+/// A linear function of the unknowns and its target: the error is a·x - b.
+type Row = (Vec<f64>, f64);
+
+/// The phase error per node, linearised: |K| - |k|h ≈ Σᵢ dᵢ δ(ξ dᵢ) with δ(x) = K(x) - x,
+/// for c₂..c_L with c₁ eliminated.
+fn derivative_rows(l: usize, band: f64) -> Vec<Row> {
+    // K(x) = 2 sin(x/2) + Σ_{n≥2} cₙ gₙ(x), gₙ(x) = 2 sin((2n-1)x/2) - 2(2n-1) sin(x/2).
+    let g = |n: usize, x: f64| {
+        let m = (2 * n - 1) as f64;
+        2.0 * (m * x / 2.0).sin() - 2.0 * m * (x / 2.0).sin()
+    };
+    let mut rows = Vec::new();
+    for d in directions(6) {
+        for s in 1..=48 {
+            let xi = band * s as f64 / 48.0;
+            let a = (2..=l)
+                .map(|n| d.iter().map(|&di| di * g(n, xi * di)).sum())
+                .collect();
+            let b = -d
+                .iter()
+                .map(|&di| di * (2.0 * (xi * di / 2.0).sin() - xi * di))
+                .sum::<f64>();
+            rows.push(weighted(a, b, xi / band));
+        }
+    }
+    rows
+}
+
+/// The interpolation's amplitude error, R(x) - 1 with R(x) = Σ 2wₙ cos((n - ½)x), for
+/// w₂..w_L with w₁ eliminated.
+fn interpolation_rows(l: usize, band: f64) -> Vec<Row> {
+    (1..=200)
+        .map(|s| {
+            let x = band * s as f64 / 200.0;
+            let a = (2..=l)
+                .map(|n| 2.0 * (((n as f64 - 0.5) * x).cos() - (x / 2.0).cos()))
+                .collect();
+            weighted(a, 1.0 - (x / 2.0).cos(), x / band)
+        })
+        .collect()
+}
+
+/// How fast the allowed error falls towards long waves: as (k/k_band)^p. With p = 0 (a plain
+/// minimax) every wavenumber in the band may carry the whole tolerance, and P waves and the
+/// dominant frequency, well inside the band, came out worse than with Taylor's coefficients;
+/// p = 2 keeps them as good while giving up little at the band's edge (research log).
+const FLATNESS: i32 = 2;
+
+/// A row scaled so that its allowed error is (k/k_band)^p of the tolerance at fraction
+/// `f` = k/k_band of the band.
+fn weighted(a: Vec<f64>, b: f64, f: f64) -> Row {
+    let w = f.powi(-FLATNESS);
+    (a.into_iter().map(|v| v * w).collect(), b * w)
+}
+
+/// The x minimising max |a·x - b| over the rows, by Lawson's algorithm: weighted least
+/// squares, each row's weight multiplied by its error every round, which concentrates the
+/// weight on the extremal rows (Rice & Usow 1968). Returns the best iterate and its largest
+/// error.
+fn minimax(rows: &[Row]) -> (Vec<f64>, f64) {
+    let mut weights = vec![1.0 / rows.len() as f64; rows.len()];
+    let mut best = (f64::INFINITY, Vec::new());
+    for _ in 0..400 {
+        let x = weighted_least_squares(rows, &weights);
+        let errors: Vec<f64> = rows
+            .iter()
+            .map(|(a, b)| (a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>() - b).abs())
+            .collect();
+        let worst = errors.iter().copied().fold(0.0, f64::max);
+        if worst < best.0 {
+            best = (worst, x);
+        }
+        let total: f64 = weights.iter().zip(&errors).map(|(w, e)| w * e).sum();
+        if total == 0.0 {
+            break;
+        }
+        for (w, e) in weights.iter_mut().zip(&errors) {
+            *w *= e / total;
+        }
+    }
+    (best.1, best.0)
+}
+
+/// The x minimising Σ wᵢ (aᵢ·x - bᵢ)², by Householder QR on columns scaled to unit norm.
+fn weighted_least_squares(rows: &[Row], weights: &[f64]) -> Vec<f64> {
+    let n = rows[0].0.len();
+    let mut a: Vec<Vec<f64>> = rows
+        .iter()
+        .zip(weights)
+        .map(|((r, _), w)| r.iter().map(|v| v * w.sqrt()).collect())
+        .collect();
+    let mut b: Vec<f64> = rows
+        .iter()
+        .zip(weights)
+        .map(|((_, v), w)| v * w.sqrt())
+        .collect();
+    let scale: Vec<f64> = (0..n)
+        .map(|j| {
+            let s = a.iter().map(|r| r[j] * r[j]).sum::<f64>().sqrt();
+            if s > 0.0 { 1.0 / s } else { 1.0 }
+        })
+        .collect();
+    for r in &mut a {
+        for (v, s) in r.iter_mut().zip(&scale) {
+            *v *= s;
+        }
+    }
+    let m = a.len();
+    for k in 0..n {
+        let norm = (k..m).map(|i| a[i][k] * a[i][k]).sum::<f64>().sqrt();
+        if norm == 0.0 {
+            continue;
+        }
+        let alpha = if a[k][k] > 0.0 { -norm } else { norm };
+        let mut v: Vec<f64> = (k..m).map(|i| a[i][k]).collect();
+        v[0] -= alpha;
+        let vv: f64 = v.iter().map(|x| x * x).sum();
+        if vv == 0.0 {
+            continue;
+        }
+        for j in k..n {
+            let f = 2.0 * (k..m).map(|i| v[i - k] * a[i][j]).sum::<f64>() / vv;
+            for i in k..m {
+                a[i][j] -= f * v[i - k];
+            }
+        }
+        let f = 2.0 * (k..m).map(|i| v[i - k] * b[i]).sum::<f64>() / vv;
+        for i in k..m {
+            b[i] -= f * v[i - k];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for k in (0..n).rev() {
+        let s: f64 = (k + 1..n).map(|j| a[k][j] * x[j]).sum();
+        x[k] = if a[k][k] != 0.0 {
+            (b[k] - s) / a[k][k]
+        } else {
+            0.0
+        };
+    }
+    x.iter().zip(&scale).map(|(x, s)| x * s).collect()
 }
 
 /// out = a (hi - lo), or out += a (hi - lo) after the first term.
@@ -199,6 +505,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Optimised coefficients beat Taylor's over their band, in every direction, and so does
+    /// their interpolation; they stay exact for linear functions and constants. (Weighted
+    /// towards long waves, they don't minimise the plain largest error, so the margin varies.)
+    #[test]
+    fn optimised_coefficients_beat_taylor_over_their_band() {
+        for (order, band) in [(4, 1.5), (8, 1.8), (8, 2.2), (12, 2.0), (16, 2.4)] {
+            let t = Stencil::taylor(order).unwrap();
+            let o = Stencil::optimised(order, band, 1.0).unwrap();
+            let (et, eo) = (t.phase_error(band), o.phase_error(band));
+            let (it, io) = (t.interpolation_error(band), o.interpolation_error(band));
+            eprintln!(
+                "order {order}, band {band}: phase error per node {et:.2e} -> {eo:.2e}, \
+                 interpolation {it:.2e} -> {io:.2e}, sum|c| {:.4} -> {:.4}",
+                t.sum_abs(),
+                o.sum_abs()
+            );
+            assert!(eo < 0.5 * et, "order {order}: {eo} vs {et}");
+            assert!(io < it, "order {order}: {io} vs {it}");
+            let consistency: f64 = o
+                .coefficients()
+                .iter()
+                .enumerate()
+                .map(|(n, c)| (2 * n + 1) as f64 * c)
+                .sum();
+            assert!((consistency - 1.0).abs() < 1e-12);
+            assert!((2.0 * o.interpolation().iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            assert_eq!(o.band(), Some(band));
+        }
+        assert!(Stencil::optimised(8, 3.5, 1.0).is_err());
+        assert_eq!(
+            Stencil::optimised(2, 1.0, 1.0).unwrap(),
+            Stencil::taylor(2).unwrap()
+        );
+    }
+
+    /// A band the stencil can't have within the tolerance shrinks to one it can.
+    #[test]
+    fn the_band_shrinks_to_keep_the_error_within_the_tolerance() {
+        let o = Stencil::optimised(8, 2.8, 1e-3).unwrap();
+        let band = o.band().unwrap();
+        eprintln!("order 8 within 1e-3: band {band:.3}");
+        assert!(band < 2.8 && band > 1.8, "{band}");
+        // Linearised in the design, exact here: allow a little.
+        assert!(o.phase_error(band) < 1.1e-3, "{}", o.phase_error(band));
+        // Within the tolerance already: the band stays.
+        let o = Stencil::optimised(12, 1.8, 1e-3).unwrap();
+        assert_eq!(o.band(), Some(1.8));
+    }
+
+    /// For a narrow band the best operator is nearly Taylor's, and the design stays sane.
+    #[test]
+    fn a_narrow_band_gives_nearly_taylor() {
+        let t = Stencil::taylor(8).unwrap();
+        let o = Stencil::optimised(8, 0.4, 1.0).unwrap();
+        assert!(o.phase_error(0.4) <= t.phase_error(0.4) * 1.01);
+        assert!(
+            (o.sum_abs() / t.sum_abs() - 1.0).abs() < 0.01,
+            "{}",
+            o.sum_abs()
+        );
     }
 
     #[test]
