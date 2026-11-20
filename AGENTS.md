@@ -52,6 +52,7 @@ src/
   fd.rs          the staggered Stencil (Taylor, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid
+  tdt.rs         the time-dispersion transform: pre-warped sources, un-warped traces
   receiver.rs    recording traces through PointOps
   snapshot.rs    sections and volumes during a run
   simulation.rs  a run set up from a configuration; outputs
@@ -65,7 +66,7 @@ web/
 docs/
   references.bib every work cited anywhere in the repository
   research-log.md experiments, results and decisions, for the paper
-  analysis/      von Neumann dispersion analysis (pure Python)
+  analysis/      von Neumann analysis (pure Python): dispersion, time-space, time dispersion
 deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 .github/workflows/  ci.yaml (`just ci`), web.yaml (builds and pushes the image)
 tests/
@@ -106,17 +107,34 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Leapfrog's time error can be removed** (`[scheme] remove_time_dispersion`, `src/tdt.rs`;
+  Wang & Xu 2015, Koene et al. 2018). It is a warp of the frequency axis, the same for every
+  medium and stencil, so pre-warping the sources and un-warping the traces leaves only the
+  spatial error, and $C = 0.85$ costs no accuracy. Order 8 then matches $C = 0.3$ in 2.8 times
+  fewer steps; orders 12 and 16, time-limited at 0.3, become 8–12 times more accurate. It is
+  opt-in, not the default, until the adjoint run applies the transposed transform to the
+  residuals (`Simulation::trace_warp`, `Warp::apply_transpose`). Timing matters: forces enter
+  at $n\Delta t$, moments at $(n + \frac12)\Delta t$, velocities are read at
+  $(n + \frac12)\Delta t$ and stresses at $(n + 1)\Delta t$; the warp is about $t = 0$.
+  Snapshots stay warped, and the layers are only approximately transformed.
+- **A research brief** (another agent's literature review and von Neumann analysis,
+  2026-11-20) was checked: its numbers reproduce (`docs/analysis/time_dispersion.py`), the
+  transform and the stencil-matched interpolation came from it, and the log's entry lists
+  what remains, in its open questions. Its references came from memory: check any on
+  Crossref before citing it.
 - **Error propagation into adjoint fields** is a main research interest for what comes next:
   forward-field error (dispersion, interfaces, free surface, layers), reconstruction error,
   and their effect on gradients. Design the adjoint so each can be measured separately (see
   the log's open questions).
 - **Physics test baselines at the default, order 8 with $C = 0.3$** (fail if they get worse;
-  update this list if they get better): explosion vs analytic 0.11–0.26%; point force vs
-  Stokes 0.07–0.18%; free-surface P doubling 2.4%; CPML reflection $3.9 \times 10^{-4}$ of the
-  peak without a free surface, $2.1 \times 10^{-3}$ along one; reciprocity
-  $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the 9 s soft-sediment run drains to
-  $\le 3 \times 10^{-6}$ of its peak. At order 4 with $C = 0.85$ they were 0.7–1.6%,
-  0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
+  update this list if they get better): explosion vs analytic 0.07–0.19%; point force vs
+  Stokes 0.03–0.09% (0.001–0.008% at $C = 0.85$ with `remove_time_dispersion`); free-surface
+  P doubling 2.4%; CPML reflection $3.9 \times 10^{-4}$ of the peak without a free surface,
+  $2.1 \times 10^{-3}$ along one; reciprocity $\le 1.9 \times 10^{-6}$ (orders 4 and 8); the
+  9 s soft-sediment run drains to $\le 3 \times 10^{-6}$ of its peak. With cubic receivers
+  (before the interpolation matched the stencil) the first two were 0.11–0.26% and
+  0.07–0.18%, and reciprocity $\le 1.5 \times 10^{-6}$. At order 4 with $C = 0.85$ they were
+  0.7–1.6%, 0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
 - **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at
   $C = 0.85$ benefits from cancelling time and space errors; orders $\ge 8$ at 0.85 are
   *worse* than order 4, and only beat it at $C \approx 0.3$–$0.5$. Order 8 at 0.3 needs about
@@ -168,9 +186,13 @@ doesn't show.
   1.9%. The textbook image method (Fichtner 2011 §3.2.3; Graves 1996) instead derives the
   velocities above the surface from the boundary conditions. It hasn't been tried here; any
   alternative must pass the reciprocity and long-run tests.
-- **Cubic interpolation for receivers and sources.** Averaging two staggered values onto a
-  node costs about $\cos(kh/2)$, roughly 2% at 8 points per wavelength; cubic weights
-  $(-1, 9, 9, -1)/16$ cut the misfits roughly threefold.
+- **Receiver and source interpolation is as long as the stencil** (`Solver::stagger_weights`):
+  $2L$-point Lagrange from the staggered values onto the node. Averaging two values costs
+  about $\cos(kh/2)$, roughly 2% at 8 points per wavelength; the cubic
+  $(-1, 9, 9, -1)/16$ cut the misfits roughly threefold, and at order 8 the eight-point
+  weights halved them again (at 4.5 ppw and $2.5 f_0$ the cubic loses 7.6% per receiver,
+  eight points 1.0%). Reciprocity rose from $1.5$ to $1.9 \times 10^{-6}$: more terms of
+  single-precision round-off, not a loss of the transpose.
 - **Performance** on the container's 4 cores (Apple Silicon, Colima VM with 8 GiB): order 4
   about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105. Memory is 17 padded f32
   arrays plus CPML memory: the examples need 0.1–0.2 GiB. The work splits by $z$-plane, each

@@ -20,11 +20,12 @@ are at the default, order 8 with $C = 0.3$):
 
 | Test | Baseline | Breaks when |
 |---|---|---|
-| `an_explosion_matches_the_full_space_solution` | 0.11–0.26% | stencils, stress injection, timing, receiver interpolation |
-| `a_point_force_matches_stokes_solution` | 0.07–0.18% | velocity injection, buoyancy, S waves, shear averaging |
+| `an_explosion_matches_the_full_space_solution` | 0.07–0.19% | stencils, stress injection, timing, receiver interpolation |
+| `a_point_force_matches_stokes_solution` | 0.03–0.09% | velocity injection, buoyancy, S waves, shear averaging |
+| `removing_time_dispersion_allows_a_large_time_step` | 0.001–0.008% | the time-dispersion transform (`src/tdt.rs`), source or sample timing |
 | `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.4% | free-surface condition, mirroring, surface sampling |
 | `absorbing_layers_reflect_little` (± free surface) | $3.9 \times 10^{-4}$ / $2.1 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
-| `swapping_source_and_receiver_gives_the_same_trace` | $\le 1.5 \times 10^{-6}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
+| `swapping_source_and_receiver_gives_the_same_trace` | $\le 1.9 \times 10^{-6}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
 | `a_long_run_stays_stable_and_drains` | $\le 3 \times 10^{-6}$ | instabilities (see `debug-instability`) |
 
 A number that got worse is a regression even if the test passes. Find out why before
@@ -42,7 +43,8 @@ stability (`swapping_source_and_receiver_gives_the_same_trace`,
 - A misfit that **grows with distance** is phase error: dispersion (too few points per
   wavelength, or too large a time step for the order) or a timing offset. Velocities are at
   $(n + \tfrac12)\Delta t$, forces enter at $n \Delta t$ and moments at
-  $(n + \tfrac12)\Delta t$.
+  $(n + \tfrac12)\Delta t$. The time-dispersion transform depends on these times
+  (`Source::offset`, `Simulation::trace_warp`).
 - **The same misfit at every distance** is amplitude or position error: interpolation
   weights, the source scaling (dt/V, buoyancy), or a half-node offset.
 - **Exactly a factor 2 or a sign:** half-cell shares on the free surface
