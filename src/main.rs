@@ -147,7 +147,7 @@ fn run() -> Result<()> {
                 "misfit": run.misfit,
                 "weights": weights,
                 "checkpoint_every": run.checkpoint_every,
-                "checkpoint_bytes": run.checkpoint_bytes,
+                "memory_bytes": run.memory_bytes,
                 "receivers_next_to_layers": next_to_layers,
             });
             std::fs::write(
@@ -155,10 +155,10 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&summary)? + "\n",
             )?;
             eprintln!(
-                "misfit {:.6e}; checkpoints every {} steps, {:.2} GiB",
+                "misfit {:.6e}; checkpoints every {} steps; {:.2} GiB at most",
                 run.misfit,
                 run.checkpoint_every,
-                run.checkpoint_bytes as f64 / (1u64 << 30) as f64
+                run.memory_bytes as f64 / (1u64 << 30) as f64
             );
             eprintln!("wrote {}", out.display());
         }

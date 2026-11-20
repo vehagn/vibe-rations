@@ -74,7 +74,9 @@ pub fn l2_misfit(
 }
 
 /// Weights 1/‖d_obs,c‖² that make each component's misfit relative to its own energy, so
-/// that pressure and velocity count alike. A component that observed nothing gets 0.
+/// that pressure and velocity count alike. A component that observed nothing gets 0; one that
+/// observed next to nothing (vy on a symmetry plane, say) gets a huge weight, and its noise
+/// as much say as the other components' signal, so leave such components out.
 pub fn balancing_weights(observed: &[Vec<f32>]) -> Vec<f64> {
     observed
         .iter()
@@ -124,9 +126,11 @@ pub struct Run {
     pub gradient: Gradient,
     /// The misfit the adjoint source came from, as the closure returned it.
     pub misfit: f64,
-    /// Steps between checkpoints, and the bytes the checkpoints and one replayed segment took.
+    /// Steps between checkpoints.
     pub checkpoint_every: usize,
-    pub checkpoint_bytes: usize,
+    /// The most memory the run held at once: both solvers, the checkpoints, one replayed
+    /// segment's velocities and the correlations.
+    pub memory_bytes: usize,
 }
 
 /// The correlations summed over the run, on the padded grid, per position: the density
@@ -143,6 +147,9 @@ type Sums = Vec<[f64; 8]>;
 /// The time step and the absorbing layers stay as `sim` set them up, so the gradient is that
 /// of the forward run with them fixed. With dt from a Courant fraction, both depend on the
 /// fastest vp in the model; perturbing it changes them too.
+///
+/// Afterwards `sim` holds the recorded traces, but its solver is wherever the last replay
+/// left it (the end of the first segment), not at the end of the run.
 pub fn gradient(
     sim: &mut Simulation,
     adjoint_source: impl FnOnce(&Receivers) -> Result<(f64, Vec<Vec<f32>>)>,
@@ -152,7 +159,7 @@ pub fn gradient(
     let steps = sim.steps;
     let every = checkpoint_every
         .unwrap_or_else(|| ((3 * steps) as f64).sqrt().ceil() as usize)
-        .max(1);
+        .clamp(1, steps.max(1));
 
     // Forward, keeping the state at the start of every segment.
     let mut checkpoints: Vec<State> = Vec::with_capacity(steps.div_ceil(every));
@@ -161,11 +168,15 @@ pub fn gradient(
             checkpoints.push(sim.solver.state());
         }
         sim.advance();
-        if n.is_multiple_of(100) && !sim.solver.peak_velocity().is_finite() {
+        if (n.is_multiple_of(100) || n + 1 == steps) && !sim.solver.peak_velocity().is_finite() {
             bail!("the forward wavefield blew up by step {}", n + 1);
         }
     }
     let (misfit, residuals) = adjoint_source(&sim.receivers)?;
+    ensure!(
+        misfit.is_finite() && residuals.iter().flatten().all(|r| r.is_finite()),
+        "the misfit or its derivative isn't finite; check the observed data"
+    );
     let pressure = PressureResiduals::new(sim, &residuals);
     let mut adjoint = Adjoint::new(sim, residuals)?;
 
@@ -176,7 +187,12 @@ pub fn gradient(
     let mut adjoint_strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
     pressure.add(&mut adjoint_strain, steps);
 
-    let mut segment: Vec<[Vec<f32>; 3]> = Vec::with_capacity(every);
+    let mut segment: Vec<[Vec<f32>; 3]> = Vec::with_capacity(every + 1);
+    // Besides the checkpoints and the segment: both solvers, the sums and the two strains.
+    let fixed = sim.solver.memory_bytes()
+        + adjoint.solver.memory_bytes()
+        + std::mem::size_of::<[f64; 8]>() * len
+        + 4 * 12 * len;
     let mut peak_bytes = 0;
     for (s, checkpoint) in checkpoints.iter().enumerate().rev() {
         let start = s * every;
@@ -189,7 +205,8 @@ pub fn gradient(
             sim.step();
             segment.push(velocities(&sim.solver));
         }
-        let held = checkpoints.iter().map(State::memory_bytes).sum::<usize>()
+        let held = fixed
+            + checkpoints.iter().map(State::memory_bytes).sum::<usize>()
             + 4 * 3 * len * segment.len();
         peak_bytes = peak_bytes.max(held);
 
@@ -201,7 +218,11 @@ pub fn gradient(
             correlate_stiffness(&sim.solver, &mut sums, &adjoint_strain, &strain);
             // ṽ⁽ⁿ⁺½⁾ with the forward velocity change over step n.
             adjoint.step();
-            debug_assert_eq!(adjoint.forward_step(), Some(n));
+            assert_eq!(
+                adjoint.forward_step(),
+                Some(n),
+                "adjoint and replay out of step"
+            );
             correlate_density(&adjoint.solver, &mut sums, before, after);
             // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
             let f = &adjoint.solver.fields;
@@ -223,7 +244,7 @@ pub fn gradient(
         gradient: to_nodes(&sim.solver, &sums),
         misfit,
         checkpoint_every: every,
-        checkpoint_bytes: peak_bytes,
+        memory_bytes: peak_bytes,
     })
 }
 
@@ -476,6 +497,114 @@ mod tests {
     fn balancing_weights_divide_by_the_observed_energy() {
         let w = balancing_weights(&[vec![3.0, 4.0], vec![0.0; 2]]);
         assert_eq!(w, vec![1.0 / 25.0, 0.0]);
+    }
+
+    /// The replay is exact, so how often the run keeps checkpoints doesn't change the
+    /// gradient by a bit: every step, intervals that don't divide the run, the default, and
+    /// one longer than the run.
+    #[test]
+    fn checkpoint_intervals_give_identical_gradients() {
+        use crate::config::Config;
+        let cfg = Config::from_toml(
+            r#"
+            [grid]
+            points = [20, 18, 16]
+            spacing = 10.0
+            [time]
+            duration = 0.03
+            [boundary]
+            pml_width = 4
+            [[model.layer]]
+            top = 0.0
+            vp = 2000.0
+            vs = 1000.0
+            rho = 2000.0
+            [[model.layer]]
+            top = 70.0
+            vp = 2500.0
+            vs = 1400.0
+            rho = 2200.0
+            [[source]]
+            position = [100.0, 90.0, 50.0]
+            force = [0.0, 0.0, 1e9]
+            wavelet = { kind = "ricker", frequency = 40.0 }
+            [receivers]
+            components = ["vx", "vz", "p"]
+            [[receivers.point]]
+            position = [70.0, 90.0, 0.0]
+            [[receivers.point]]
+            position = [120.0, 80.0, 100.0]
+            [output]
+            record_every = 3
+            "#,
+        )
+        .unwrap();
+        let run = |every: Option<usize>| {
+            let mut sim = Simulation::new(&cfg, std::path::Path::new(".")).unwrap();
+            let steps = sim.steps;
+            let zeros: Vec<Vec<f32>> = sim
+                .receivers
+                .traces
+                .iter()
+                .map(|t| vec![0.0; t.len()])
+                .collect();
+            let weights = [1.0, 1.0, 1e-18];
+            let r = gradient(&mut sim, |r| l2_misfit(&r.traces, &zeros, &weights), every).unwrap();
+            (steps, r)
+        };
+        let (steps, reference) = run(Some(1));
+        assert!(steps > 20 && steps % 9 != 0, "{steps} steps");
+        assert!(reference.misfit > 0.0);
+        assert!(reference.gradient.mu.iter().any(|&g| g != 0.0));
+        for every in [Some(9), None, Some(steps), Some(1 << 40)] {
+            let (_, r) = run(every);
+            assert!(r.checkpoint_every <= steps, "{every:?}");
+            assert_eq!(r.misfit, reference.misfit, "{every:?}");
+            assert_eq!(r.gradient.rho, reference.gradient.rho, "{every:?}");
+            assert_eq!(r.gradient.lambda, reference.gradient.lambda, "{every:?}");
+            assert_eq!(r.gradient.mu, reference.gradient.mu, "{every:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_misfit_that_is_not_finite() {
+        use crate::config::Config;
+        let cfg = Config::from_toml(
+            r#"
+            [grid]
+            points = [16, 16, 16]
+            spacing = 10.0
+            [time]
+            duration = 0.01
+            [boundary]
+            pml_width = 4
+            [[model.layer]]
+            top = 0.0
+            vp = 2000.0
+            vs = 1000.0
+            rho = 2000.0
+            [[source]]
+            position = [80.0, 80.0, 50.0]
+            explosion = 1e12
+            wavelet = { kind = "ricker", frequency = 40.0 }
+            [[receivers.point]]
+            position = [70.0, 80.0, 0.0]
+            "#,
+        )
+        .unwrap();
+        let mut sim = Simulation::new(&cfg, std::path::Path::new(".")).unwrap();
+        let e = gradient(
+            &mut sim,
+            |r| {
+                let mut nan = r.traces.clone();
+                nan[0][0] = f32::NAN;
+                l2_misfit(&r.traces, &nan, &[1.0; 3])
+            },
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("isn't finite"), "{e}");
     }
 
     /// The velocity parametrisation is the chain rule: a linear functional of (ρ, λ, μ)

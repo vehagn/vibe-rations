@@ -132,7 +132,9 @@ the L2 misfit, `--balance` weighting each component by its observed energy, and 
 - `grad_vp.npy`, `grad_vs.npy`, `grad_rho.npy`: $\partial\chi/\partial v_p$, $\partial\chi /
   \partial v_s$ and $\partial\chi/\partial\rho$ at every node, shape (nz, ny, nx) like model
   files; approximate inside the absorbing layers
-- `gradient.json`: the misfit, the component weights and the checkpoints' size
+- `gradient.json`: the misfit, the component weights, the checkpoint interval, the most
+  memory the run held, and how many receivers sit next to the layers (which makes the
+  gradient approximate: move them a node further in)
 
 ```bash
 just run truth.toml --out out/observed
