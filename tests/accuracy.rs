@@ -22,7 +22,7 @@ use vibe_rations::source::Wavelet;
 
 const DISTANCES: [f64; 4] = [300.0, 900.0, 1500.0, 1800.0];
 const ORDERS: [usize; 4] = [4, 8, 12, 16];
-const COURANTS: [f64; 3] = [0.85, 0.5, 0.3];
+const COURANTS: [f64; 4] = [0.85, 0.5, 0.4, 0.3];
 
 enum Wave {
     P,
