@@ -429,3 +429,445 @@ fn long_run(order: usize) {
     );
     assert!(end < 1e-4 * peak, "{end} left of a peak of {peak}");
 }
+
+/// The adjoint run is the transpose of the forward run. For a force history w at A, recorded
+/// as d = F w at receivers in every component, and residuals d̃ at those receivers,
+/// ⟨F w, d̃⟩ = ⟨w, Fᵀ d̃⟩, where Fᵀ d̃ is the adjoint velocity read at A after each adjoint step.
+/// The scheme is self-adjoint everywhere but in the absorbing layers, so this holds to
+/// round-off for receivers outside them, whatever the waves do inside. "Outside" includes
+/// their interpolation: at order 8 a velocity reads four staggered values either side, and a
+/// receiver whose values reach into a layer (one 120 m from the side) gave 2.4e-7 here, and
+/// 2e-7 to 1.2e-6 over other seeds; `dot_product` now refuses such receivers.
+#[test]
+fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
+    for order in [4, 8] {
+        for (walls, free_surface, signal, every) in [
+            ("rigid", true, "white", 1),
+            ("cpml", true, "band-limited", 2),
+            ("cpml", false, "white", 1),
+        ] {
+            let e = dot_product(order, walls, free_surface, signal, every);
+            // Measured 2.3e-8 to 8.3e-8: single precision over about 1300 steps. Leaving the
+            // adjoint's initial pressure state unmirrored gives 2.4e-7 to 2.8e-6.
+            assert!(e < 1.5e-7, "order {order}, {walls}, {signal}: {e}");
+        }
+    }
+}
+
+/// Uniform values in [0, 1) from a fixed seed (xorshift64*).
+fn noise(n: usize, seed: u64) -> Vec<f64> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+        })
+        .collect()
+}
+
+/// Zero-mean noise smoothed by a Ricker wavelet of `f0` Hz sampled every `dt`, scaled to a
+/// peak of 1.
+fn band_limited(n: usize, seed: u64, f0: f64, dt: f64) -> Vec<f64> {
+    let w = Wavelet::Ricker { f0, t0: 0.0 };
+    let half = (1.5 / f0 / dt).ceil() as isize;
+    let kernel: Vec<f64> = (-half..=half).map(|k| w.value(k as f64 * dt)).collect();
+    let x: Vec<f64> = noise(n, seed).iter().map(|v| 2.0 * v - 1.0).collect();
+    let y: Vec<f64> = (0..n as isize)
+        .map(|i| {
+            (-half..=half)
+                .filter(|k| (0..n as isize).contains(&(i - k)))
+                .map(|k| x[(i - k) as usize] * kernel[(k + half) as usize])
+                .sum()
+        })
+        .collect();
+    let peak = y.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    y.iter().map(|v| v / peak).collect()
+}
+
+/// |⟨F w, d̃⟩ - ⟨w, Fᵀ d̃⟩| / ⟨F w, d̃⟩ in the reciprocity test's model, with every component
+/// recorded at five receivers, one on the free surface and one just below it if there is one. The residuals are the
+/// data times random positive weights, so that the terms of ⟨F w, d̃⟩ can't cancel.
+fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, every: usize) -> f64 {
+    let pml = if walls == "rigid" { 0 } else { 10 };
+    // Without a free surface the top 100 m are an absorbing layer, and the shallow receivers
+    // sit where their interpolation (four nodes up at order 8) stays out of it.
+    let shallow = if free_surface { 0.0 } else { 130.0 };
+    let receivers: String = [
+        [180.0, 220.0, shallow],
+        [420.0, 260.0, 230.0],
+        [300.0, 150.0, shallow + 60.0],
+        [250.0, 300.0, 140.0],
+        // One node below the free surface, where the stresses' mirror images reach; 140 m
+        // from the side, so that vy's interpolation (four nodes at order 8) stays out of the
+        // layer.
+        [400.0, 140.0, shallow + 10.0],
+    ]
+    .iter()
+    .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
+    .collect();
+    let mut sim = setup(&format!(
+        r#"
+        [grid]
+        points = [60, 50, 40]
+        spacing = 10.0
+        [time]
+        duration = 0.5
+        [boundary]
+        pml_width = {pml}
+        free_surface = {free_surface}
+        [scheme]
+        order = {order}
+        [output]
+        record_every = {every}
+        [[model.layer]]
+        top = 0.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 105.0
+        vp = 3500.0
+        vs = 2000.0
+        rho = 2400.0
+        [[model.sphere]]
+        center = [300.0, 250.0, 150.0]
+        radius = 40.0
+        vp = 1800.0
+        vs = 900.0
+        rho = 1900.0
+        [[source]]
+        position = [330.0, 240.0, 200.0]
+        force = [0.6, 0.0, 0.8]
+        wavelet = {{ kind = "ricker", frequency = 12.0 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        {receivers}
+        "#
+    ));
+    // A receiver reading damped values would make the test measure the layers instead.
+    assert_eq!(
+        sim.receivers_next_to_layers(),
+        0,
+        "receivers next to the layers"
+    );
+    let (steps, dt) = (sim.steps, sim.solver.dt);
+    let w: Vec<f64> = match signal {
+        "white" => noise(steps, 1).iter().map(|v| 2.0 * v - 1.0).collect(),
+        _ => band_limited(steps, 1, 12.0, dt),
+    };
+    // Forward: the force history w through the source's operator, recorded as configured.
+    let op = sim.sources[0].op.clone();
+    for (n, &value) in w.iter().enumerate() {
+        sim.solver
+            .step_with(|f, _| op.inject(f, value as f32), |_, _| {});
+        if n.is_multiple_of(every) {
+            sim.receivers.record(&sim.solver);
+        }
+    }
+    let len = sim.receivers.nodes.len() * sim.receivers.samples;
+    let residuals: Vec<Vec<f64>> = sim
+        .receivers
+        .traces
+        .iter()
+        .zip(10..)
+        .map(|(d, seed)| {
+            let weights = match signal {
+                "white" => noise(len, seed),
+                _ => band_limited(len, seed, 12.0 / every as f64, dt * every as f64)
+                    .iter()
+                    .map(|v| 1.0 + 0.5 * v)
+                    .collect(),
+            };
+            // Pressure is ~10⁶ times velocity: each component gets the same say.
+            let norm: f64 = d.iter().map(|&x| (x as f64).powi(2)).sum();
+            assert!(norm > 0.0, "every component sees the source");
+            d.iter()
+                .zip(weights)
+                .map(|(&d, u)| d as f64 * u / norm)
+                .collect()
+        })
+        .collect();
+    let forward: f64 = sim
+        .receivers
+        .traces
+        .iter()
+        .zip(&residuals)
+        .flat_map(|(d, r)| d.iter().zip(r).map(|(&a, &b)| a as f64 * b))
+        .sum();
+    // Adjoint: the residuals back from the receivers, read at A along the force.
+    let node = sim.sources[0].node;
+    let mut adjoint = vibe_rations::adjoint::Adjoint::new(
+        &sim,
+        residuals
+            .iter()
+            .map(|r| r.iter().map(|&x| x as f32).collect())
+            .collect(),
+    )
+    .expect("residuals that fit");
+    let mut back = vec![0.0f64; steps];
+    adjoint
+        .run(|n, s| {
+            back[n] = 0.6 * s.sample(Component::Vx, node) as f64
+                + 0.8 * s.sample(Component::Vz, node) as f64;
+        })
+        .expect("a stable adjoint run");
+    let backward: f64 = w.iter().zip(&back).map(|(a, b)| a * b).sum();
+    let e = (forward - backward).abs() / forward;
+    println!(
+        "dot product, order {order}, {walls} walls, free surface {free_surface}, {signal}, \
+         every {every}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, difference {e:.1e}"
+    );
+    e
+}
+
+/// The gradient is that of the solver's forward run: perturbing vp, vs or ρ at every node
+/// outside the absorbing layers by random amounts changes the misfit as the gradient says,
+/// to within the finite difference's own error. The model has a free surface, two layers and
+/// a sphere; a force and an explosion; receivers on the surface and at depth recording every
+/// component, every second step.
+///
+/// Measured, extrapolated (orders 4 / 8), at the defaults (optimised coefficients pinned,
+/// C = 0.85, traces un-warped): vp 2.8e-4 / 3.9e-6, vs 2.1e-5 / 1.0e-5, ρ 4.4e-5 / 1.6e-5.
+/// The plain central differences are off by 2e-3 to 7e-1 at these steps, falling 4× per
+/// halving: their own h² error, with nothing beneath it. Order 4's vp is near the limit
+/// because its directional derivative is small here (4.5e-5), not because the gradient is
+/// off. Before the receiver line moved in from 100 m (at order 8 the first receiver read
+/// into a layer), with Taylor coefficients at C = 0.3: vp 1.7e-4 / 6.5e-5, vs 1.6e-6 /
+/// 5.8e-6, ρ 1.5e-5 / 1.2e-5.
+#[test]
+fn the_gradient_matches_finite_differences() {
+    for order in [4, 8] {
+        gradient_check(&format!("order {order}"), 8, &|sphere| {
+            gradient_model(order, sphere)
+        });
+    }
+}
+
+/// The same where the first check doesn't reach: rigid walls, so every node is perturbed,
+/// the last ones (whose missing neighbours the material averaging clamps) included; uneven
+/// spacing; a water layer under the free surface, with fluid nodes on it and against the
+/// solid; a double couple; and every third step recorded.
+///
+/// Measured, extrapolated, with Taylor coefficients at C = 0.85: vp 6.4e-5, vs 1.2e-5, ρ
+/// 1.6e-4 (at C = 0.3: vp 4.6e-5, vs 8.9e-7, ρ 2.2e-4). The plain differences for ρ are 37%
+/// off at h = 1.6e-2: what's left after extrapolating is the misfit's nonlinearity and
+/// round-off (perturbing the water layer alone, ρ agrees to 2.7e-5). With optimised
+/// coefficients ρ's plain differences are 61% off and extrapolate to 6.0e-4, a finite-difference
+/// limit (smaller steps drown in round-off); this check is about the geometry, and the first
+/// one covers optimised coefficients.
+#[test]
+fn the_gradient_matches_finite_differences_with_walls_and_water() {
+    gradient_check("walls and water", 0, &walls_and_water);
+}
+
+fn walls_and_water(sphere: [f64; 3]) -> String {
+    let [vp, vs, rho] = sphere;
+    format!(
+        r#"
+        [grid]
+        points = [34, 30, 26]
+        spacing = [11.0, 12.0, 10.5]
+        [time]
+        duration = 0.3
+        [boundary]
+        pml_width = 0
+        [scheme]
+        coefficients = "taylor"
+        [output]
+        record_every = 3
+        [[model.layer]]
+        top = 0.0
+        vp = 1500.0
+        vs = 0.0
+        rho = 1000.0
+        [[model.layer]]
+        top = 21.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 150.0
+        vp = 3000.0
+        vs = 1700.0
+        rho = 2300.0
+        [[model.sphere]]
+        center = [180.0, 170.0, 100.0]
+        radius = 30.0
+        vp = {vp}
+        vs = {vs}
+        rho = {rho}
+        [[source]]
+        position = [120.0, 200.0, 160.0]
+        double_couple = {{ strike = 30.0, dip = 60.0, rake = 90.0, m0 = 1e12 }}
+        wavelet = {{ kind = "ricker", frequency = 10.0 }}
+        [[source]]
+        position = [250.0, 120.0, 80.0]
+        force = [0.0, 5e8, 1e9]
+        wavelet = {{ kind = "ricker", frequency = 10.0, delay = 0.15 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        [[receivers.line]]
+        from = [44.0, 180.0, 0.0]
+        to = [330.0, 180.0, 0.0]
+        count = 9
+        [[receivers.point]]
+        position = [200.0, 100.0, 220.0]
+        "#
+    )
+}
+
+fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
+    let [vp, vs, rho] = sphere;
+    format!(
+        r#"
+        [grid]
+        points = [48, 40, 36]
+        spacing = 10.0
+        [time]
+        duration = 0.35
+        [boundary]
+        pml_width = 8
+        [scheme]
+        order = {order}
+        # Perturbed models must keep the operator: the band would follow their slowest wave.
+        optimised_for = 4.0
+        [output]
+        record_every = 2
+        [[model.layer]]
+        top = 0.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 155.0
+        vp = 3000.0
+        vs = 1700.0
+        rho = 2300.0
+        [[model.sphere]]
+        center = [240.0, 200.0, 120.0]
+        radius = 35.0
+        vp = {vp}
+        vs = {vs}
+        rho = {rho}
+        [[source]]
+        position = [150.0, 160.0, 60.0]
+        force = [3e8, 0.0, 1e9]
+        wavelet = {{ kind = "ricker", frequency = 14.0 }}
+        [[source]]
+        position = [330.0, 230.0, 210.0]
+        explosion = 2e12
+        wavelet = {{ kind = "ricker", frequency = 14.0, delay = 0.1 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        # From 120 m in: at order 8 a velocity's interpolation reaches four nodes, and a
+        # receiver reading into a layer makes the gradient there approximate.
+        [[receivers.line]]
+        from = [120.0, 200.0, 0.0]
+        to = [360.0, 200.0, 0.0]
+        count = 8
+        [[receivers.point]]
+        position = [240.0, 120.0, 180.0]
+        [[receivers.point]]
+        position = [300.0, 280.0, 90.0]
+        "#
+    )
+}
+
+/// Checks the gradient of the balanced L2 misfit against finite differences for the model
+/// `config` makes with a guessed sphere, against data from another sphere. Every node outside
+/// layers `pml` nodes thick is perturbed.
+fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
+    use vibe_rations::config::Config;
+    use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers.traces;
+    let weights = balancing_weights(&observed);
+    let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
+    let cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
+    let base = std::path::Path::new(".");
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let misfit_of = |model: Model| {
+        let mut sim = Simulation::with_model(&cfg, model).unwrap();
+        sim.run(None, false).unwrap();
+        misfit(&sim.receivers.traces).unwrap().0
+    };
+
+    let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+    assert_eq!(
+        sim.receivers_next_to_layers(),
+        0,
+        "receivers next to the layers"
+    );
+    let run = gradient(&mut sim, |r| misfit(&r.traces), None).unwrap();
+    let [g_vp, g_vs, g_rho] = run.gradient.velocities(&model);
+
+    // Every node outside the layers; vp only below the fastest, which sets dt and the layers.
+    let g = model.grid;
+    let [nx, ny, nz] = g.n;
+    let vp_max = model.vp_range()[1] as f32;
+    let inside = |i: usize, j: usize, k: usize| {
+        (pml..nx - pml).contains(&i) && (pml..ny - pml).contains(&j) && k < nz - pml
+    };
+    for (name, grad, seed) in [("vp", &g_vp, 3), ("vs", &g_vs, 4), ("rho", &g_rho, 5)] {
+        let u: Vec<f64> = noise(g.interior_len(), seed)
+            .iter()
+            .map(|v| 2.0 * v - 1.0)
+            .collect();
+        let values = |m: &Model| match name {
+            "vp" => m.vp.clone(),
+            "vs" => m.vs.clone(),
+            _ => m.rho.clone(),
+        };
+        let base_values = values(&model);
+        let mut mask = vec![0.0f64; g.interior_len()];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let n = g.interior_idx(i, j, k);
+                    if inside(i, j, k) && !(name == "vp" && base_values[n] >= vp_max) {
+                        mask[n] = u[n];
+                    }
+                }
+            }
+        }
+        // The change the gradient predicts for m → m (1 + h u), per unit h.
+        let predicted: f64 = (0..mask.len())
+            .map(|n| grad[n] * base_values[n] as f64 * mask[n])
+            .sum();
+        let perturbed = |h: f64| {
+            let mut m = model.clone();
+            let target = match name {
+                "vp" => &mut m.vp,
+                "vs" => &mut m.vs,
+                _ => &mut m.rho,
+            };
+            for (v, &w) in target.iter_mut().zip(&mask) {
+                *v = (*v as f64 * (1.0 + h * w)) as f32;
+            }
+            m
+        };
+        // Central differences at h and h/2, then Richardson's extrapolation to cancel their
+        // h² error: smaller steps drown in single-precision round-off first.
+        let h = 1.6e-2;
+        let [coarse, fine] =
+            [h, h / 2.0].map(|h| (misfit_of(perturbed(h)) - misfit_of(perturbed(-h))) / (2.0 * h));
+        let extrapolated = (4.0 * fine - coarse) / 3.0;
+        let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
+        println!(
+            "gradient, {label}, {name}: predicted {predicted:.6e}; finite differences \
+             off by {:.1e} (h {h:.1e}) and {:.1e} (h/2), extrapolated by {:.1e}",
+            e(coarse),
+            e(fine),
+            e(extrapolated)
+        );
+        assert!(
+            e(extrapolated) < 3e-4,
+            "{name}, {label}: {}",
+            e(extrapolated)
+        );
+    }
+}

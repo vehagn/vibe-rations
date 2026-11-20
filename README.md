@@ -40,6 +40,7 @@ Then, in the container:
 | `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory") |
 | `just remote-up <host>`, `just tunnel <host>` | On the host: start the solver server on a remote machine, and reach it (see "Remote runs") |
 | `just run <config>` | Runs a simulation |
+| `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
 | `just web` | Builds the web app into `web/dist` |
 
 ```bash
@@ -126,6 +127,30 @@ In the output directory:
 import numpy as np
 vz, t = np.load("out/explosion/vz.npy"), np.load("out/explosion/time.npy")
 ```
+
+`gradient` compares the configured model's traces with observed ones (`<component>.npy` from
+an earlier `run`, sampled the same way: give both configurations the same `[time] dt`) by
+the L2 misfit, `--balance` weighting each component by its observed energy, and adds:
+
+- `grad_vp.npy`, `grad_vs.npy`, `grad_rho.npy`: $\partial\chi/\partial v_p$, $\partial\chi /
+  \partial v_s$ and $\partial\chi/\partial\rho$ at every node, shape (nz, ny, nx) like model
+  files; approximate inside the absorbing layers
+- `gradient.json`: the misfit, the component weights, the checkpoint interval, the most
+  memory the run held, and how many receivers sit next to the layers (which makes the
+  gradient approximate: move them further in, as many nodes as the stencil reaches, four at
+  order 8)
+
+The misfit is of the traces as `run` writes them, free of leapfrog's time error by default;
+the gradient takes it back through the transform's transpose. Give the observed and the
+guessed configurations the same `[scheme]`, with `optimised_for` pinned: optimised
+coefficients otherwise follow each model's slowest wave, and the two runs would use
+different operators.
+
+```bash
+just run truth.toml --out out/observed
+just gradient guess.toml out/observed --balance --out out/gradient
+```
+
 
 ## Memory
 
@@ -440,18 +465,27 @@ removed) unless stated:
 | A P wave doubling at the free surface above a buried explosion | 2.5%, mostly the reference's (see "Accuracy") |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 8 \times 10^{-7}$ of peak |
+| Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 8.3 \times 10^{-8}$ |
+| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 2.8 \times 10^{-4}$ (order 8: $\le 1.6 \times 10^{-5}$) |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI
 
 Planned next, following Fichtner (2011), ch. 7–11:
 
-1. **Adjoint wavefield.** Back-propagate the residuals by injecting them as forces at the
-   receivers (the transpose above) in reversed time (Tarantola 1984; Tromp et al. 2005;
-   Fichtner et al. 2006).
-2. **Gradients.** Zero-lag correlations of the forward and adjoint wavefields for $\lambda$,
-   $\mu$ and $\rho$, reparametrised to $v_p$, $v_s$ and $\rho$ (Köhn et al. 2012 on the
-   trade-offs).
+1. **Adjoint wavefield** (done: `src/adjoint.rs`). The residuals go back into the forward
+   solver, stepped in reversed order, through the transpose of the receivers: a velocity
+   residual as a unit force, a pressure residual as an isotropic stress source (Tarantola
+   1984; Tromp et al. 2005; Fichtner et al. 2006). Because the scheme is self-adjoint, this
+   is the exact transpose of the discrete forward run, not just of the wave equation: the
+   dot-product test holds to $10^{-7}$ with the source and receivers clear of the absorbing
+   layers.
+2. **Gradients** (done: `src/gradient.rs`). Zero-lag correlations of the forward and
+   adjoint wavefields for $\lambda$, $\mu$ and $\rho$, reparametrised to $v_p$, $v_s$ and
+   $\rho$ (Köhn et al. 2012 on the trade-offs), taken through the solver's own material
+   averaging and free surface, so they are the gradient of the discrete run: finite
+   differences agree to $10^{-4}$ outside the absorbing layers. The forward field is replayed
+   exactly from checkpoints for now.
 3. **Forward wavefield during the adjoint run.** The interior scheme is time-reversible, so
    it can be rebuilt backward from boundary values saved just inside the layers (Dussaud et
    al. 2008; Aaker et al. 2020) instead of being stored; checkpointing is the fallback.

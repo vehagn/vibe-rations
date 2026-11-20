@@ -6,9 +6,11 @@
 //! the traces can be cleared of (`tdt`). Convolutional PMLs absorb waves at the sides and
 //! bottom, and the top is either absorbing or a free surface (stress imaging).
 
+pub mod adjoint;
 pub mod config;
 pub mod cpml;
 pub mod fd;
+pub mod gradient;
 pub mod grid;
 pub mod image;
 pub mod memory;

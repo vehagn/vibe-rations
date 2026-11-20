@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::config::{Coefficients, Config, Format, PlaneKind, default_courant};
-use crate::cpml::PmlSettings;
+use crate::cpml::{PmlSettings, Stagger};
 use crate::fd::Stencil;
 use crate::grid::Grid;
 use crate::image;
@@ -209,9 +209,51 @@ pub(crate) fn timing(cfg: &Config, grid: &Grid, vp_max: f64, slowest: f64) -> Re
 impl Simulation {
     /// Sets up a run; `base` is the directory relative paths in the configuration start from.
     pub fn new(cfg: &Config, base: &Path) -> Result<Self> {
-        let taylor = Stencil::taylor(cfg.scheme.order)?;
-        let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
-        let model = Model::from_config(grid, &cfg.model, base)?;
+        // from_config validates the model.
+        let model = Model::from_config(Self::grid(cfg)?, &cfg.model, base)?;
+        Self::set_up(cfg, model)
+    }
+
+    /// The grid a configuration describes, with the halo its stencil needs: what a model
+    /// for [`Simulation::with_model`] must be on.
+    pub fn grid(cfg: &Config) -> Result<Grid> {
+        let stencil = Stencil::taylor(cfg.scheme.order)?;
+        Ok(cfg.grid.grid()?.with_halo(stencil.half_length()))
+    }
+
+    /// Sets up a run of `model` instead of the configuration's own, e.g. a model being
+    /// inverted for. Everything else, the time step included, comes from the configuration
+    /// and the model as for [`Simulation::new`].
+    pub fn with_model(cfg: &Config, model: Model) -> Result<Self> {
+        let grid = Self::grid(cfg)?;
+        ensure!(
+            model.grid == grid,
+            "the model's grid ({:?} nodes spaced {:?} m, halo {}) isn't the configuration's \
+             ({:?} spaced {:?}, halo {})",
+            model.grid.n,
+            model.grid.h,
+            model.grid.halo,
+            grid.n,
+            grid.h,
+            grid.halo
+        );
+        model.validate()?;
+        let mut sim = Self::set_up(cfg, model)?;
+        if cfg.scheme.coefficients == Coefficients::Optimised && cfg.scheme.optimised_for.is_none()
+        {
+            sim.info.warnings.push(
+                "the optimised coefficients follow this model's slowest wave, so each model gets \
+                 its own operator; pin [scheme] optimised_for to keep one across an inversion \
+                 or a finite-difference check"
+                    .into(),
+            );
+        }
+        Ok(sim)
+    }
+
+    /// The rest of [`Simulation::new`], for a validated model on the configuration's grid.
+    fn set_up(cfg: &Config, model: Model) -> Result<Self> {
+        let grid = model.grid;
         let mut warnings = Vec::new();
         let [_, vp_max] = model.vp_range();
         let Timing {
@@ -314,6 +356,14 @@ impl Simulation {
             !cfg.receivers.components.is_empty() || nodes.is_empty(),
             "receivers need at least one component"
         );
+        // A second copy records nothing new, and the adjoint would back-propagate both.
+        for (i, c) in cfg.receivers.components.iter().enumerate() {
+            ensure!(
+                !cfg.receivers.components[..i].contains(c),
+                "the receivers list {} twice",
+                c.name()
+            );
+        }
         let receivers = Receivers::new(&solver, nodes, cfg.receivers.components.clone(), samples);
 
         let mut snapshots = Vec::new();
@@ -398,6 +448,40 @@ impl Simulation {
             info,
             finished: false,
         })
+    }
+
+    /// Receivers outside the absorbing layers that still read a velocity the layers damp. A
+    /// velocity is interpolated from staggered values either side of its node, so on the first
+    /// node outside a layer it reads one inside. That hardly matters to the traces, but the
+    /// adjoint injects the residual there, where the scheme is not self-adjoint, so adjoints
+    /// and gradients are no longer exact: a node further in, they are.
+    pub fn receivers_next_to_layers(&self) -> usize {
+        let s = &self.solver;
+        let in_layers =
+            |node: &[usize; 3]| node.iter().zip(&s.cpml).any(|(&n, c)| c.slab(n).is_some());
+        let damped = |axis: usize, m: usize| {
+            let c = &s.cpml[axis];
+            c.slab(m)
+                .is_some_and(|i| c.profile(Stagger::Half).d[i] > 0.0)
+        };
+        let r = &self.receivers;
+        r.nodes
+            .iter()
+            .filter(|node| !in_layers(node))
+            .filter(|node| {
+                r.components.iter().any(|c| {
+                    let axis = match c {
+                        Component::Vx => 0,
+                        Component::Vy => 1,
+                        Component::Vz => 2,
+                        Component::P => return false,
+                    };
+                    s.stagger_weights(axis, node[axis], 1.0)
+                        .iter()
+                        .any(|&(m, _)| damped(axis, m))
+                })
+            })
+            .count()
     }
 
     /// Advances the wavefield one step, with the sources, without recording anything.
@@ -492,6 +576,40 @@ impl Simulation {
                     }
                 });
         }
+    }
+
+    /// Whether the traces have been un-warped ([`Simulation::finish`] with
+    /// `remove_time_dispersion`), so that they differ from the samples the solver recorded.
+    pub fn traces_unwarped(&self) -> bool {
+        self.finished && self.info.remove_time_dispersion
+    }
+
+    /// The derivative of a misfit with respect to the samples the solver recorded, given its
+    /// derivative `residuals` with respect to the traces as they are now (in the layout of
+    /// [`Receivers::traces`]). Once the traces are un-warped that is the un-warping's
+    /// transpose applied to each trace (`Warp::apply_transpose`); before, the residuals
+    /// themselves. The adjoint run ([`crate::adjoint::Adjoint`]) takes the former.
+    pub fn recorded_residuals(&self, residuals: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+        if !self.traces_unwarped() {
+            return residuals;
+        }
+        let samples = self.receivers.samples;
+        self.receivers
+            .components
+            .iter()
+            .zip(residuals)
+            .map(|(&c, mut r)| {
+                if let Some(warp) = self.trace_warp(c) {
+                    r.par_chunks_mut(samples).for_each(|trace| {
+                        let y: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
+                        for (t, x) in trace.iter_mut().zip(warp.apply_transpose(&y)) {
+                            *t = x as f32;
+                        }
+                    });
+                }
+                r
+            })
+            .collect()
     }
 
     /// Runs every step, writing snapshots into `out` if given, and reporting progress on
@@ -802,6 +920,40 @@ mod tests {
         assert!(e.contains("no [[source]]"), "{e}");
         let e = error(&format!("{BASE}\n[output]\nrecord_every = 0"));
         assert!(e.contains("record_every"), "{e}");
+        let e = error(&BASE.replace(
+            "[receivers]",
+            "[receivers]\ncomponents = [\"vz\", \"p\", \"p\"]",
+        ));
+        assert!(e.contains("list p twice"), "{e}");
+    }
+
+    #[test]
+    fn runs_a_model_given_in_memory_on_the_configured_grid() {
+        let cfg = Config::from_toml(BASE).unwrap();
+        let grid = Simulation::grid(&cfg).unwrap();
+        assert_eq!(grid.halo, 4);
+        let model = Model::homogeneous(grid, 2500.0, 1200.0, 2100.0);
+        let sim = Simulation::with_model(&cfg, model).unwrap();
+        assert_eq!(sim.info.vp_range, [2500.0, 2500.0]);
+        let spacing = Model::homogeneous(
+            Grid::new([30, 30, 30], [10.0, 10.0, 5.0]).with_halo(4),
+            2500.0,
+            1200.0,
+            2100.0,
+        );
+        let e = format!("{:#}", Simulation::with_model(&cfg, spacing).err().unwrap());
+        assert!(e.contains("[10.0, 10.0, 5.0]"), "{e}");
+        let wrong = Model::homogeneous(
+            Grid::new([30, 30, 31], [10.0; 3]).with_halo(4),
+            2500.0,
+            1200.0,
+            2100.0,
+        );
+        let e = format!("{:#}", Simulation::with_model(&cfg, wrong).err().unwrap());
+        assert!(e.contains("grid"), "{e}");
+        let mut bad = Model::homogeneous(grid, 2500.0, 1200.0, 2100.0);
+        bad.vp[0] = -1.0;
+        assert!(Simulation::with_model(&cfg, bad).is_err());
     }
 
     #[test]
@@ -815,6 +967,31 @@ mod tests {
         assert!(w[0].contains("points per shortest wavelength"), "{w:?}");
         assert!(w[1].contains("5 nodes thick"), "{w:?}");
         assert!(w[2].contains("receiver(s) inside"), "{w:?}");
+    }
+
+    /// A velocity is interpolated from as many staggered values as the stencil spans: at the
+    /// default order 8 four either side, so with 8-node layers (nodes 0–7, the last one's
+    /// half-node value undamped) a horizontal velocity reads a damped value up to node 10 and
+    /// not from node 11; pressure, and vertical velocity at the free surface, never do.
+    #[test]
+    fn finds_velocity_receivers_next_to_the_layers() {
+        let next = |at: &str, components: &str| {
+            let text = BASE.replace("[150.0, 150.0, 0.0]", at).replace(
+                "[receivers]",
+                &format!("[receivers]\ncomponents = {components}"),
+            );
+            let sim = setup(&text).unwrap();
+            assert!(sim.info.warnings.is_empty(), "{:?}", sim.info.warnings);
+            sim.receivers_next_to_layers()
+        };
+        assert_eq!(next("[80.0, 150.0, 0.0]", r#"["vx"]"#), 1);
+        assert_eq!(next("[100.0, 150.0, 0.0]", r#"["vx"]"#), 1);
+        assert_eq!(next("[110.0, 150.0, 0.0]", r#"["vx"]"#), 0);
+        assert_eq!(next("[80.0, 150.0, 0.0]", r#"["vz", "p"]"#), 0);
+        // The bottom layer starts at node 22, its first half-node value damped: vz reads it
+        // from node 19 (indices 15–22).
+        assert_eq!(next("[150.0, 150.0, 190.0]", r#"["vz"]"#), 1);
+        assert_eq!(next("[150.0, 150.0, 180.0]", r#"["vz"]"#), 0);
     }
 
     #[test]

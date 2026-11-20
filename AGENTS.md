@@ -16,8 +16,8 @@ opens a shell there instead.
 | Command | Does | Time |
 |---|---|---|
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
-| `just physics` | Whole simulations against analytic answers, misfits printed | ~1.5 min |
-| `just test` | Everything | ~1.5 min |
+| `just physics` | Whole simulations against analytic answers, misfits printed | ~2.5 min |
+| `just test` | Everything | ~2.5 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
@@ -25,6 +25,7 @@ opens a shell there instead.
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
 | `just memory <config>` | The memory a run needs, part by part, without building it | instant |
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
+| `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -47,7 +48,9 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run [--remote] | check | memory | serve | remote
+  main.rs        the CLI: run [--remote] | check | memory | gradient | serve | remote
+  adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
+  gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
@@ -108,7 +111,7 @@ examples/        annotated configurations
   loosen a physics tolerance to make a change pass. When a deliberate change trades one
   baseline for another, record both numbers in the test's doc comment, here and in the log.
 - **Sources are the transpose of receivers** (`Solver::stagger_weights`, `PointOp`).
-  Adjoint FWI depends on it; the reciprocity test checks it to $10^{-6}$.
+  Adjoint FWI depends on it; the reciprocity and dot-product tests check it.
 - SI units; $z$ points down; arrays are $x$-fastest, padded by `grid.halo` nodes.
 - Comments say why, not what. Doc comments on public items.
 
@@ -117,6 +120,18 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The adjoint and gradients meet this branch's defaults** (merged 2026-11-20). (1) The
+  time-dispersion transform: `gradient` un-warps the traces after the forward run, as `run`
+  does, so the misfit is of the same traces as observed data from `run`, and
+  `Simulation::recorded_residuals` takes its derivative back through the transform's
+  transpose to the samples the solver recorded, which `Adjoint` injects. (2) Optimised
+  coefficients follow the model's slowest wave, so a finite-difference check or an inversion
+  must pin `[scheme] optimised_for`, or each model gets its own operator (`with_model`
+  warns). (3) Receivers interpolate from as many values as the stencil spans, four nodes at
+  order 8, so "next to a layer" now means within four nodes: two test receivers that sat
+  two nodes in (fine for the cubic) read damped values and made the dot-product test
+  2.4e-7 and the gradient check worse, looking like a layer leak until
+  `receivers_next_to_layers` named them. The dot-product and gradient checks now assert none.
 - **Remote runs** (`vibe-rations serve`, `run --remote`, `remote`; README, "Remote runs").
   The server keeps runs by id in its data directory and steps them in one scheduler thread,
   a chunk of about 0.1 s at a time; request threads draw pictures between chunks under the
@@ -147,7 +162,9 @@ doesn't show.
   gains a large array, add it to `memory::Plan` and to `Solver::memory_bytes`. `run` and
   `check` refuse runs larger than `MemAvailable`; the web app refuses runs over 4 GiB. A
   volume snapshot briefly needs 32 bytes per node (a node list, values and shading), which
-  could be cut.
+  could be cut. A gradient run holds more: a second solver, the checkpoints and a replayed
+  segment (`gradient::Run::memory_bytes` reports it afterwards); `memory::estimate` doesn't
+  count that yet.
 - **Stencil coefficients are optimised by default** (`[scheme] coefficients`, opt out with
   `"taylor"`; `Stencil::optimised`). With the time error removed, the phase error per node,
   $\lvert \mathbf K \rvert - \lvert \mathbf k \rvert h$, is the whole error, so the
@@ -187,6 +204,34 @@ doesn't show.
   transform and the stencil-matched interpolation came from it, and the log's entry lists
   what remains, in its open questions. Its references came from memory: check any on
   Crossref before citing it.
+- **Gradients are those of the discrete run** (`gradient::gradient`): the multipliers of the
+  forward equations are $W B^{-1} \tilde v$ and $-W \tilde\varepsilon$, with the adjoint
+  strain $\tilde\varepsilon$ *summed* from the adjoint strain rates (not $M^{-1}\tilde\sigma$:
+  singular in fluids, cancels digits where $\mu \ll \lambda$), then the chain rule through
+  the material averaging (once per slot a node fills: the grid's last planes clamp) and the
+  free surface's plane-stress moduli. Finite differences agree to $\le 2.8 \times 10^{-4}$
+  (CPML at orders 4 and 8; rigid walls with water and uneven spacing) only after
+  Richardson's extrapolation: plain central differences in single precision have an $h^2$
+  error of percents down to $h \approx 2 \times 10^{-3}$, below which round-off takes over.
+  In a finite-difference check, keep $v_p$ below the model's fastest: it sets $\Delta t$ (via
+  the Courant fraction) and the layers' damping. The forward field is replayed from
+  checkpoints (`Solver::state`, `restore`), bit for bit; a unit test checks every interval
+  gives the same gradient. Receiver components may not repeat: a second `p` once went into
+  the adjoint run but not the adjoint strain and flipped the gradient's sign.
+- **The adjoint is the forward solver run backwards** (`Adjoint`), not separate kernels.
+  Transposing the discrete step gives the same step in reversed order with $\tilde v =
+  \lambda_v$, $\tilde\sigma = -\lambda_\sigma$. Adjoint step $m$ pairs with forward step
+  $n = N - 1 - m$: a velocity residual from forward step $n$ enters during adjoint step $m$
+  as a unit force (`Solver::adjoint_op`); a pressure residual, read from $\sigma^{n+1}$, one
+  adjoint step earlier as an isotropic stress source $\Delta t\,K/V$, and the last one is the
+  initial state, mirrored above a free surface (a receiver a node below the surface is what
+  tests that). The dot-product test holds to $8.3 \times 10^{-8}$ (single precision) with
+  rigid walls or CPML, orders 4 and 8. Receivers *inside* a layer break it by up to
+  $1.4 \times 10^{-3}$, and a velocity receiver whose interpolation reaches into one (the
+  first node outside at order 4, the first four at order 8) by up to $2.8 \times 10^{-5}$,
+  since it reads damped values (`Simulation::receivers_next_to_layers`; `gradient` warns). For a dot-product test, give
+  the residuals the data's signs and weight the components equally: random signs cancelled
+  50-fold and made round-off look like $10^{-4}$, and pressure outweighs velocity by $10^6$.
 - **Error propagation into adjoint fields** is a main research interest for what comes next:
   forward-field error (dispersion, interfaces, free surface, layers), reconstruction error,
   and their effect on gradients. Design the adjoint so each can be measured separately (see
@@ -196,7 +241,10 @@ doesn't show.
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
   free-surface P doubling 2.52% (mostly the reference, above); CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
-  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the 9 s soft-sediment run drains to
+  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
+  $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
+  $\le 2.8 \times 10^{-4}$ (order 4's $v_p$, whose directional derivative is small; order 8
+  $\le 1.6 \times 10^{-5}$); the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
   for these long waves), 0.001–0.008%, 2.53%, the same layers, $\le 7 \times 10^{-7}$. With
   the time error kept at $C = 0.3$ (the default before): 0.07–0.19%, 0.03–0.09%, 2.40%,

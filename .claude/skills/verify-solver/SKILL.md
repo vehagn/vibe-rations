@@ -28,6 +28,8 @@ the traces):
 | `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.52% (about 2.2% is the reference's) | free-surface condition, mirroring, surface sampling |
 | `absorbing_layers_reflect_little` (± free surface) | $1.7 \times 10^{-4}$ / $1.9 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
 | `swapping_source_and_receiver_gives_the_same_trace` | $\le 8 \times 10^{-7}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
+| `the_adjoint_run_is_the_transpose_of_the_forward_run` | $\le 8.3 \times 10^{-8}$ | the adjoint's step pairing or `Solver::adjoint_op`, or anything that breaks reciprocity; a receiver whose interpolation reaches into a layer (the helper refuses one) |
+| `the_gradient_matches_finite_differences` (and `…_with_walls_and_water`) | $\le 2.8 \times 10^{-4}$ ($\le 1.6 \times 10^{-4}$) extrapolated; order 8 $\le 1.6 \times 10^{-5}$ | the material averaging, the free surface's moduli, the update's strain rates, sources or receivers that change how the material enters, the transform's transpose (`Simulation::recorded_residuals`) |
 | `a_long_run_stays_stable_and_drains` | $\le 3 \times 10^{-6}$ | instabilities (see `debug-instability`) |
 
 A number that got worse is a regression even if the test passes. Find out why before
