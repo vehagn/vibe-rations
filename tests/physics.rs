@@ -7,6 +7,7 @@
 mod common;
 
 use common::*;
+use vibe_rations::gradient::Strategy;
 use vibe_rations::receiver::Component;
 use vibe_rations::source::Wavelet;
 
@@ -639,9 +640,12 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
 #[test]
 fn the_gradient_matches_finite_differences() {
     for order in [4, 8] {
-        gradient_check(&format!("order {order}"), 8, &|sphere| {
-            gradient_model(order, sphere)
-        });
+        gradient_check(
+            &format!("order {order}"),
+            8,
+            &|sphere| gradient_model(order, sphere),
+            Strategy::default(),
+        );
     }
 }
 
@@ -659,7 +663,135 @@ fn the_gradient_matches_finite_differences() {
 /// one covers optimised coefficients.
 #[test]
 fn the_gradient_matches_finite_differences_with_walls_and_water() {
-    gradient_check("walls and water", 0, &walls_and_water);
+    gradient_check("walls and water", 0, &walls_and_water, Strategy::default());
+}
+
+/// The same checks with the forward wavefield rebuilt backwards from the band around the
+/// layers instead of replayed (`Strategy::Reconstruct`, default segments).
+///
+/// Measured, extrapolated (replayed in brackets): order 4 vp 2.6e-4 (2.8e-4), vs 2.1e-5
+/// (2.1e-5), ρ 4.4e-5 (4.4e-5); order 8 vp 1.4e-6 (3.9e-6), vs 1.0e-5 (1.0e-5), ρ 1.6e-5
+/// (1.6e-5); walls and water vp 6.3e-5 (6.4e-5), vs 1.2e-5 (1.2e-5), ρ 1.6e-4 (1.6e-4). The
+/// rebuilt gradient moves the predicted change by 2e-5 at most (order 4's vp, whose
+/// directional derivative is small), well inside what the finite differences resolve.
+#[test]
+fn the_gradient_matches_finite_differences_when_rebuilt() {
+    let rebuilt = Strategy::Reconstruct { segment: None };
+    for order in [4, 8] {
+        gradient_check(
+            &format!("rebuilt, order {order}"),
+            8,
+            &|sphere| gradient_model(order, sphere),
+            rebuilt,
+        );
+    }
+    gradient_check("rebuilt, walls and water", 0, &walls_and_water, rebuilt);
+}
+
+/// Rebuilt backwards from the band around the layers, the forward wavefield retraces the run
+/// at every node outside them: at orders 4 and 8, along a free surface and with layers all
+/// round, and with water under the surface and rigid walls (no layers, so the band is the
+/// halo, always zero). The error is single-precision round-off, which accumulates as the
+/// rebuilt field steps back.
+///
+/// Measured, largest over the run relative to each array's peak: order 4, 251 steps, 7.5e-7
+/// with a free surface and 6.3e-7 with layers all round; order 8, 283 steps, 6.2e-7 and
+/// 1.2e-6; walls and water, 213 steps, 9.6e-7. The tolerance is four times the largest.
+#[test]
+fn the_rebuilt_wavefield_follows_the_run() {
+    for order in [4, 8] {
+        let model = gradient_model(order, [2300.0, 1150.0, 2050.0]);
+        for (label, text) in [
+            ("free surface", model.clone()),
+            (
+                "layers all round",
+                model.replace("pml_width = 8", "pml_width = 8\nfree_surface = false"),
+            ),
+        ] {
+            let drift = rebuild_drift(setup(&text), 10);
+            let worst = drift.iter().fold(0.0f64, |m, &(_, e, _)| m.max(e));
+            println!(
+                "rebuilt wavefield, order {order}, {label}: {} steps, at most {worst:.1e}",
+                setup(&text).steps
+            );
+            assert!(worst < 5e-6, "order {order}, {label}: {worst}");
+        }
+    }
+    let water = walls_and_water([2300.0, 1150.0, 2050.0]);
+    let drift = rebuild_drift(setup(&water), 10);
+    let worst = drift.iter().fold(0.0f64, |m, &(_, e, _)| m.max(e));
+    println!(
+        "rebuilt wavefield, walls and water: {} steps, at most {worst:.1e}",
+        setup(&water).steps
+    );
+    assert!(worst < 5e-6, "walls and water: {worst}");
+}
+
+/// The gradient from the rebuilt wavefield against the one from the replay, at every node
+/// outside the layers: the default segments and the whole run as one, on the models of the
+/// finite-difference checks.
+///
+/// Measured, largest difference relative to each parameter's largest value (default segments,
+/// then the whole run): order 4, 2.9e-7 (84 steps) and 5.3e-7 (251); order 8, 3.2e-7 (57) and
+/// 5.5e-7 (283); walls and water, 3.9e-7 (31) and 7.1e-7 (213). The tolerance is four times
+/// the largest.
+#[test]
+fn rebuilt_gradients_match_the_replay() {
+    use vibe_rations::gradient::{gradient_with, l2_misfit};
+    let order4 = |sphere| gradient_model(4, sphere);
+    let order8 = |sphere| gradient_model(8, sphere);
+    type Config<'a> = &'a dyn Fn([f64; 3]) -> String;
+    let cases: [(&str, Config); 3] = [
+        ("order 4", &order4),
+        ("order 8", &order8),
+        ("walls and water", &walls_and_water),
+    ];
+    for (label, config) in cases {
+        let text = config([2050.0, 1000.0, 2000.0]);
+        let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers.traces;
+        let weights = vec![1.0; observed.len()];
+        let run = |strategy| {
+            let mut sim = setup(&text);
+            let r = gradient_with(
+                &mut sim,
+                |r| l2_misfit(&r.traces, &observed, &weights),
+                strategy,
+            )
+            .unwrap();
+            (sim.solver.interior(), sim.solver.grid, r)
+        };
+        let (interior, g, reference) = run(Strategy::default());
+        let nodes: Vec<usize> = interior[2]
+            .clone()
+            .flat_map(|k| {
+                let x = interior[0].clone();
+                interior[1]
+                    .clone()
+                    .flat_map(move |j| x.clone().map(move |i| g.interior_idx(i, j, k)))
+            })
+            .collect();
+        for segment in [None, Some(usize::MAX)] {
+            let (_, _, r) = run(Strategy::Reconstruct { segment });
+            let mut worst = 0.0f64;
+            for (a, b) in [
+                (&r.gradient.rho, &reference.gradient.rho),
+                (&r.gradient.lambda, &reference.gradient.lambda),
+                (&r.gradient.mu, &reference.gradient.mu),
+            ] {
+                let scale = nodes.iter().fold(0.0f64, |m, &n| m.max(b[n].abs()));
+                assert!(scale > 0.0, "{label}: no gradient");
+                let e = nodes
+                    .iter()
+                    .fold(0.0f64, |m, &n| m.max((a[n] - b[n]).abs() / scale));
+                worst = worst.max(e);
+            }
+            println!(
+                "rebuilt gradient, {label}, segments of {}: off by {worst:.1e}",
+                r.checkpoint_every
+            );
+            assert!(worst < 3e-6, "{label}, {segment:?}: {worst}");
+        }
+    }
 }
 
 fn walls_and_water(sphere: [f64; 3]) -> String {
@@ -778,9 +910,14 @@ fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
 /// Checks the gradient of the balanced L2 misfit against finite differences for the model
 /// `config` makes with a guessed sphere, against data from another sphere. Every node outside
 /// layers `pml` nodes thick is perturbed.
-fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
+fn gradient_check(
+    label: &str,
+    pml: usize,
+    config: &dyn Fn([f64; 3]) -> String,
+    strategy: vibe_rations::gradient::Strategy,
+) {
     use vibe_rations::config::Config;
-    use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
+    use vibe_rations::gradient::{balancing_weights, gradient_with, l2_misfit};
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
@@ -803,7 +940,7 @@ fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) 
         0,
         "receivers next to the layers"
     );
-    let run = gradient(&mut sim, |r| misfit(&r.traces), None).unwrap();
+    let run = gradient_with(&mut sim, |r| misfit(&r.traces), strategy).unwrap();
     let [g_vp, g_vs, g_rho] = run.gradient.velocities(&model);
 
     // Every node outside the layers; vp only below the fastest, which sets dt and the layers.
