@@ -390,7 +390,11 @@ function showInfo(info) {
     ["vs", `${info.vs_range.map(Math.round).join("–")} m/s`],
     ["Time step", `${(info.dt * 1e3).toFixed(3)} ms`],
     ["Steps", `${info.steps} to ${info.duration.toFixed(3)} s`],
-    ["Accuracy", `${info.points_per_wavelength.toFixed(1)} points per wavelength, order ${info.order}`],
+    [
+      "Accuracy",
+      `${info.points_per_wavelength.toFixed(1)} points per wavelength, order ${info.order}` +
+        (info.remove_time_dispersion ? ", time dispersion removed" : ""),
+    ],
     ["Boundary", `${info.pml_width}-node layers${info.free_surface ? ", free surface" : ""}`],
     ["Receivers", `${info.receivers} × ${info.samples} samples`],
     ["Memory", `${(info.memory_bytes / 2 ** 20).toFixed(0)} MiB`],

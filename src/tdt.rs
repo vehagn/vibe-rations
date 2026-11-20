@@ -19,6 +19,10 @@
 //! wavefield itself (snapshots) stays warped. Time stamps matter: the warp is about t = 0, when
 //! the run starts at rest, so each signal is given with the time of its first sample.
 //!
+//! The pair is Koene et al.'s (2018, eqs. 13–17), with no amplitude factors; they pad to
+//! twice the length too. The time stamps of a staggered scheme are this module's concern:
+//! the paper doesn't discuss the time origin.
+//!
 //! Each transform is a real linear map from one sampled signal to another of the same length,
 //! band-limited to the frequencies kept and computed as if zero-padded to twice its length, so
 //! nothing wraps round. [`Warp::apply_transpose`] is what an adjoint source needs when the

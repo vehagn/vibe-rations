@@ -10,6 +10,8 @@ use common::*;
 use vibe_rations::receiver::Component;
 use vibe_rations::source::Wavelet;
 
+/// At the default: 0.002–0.006%. Opting out of the time-dispersion transform, at C = 0.3:
+/// 0.07–0.19%.
 #[test]
 fn an_explosion_matches_the_full_space_solution() {
     let source = [400.0, 400.0, 400.0];
@@ -57,25 +59,25 @@ fn an_explosion_matches_the_full_space_solution() {
             .map(|&t| explosion_velocity(&w, 1e13, dist, t))
             .collect();
         let e = misfit(&radial, &exact);
-        println!("explosion, r = {dist:.1} m: misfit {:.2}%", 100.0 * e);
-        assert!(e < 0.02, "misfit {e} at {p:?}");
+        println!("explosion, r = {dist:.1} m: misfit {:.3}%", 100.0 * e);
+        assert!(e < 2e-4, "misfit {e} at {p:?}");
     }
 }
 
+/// At the default, with leapfrog's time error removed and C = 0.85: 0.001–0.008%.
 #[test]
 fn a_point_force_matches_stokes_solution() {
     for (what, e) in point_force_misfits("") {
-        assert!(e < 0.01, "misfit {e} in {what}");
+        assert!(e < 2e-4, "misfit {e} in {what}");
     }
 }
 
-/// Removing leapfrog's time error (`remove_time_dispersion`, which then steps at 0.85 of the
-/// stability limit instead of 0.3) costs no accuracy; on this grid (6.9 points per S
-/// wavelength) it gains some: 0.001–0.008% against 0.03–0.09% at C = 0.3 without it.
+/// Opting out of the time-dispersion transform (which then steps at C = 0.3): 0.03–0.09%. On
+/// this grid (6.9 points per S wavelength) the time error dominates even at 0.3.
 #[test]
-fn removing_time_dispersion_allows_a_large_time_step() {
-    for (what, e) in point_force_misfits("[scheme]\nremove_time_dispersion = true") {
-        assert!(e < 2e-4, "misfit {e} in {what}");
+fn a_point_force_matches_stokes_solution_without_the_transform() {
+    for (what, e) in point_force_misfits("[scheme]\nremove_time_dispersion = false") {
+        assert!(e < 2e-3, "misfit {e} in {what}");
     }
 }
 
@@ -133,7 +135,7 @@ fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
                 if scheme.is_empty() {
                     ""
                 } else {
-                    ", transformed"
+                    ", without the transform"
                 },
                 100.0 * e
             );
@@ -145,6 +147,12 @@ fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
 
 /// At the epicentre a P wave meets the free surface head-on, and the surface moves twice as
 /// much as the same wave would in a full space.
+///
+/// The misfit is 2.53% at the default (2.40% opting out of the time-dispersion transform, at
+/// C = 0.3, where the time error partly cancels the free surface's). Most of it is the
+/// reference: doubling is exact only for a plane wave. On finer grids the misfit tends to
+/// about 2.2% (`free_surface_on_finer_grids` in `just accuracy`), so the scheme's own share at
+/// this spacing is about 0.36% (0.23% opting out).
 #[test]
 fn the_free_surface_doubles_a_vertically_incident_p_wave() {
     let depth = 300.0;
@@ -178,7 +186,7 @@ fn the_free_surface_doubles_a_vertically_incident_p_wave() {
         .collect();
     let e = misfit(&trace(&sim, Component::Vz, 0), &exact);
     println!("free surface: misfit {:.2}%", 100.0 * e);
-    assert!(e < 0.025, "misfit {e}");
+    assert!(e < 0.026, "misfit {e}");
 }
 
 /// The same receivers, the same distance from the source, in a domain small enough that the
@@ -243,20 +251,22 @@ fn layer_reflection(free_surface: bool) -> f64 {
     worst_overall
 }
 
-/// Measured: order 4 at courant 0.85, 1.5e-4 of the peak; order 8 at 0.3 (the default),
-/// 3.9e-4 (about -68 dB): longer stencils reach further across the layers' inner edge.
+/// Measured: 1.7e-4 of the peak (about -75 dB) at the default, order 8 at C = 0.85 with the
+/// time-dispersion transform; 3.9e-4 at order 8 and C = 0.3 without it, 1.5e-4 at order 4 and
+/// C = 0.85 without it. Longer stencils reach further across the layers' inner edge.
 #[test]
 fn absorbing_layers_reflect_little() {
     let worst = layer_reflection(false);
-    assert!(worst < 4.5e-4, "{worst}");
+    assert!(worst < 2e-4, "{worst}");
 }
 
 /// Along a free surface the side layers also damp plainly, to stay stable, which costs some
-/// reflection. Measured: 1.8e-3 at order 4, 2.1e-3 at order 8 (the default).
+/// reflection. Measured: 1.9e-3 at the default; 2.1e-3 at order 8 and C = 0.3 without the
+/// transform, 1.8e-3 at order 4.
 #[test]
 fn absorbing_layers_reflect_little_along_a_free_surface() {
     let worst = layer_reflection(true);
-    assert!(worst < 2.4e-3, "{worst}");
+    assert!(worst < 2.2e-3, "{worst}");
 }
 
 /// Swapping a point force and a receiver gives the same trace, with the components swapped

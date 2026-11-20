@@ -13,14 +13,16 @@ spacing = 12.0           # metres; or one per axis, [dx, dy, dz]
 [time]
 duration = 0.8  # seconds; dt follows from the stability limit (see `just check`)
 
-# Eighth-order stencils at 0.3 of the stability limit are the defaults: about 4.5 grid points
-# per shortest wavelength keep the misfit near 1% after ten wavelengths (README, "Accuracy").
-# Fourth order (`order = 4`) is faster per step but needs nearly twice the points.
+# Eighth-order stencils are the default: about 4.5 grid points per shortest wavelength keep
+# the misfit near 1% after ten wavelengths (README, "Accuracy"). Orders 12–16 are more
+# accurate still; fourth order (`order = 4`) is faster per step but needs nearly twice the
+# points.
 [scheme]
 order = 8
-# Removing leapfrog's time error from the traces allows 0.85 of the limit, as accurate in 2.8
-# times fewer steps; snapshots stay warped (README, "Accuracy").
-# remove_time_dispersion = true
+# By default leapfrog's time error is taken out of the traces (Wang & Xu 2015; Koene et al.
+# 2018), so the time step is 0.85 of the limit; snapshots stay warped. Opting out records what
+# the time stepping computes, at 0.3 of the limit for the same accuracy.
+# remove_time_dispersion = false
 
 [boundary]
 pml_width = 15       # nodes of absorbing layer on the sides and bottom

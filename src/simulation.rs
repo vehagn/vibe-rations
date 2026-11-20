@@ -638,16 +638,23 @@ mod tests {
 
     #[test]
     fn steps_at_a_fraction_of_the_stability_limit() {
-        // Eighth order by default, at 0.3 of the limit.
+        // Eighth order by default, with the time error removed, at 0.85 of the limit.
         let sim = setup(BASE).unwrap();
         let i = &sim.info;
         assert_eq!(i.order, 8);
-        assert!((i.dt - 0.3 * i.dt_stable).abs() < 1e-15);
+        assert!(i.remove_time_dispersion);
+        assert!((i.dt - 0.85 * i.dt_stable).abs() < 1e-15);
         assert_eq!(sim.steps, (0.05 / i.dt).ceil() as usize);
         assert_eq!(i.samples, sim.steps);
         assert!(i.warnings.is_empty(), "{:?}", i.warnings);
-        // Fourth order steps at 0.85, where its time and space errors partly cancel.
-        let fourth = setup(&format!("{BASE}\n[scheme]\norder = 4")).unwrap();
+        // Opting out, eighth order needs 0.3; fourth order keeps 0.85, where its time and
+        // space errors partly cancel.
+        let kept = setup(&format!("{BASE}\n[scheme]\nremove_time_dispersion = false")).unwrap();
+        assert!((kept.info.dt - 0.3 * kept.info.dt_stable).abs() < 1e-15);
+        let fourth = setup(&format!(
+            "{BASE}\n[scheme]\norder = 4\nremove_time_dispersion = false"
+        ))
+        .unwrap();
         assert!((fourth.info.dt - 0.85 * fourth.info.dt_stable).abs() < 1e-15);
         // A grid fine enough for eighth order is too coarse for second.
         let ppw = i.points_per_wavelength;
