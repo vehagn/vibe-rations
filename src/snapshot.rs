@@ -153,4 +153,77 @@ mod tests {
         w[0] = 2.0;
         assert_eq!(robust_clip(&w), 2e-4);
     }
+
+    use crate::cpml::PmlSettings;
+    use crate::grid::Grid;
+    use crate::model::Model;
+
+    fn snapshot(plane: PlaneKind, index: usize) -> Snapshot {
+        Snapshot {
+            component: Component::P,
+            plane,
+            index,
+            every: 3,
+            png: false,
+            npy: true,
+            clip: None,
+        }
+    }
+
+    #[test]
+    fn names_say_what_and_where() {
+        assert_eq!(snapshot(PlaneKind::Xz, 60).name(), "p_xz60");
+        assert_eq!(snapshot(PlaneKind::Xy, 0).name(), "p_xy0");
+        assert_eq!(snapshot(PlaneKind::Volume, 0).name(), "p_volume");
+        assert!(snapshot(PlaneKind::Yz, 1).due(6));
+        assert!(!snapshot(PlaneKind::Yz, 1).due(7));
+    }
+
+    /// Sections are row-major with the first row at the top (smallest y or z), so depth runs
+    /// down the rows of an xz section.
+    #[test]
+    fn sections_are_row_major_from_the_top() {
+        let g = Grid::new([8, 7, 6], [10.0; 3]);
+        let pml = PmlSettings {
+            power: 2.0,
+            reflection: None,
+            kappa_max: 1.0,
+            alpha_max: 30.0,
+            vp_max: 3000.0,
+            sponge: 0.0,
+        };
+        let mut s = Solver::new(
+            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
+            1e-3,
+            0,
+            false,
+            &pml,
+        );
+        // p = k at every node.
+        for k in 0..6 {
+            for j in 0..7 {
+                for i in 0..8 {
+                    s.fields.sxx[g.idx(i, j, k)] = -3.0 * k as f32;
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("vibe-rations-snap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (plane, index, shape) in [
+            (PlaneKind::Xy, 2, vec![7, 8]),
+            (PlaneKind::Xz, 3, vec![6, 8]),
+            (PlaneKind::Yz, 4, vec![6, 7]),
+            (PlaneKind::Volume, 0, vec![6, 7, 8]),
+        ] {
+            let snap = snapshot(plane, index);
+            snap.write(&dir, &s).unwrap();
+            let (got, values) =
+                npy::read(&dir.join(format!("{}_000000.npy", snap.name()))).unwrap();
+            assert_eq!(got, shape, "{plane:?}");
+            if plane == PlaneKind::Xz {
+                assert!((values[8 * 5] - 5.0).abs() < 1e-5, "row 5 should be k = 5");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

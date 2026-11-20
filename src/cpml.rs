@@ -263,4 +263,39 @@ mod tests {
         c.apply_along(&mut d, &mut [], Stagger::Node);
         assert_eq!(d, [1.0; 10]);
     }
+
+    #[test]
+    fn sponge_damps_only_inside_the_layers_and_more_outwards() {
+        let c = CpmlAxis::new(40, 10, 10, 10.0, 1e-3, &settings());
+        let f = c.sponge_factors(0.2, 1e-3);
+        assert!(f[10..30].iter().all(|&v| v == 1.0));
+        // It rises gently: just inside, the factor rounds to 1 in f32.
+        assert!(f[0] < f[5] && f[5] < f[9] && f[9] <= 1.0);
+        assert_eq!(f[0], f[39]);
+        assert!(c.sponge_factors(0.0, 1e-3).iter().all(|&v| v == 1.0));
+    }
+
+    /// For a constant derivative the memory variable settles at a d / (1 - b), so the
+    /// damped derivative tends to d (1/κ + a / (1 - b)).
+    #[test]
+    fn memory_variables_follow_their_recurrence() {
+        let c = CpmlAxis::new(40, 10, 10, 10.0, 1e-3, &settings());
+        let p = c.profile(Stagger::Node);
+        let (a, b, k) = (p.a[3], p.b[3], p.inv_kappa[3]);
+        let mut psi = [0.0f32; 2];
+        let mut d = [1.0f32; 2];
+        c.apply_across(3, &mut d, &mut psi, Stagger::Node);
+        assert!((psi[0] - a).abs() < 1e-7 && (d[0] - (k + a)).abs() < 1e-6);
+        for _ in 0..20_000 {
+            d = [1.0; 2];
+            c.apply_across(3, &mut d, &mut psi, Stagger::Node);
+        }
+        let settled = a / (1.0 - b);
+        assert!(
+            (psi[1] - settled).abs() < 1e-4 * settled.abs(),
+            "{} vs {settled}",
+            psi[1]
+        );
+        assert!((d[1] - (k + settled)).abs() < 1e-4);
+    }
 }

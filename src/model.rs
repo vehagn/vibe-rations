@@ -242,4 +242,66 @@ mod tests {
                 .is_ok()
         );
     }
+
+    use crate::config::ModelFiles;
+
+    #[test]
+    fn loads_npy_files_relative_to_the_configuration() {
+        let dir = std::env::temp_dir().join(format!("vibe-rations-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = Grid::new([4, 3, 2], [10.0; 3]);
+        let ramp = |base: f32| (0..24).map(|n| base + n as f32).collect::<Vec<_>>();
+        for (name, base) in [("vp", 3000.0), ("vs", 1500.0), ("rho", 2500.0)] {
+            npy::write(&dir.join(format!("{name}.npy")), &[2, 3, 4], &ramp(base)).unwrap();
+        }
+        let cfg = ModelConfig {
+            layers: vec![],
+            files: Some(ModelFiles {
+                vp: "vp.npy".into(),
+                vs: "vs.npy".into(),
+                rho: "rho.npy".into(),
+            }),
+            spheres: vec![],
+        };
+        let m = Model::from_config(g, &cfg, &dir).unwrap();
+        // x fastest: node (3, 2, 1) is the last value.
+        assert_eq!(m.vp[g.interior_idx(3, 2, 1)], 3023.0);
+        assert_eq!(m.rho[g.interior_idx(1, 0, 0)], 2501.0);
+        let wrong = Grid::new([3, 4, 2], [10.0; 3]);
+        let e = format!("{:#}", Model::from_config(wrong, &cfg, &dir).unwrap_err());
+        assert!(e.contains("shape"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn needs_either_layers_or_files() {
+        let g = Grid::new([8, 8, 8], [1.0; 3]);
+        let files = Some(ModelFiles {
+            vp: "a".into(),
+            vs: "b".into(),
+            rho: "c".into(),
+        });
+        let none = ModelConfig {
+            layers: vec![],
+            files: None,
+            spheres: vec![],
+        };
+        assert!(Model::from_config(g, &none, Path::new(".")).is_err());
+        let both = ModelConfig {
+            layers: vec![layer(0.0, 2000.0)],
+            files,
+            spheres: vec![],
+        };
+        let e = format!(
+            "{:#}",
+            Model::from_config(g, &both, Path::new(".")).unwrap_err()
+        );
+        assert!(e.contains("not both"), "{e}");
+        let deep = ModelConfig {
+            layers: vec![layer(10.0, 2000.0)],
+            files: None,
+            spheres: vec![],
+        };
+        assert!(Model::from_config(g, &deep, Path::new(".")).is_err());
+    }
 }

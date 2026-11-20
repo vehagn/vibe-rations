@@ -918,4 +918,123 @@ mod tests {
             .collect();
         assert_eq!(with_z, vec![9, 10, 11]);
     }
+
+    fn rel(a: f32, b: f64) -> bool {
+        ((a as f64 - b) / b).abs() < 1e-6
+    }
+
+    /// Density is averaged arithmetically and μ harmonically onto the staggered positions.
+    #[test]
+    fn material_takes_means_at_staggered_positions() {
+        let g = Grid::new([8, 8, 8], [10.0; 3]);
+        let mut model = Model::homogeneous(g, 2000.0, 1000.0, 2000.0);
+        for k in 4..8 {
+            for j in 0..8 {
+                for i in 0..8 {
+                    let n = g.interior_idx(i, j, k);
+                    model.vp[n] = 3000.0;
+                    model.vs[n] = 1500.0;
+                    model.rho[n] = 3000.0;
+                }
+            }
+        }
+        let dt = 1e-3;
+        let m = Material::new(&model, dt);
+        let (mu1, mu2) = (2000.0 * 1e6, 3000.0 * 1500.0 * 1500.0);
+        let p = g.idx(3, 3, 3); // the last node above the interface
+        assert!(rel(m.bx[p], dt / 2000.0));
+        assert!(rel(m.bz[p], dt * 2.0 / 5000.0));
+        assert!(rel(m.mxy[p], dt * mu1));
+        assert!(rel(m.mxz[p], dt * 2.0 * mu1 * mu2 / (mu1 + mu2)));
+        assert!(rel(m.l2m[p], dt * 2000.0 * 4e6));
+        assert!(rel(m.lam[p], dt * (2000.0 * 4e6 - 2.0 * mu1)));
+    }
+
+    /// Injecting through an operator is its transpose: ⟨inject(a), g⟩ = a · sample(g).
+    #[test]
+    fn point_ops_inject_the_transpose_of_what_they_sample() {
+        let g = Grid::new([10, 10, 10], [10.0; 3]);
+        let s = Solver::new(
+            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
+            1e-3,
+            3,
+            true,
+            &pml(),
+        );
+        let mut probe = Fields::zeros(g.padded_len());
+        for (n, v) in probe.vz.iter_mut().enumerate() {
+            *v = ((n * 7919) % 1000) as f32 / 1000.0 - 0.5;
+        }
+        probe.vx.clone_from(&probe.vz);
+        probe.sxx.clone_from(&probe.vz);
+        for (c, node) in [
+            (crate::receiver::Component::Vz, [5, 5, 0]),
+            (crate::receiver::Component::Vz, [5, 5, 1]),
+            (crate::receiver::Component::Vx, [0, 5, 5]),
+            (crate::receiver::Component::P, [5, 5, 5]),
+        ] {
+            let op = s.receiver_op(c, node);
+            let mut f = Fields::zeros(g.padded_len());
+            op.inject(&mut f, 2.0);
+            let dot: f32 = [Field::Vx, Field::Vz, Field::Sxx, Field::Syy, Field::Szz]
+                .iter()
+                .map(|&k| {
+                    f.get(k)
+                        .iter()
+                        .zip(probe.get(k))
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                })
+                .sum();
+            assert!(
+                (dot - 2.0 * op.sample(&probe)).abs() < 1e-5,
+                "{c:?} at {node:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn values_on_the_free_surface_stand_for_half_a_cell() {
+        let g = Grid::new([10, 10, 10], [10.0; 3]);
+        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+        let free = Solver::new(model.clone(), 1e-3, 3, true, &pml());
+        let open = Solver::new(model, 1e-3, 3, false, &pml());
+        for f in [
+            Field::Vx,
+            Field::Vy,
+            Field::Sxx,
+            Field::Syy,
+            Field::Szz,
+            Field::Sxy,
+        ] {
+            assert_eq!(free.cell_share(f, 0), 0.5, "{f:?}");
+            assert_eq!(free.cell_share(f, 1), 1.0, "{f:?}");
+            assert_eq!(open.cell_share(f, 0), 1.0, "{f:?}");
+        }
+        for f in [Field::Vz, Field::Sxz, Field::Syz] {
+            assert_eq!(free.cell_share(f, 0), 1.0, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn pressure_reads_the_mean_normal_stress() {
+        let g = Grid::new([10, 10, 10], [10.0; 3]);
+        let s = Solver::new(
+            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
+            1e-3,
+            3,
+            false,
+            &pml(),
+        );
+        let op = s.receiver_op(crate::receiver::Component::P, [4, 5, 6]);
+        let p = g.idx(4, 5, 6);
+        assert_eq!(
+            op.terms,
+            vec![
+                (Field::Sxx, p, -1.0 / 3.0),
+                (Field::Syy, p, -1.0 / 3.0),
+                (Field::Szz, p, -1.0 / 3.0)
+            ]
+        );
+    }
 }

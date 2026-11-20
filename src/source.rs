@@ -239,4 +239,111 @@ mod tests {
             "{m:?}"
         );
     }
+
+    use crate::cpml::PmlSettings;
+    use crate::grid::Grid;
+    use crate::model::Model;
+    use crate::receiver::Component;
+
+    fn solver(free_surface: bool) -> Solver {
+        let g = Grid::new([12, 12, 12], [10.0; 3]);
+        let pml = PmlSettings {
+            power: 2.0,
+            reflection: None,
+            kappa_max: 1.0,
+            alpha_max: 30.0,
+            vp_max: 3000.0,
+            sponge: 0.0,
+        };
+        Solver::new(
+            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
+            1e-3,
+            3,
+            free_surface,
+            &pml,
+        )
+    }
+
+    fn total(s: &Source) -> f32 {
+        s.op.terms.iter().map(|t| t.2).sum()
+    }
+
+    fn ricker() -> Wavelet {
+        Wavelet::Ricker { f0: 10.0, t0: 0.12 }
+    }
+
+    #[test]
+    fn an_explosion_loads_the_normal_stresses() {
+        let s = solver(false);
+        let src = Source::new(
+            &s,
+            [6, 6, 6],
+            Mechanism::Moment([1e9, 1e9, 1e9, 0.0, 0.0, 0.0]),
+            ricker(),
+        );
+        let w = (-1e-3 * 1e9 / 1000.0) as f32;
+        let p = s.grid.idx(6, 6, 6);
+        assert_eq!(
+            src.op.terms,
+            vec![(Field::Sxx, p, w), (Field::Syy, p, w), (Field::Szz, p, w)]
+        );
+    }
+
+    #[test]
+    fn a_shear_moment_spreads_over_sixteen_positions() {
+        let s = solver(false);
+        let src = Source::new(
+            &s,
+            [6, 6, 6],
+            Mechanism::Moment([0.0, 0.0, 0.0, 1e9, 0.0, 0.0]),
+            ricker(),
+        );
+        assert_eq!(src.op.terms.len(), 16);
+        assert!(src.op.terms.iter().all(|t| t.0 == Field::Sxy));
+        assert!((total(&src) - (-1e-3 * 1e9 / 1000.0) as f32).abs() < 1e-3);
+    }
+
+    /// In a homogeneous model a force is the receiver at its node, scaled by dt F/(ρV).
+    #[test]
+    fn a_force_is_a_scaled_receiver() {
+        let s = solver(true);
+        for node in [[6, 6, 6], [6, 6, 1]] {
+            let src = Source::new(&s, node, Mechanism::Force([0.0, 0.0, 2e9]), ricker());
+            let rec = s.receiver_op(Component::Vz, node);
+            let scale = (1e-3 / 2500.0 * 2e9 / 1000.0) as f32;
+            assert_eq!(src.op.terms.len(), rec.terms.len());
+            for (a, b) in src.op.terms.iter().zip(&rec.terms) {
+                assert_eq!((a.0, a.1), (b.0, b.1));
+                assert!((a.2 - scale * b.2).abs() < 1e-6 * scale, "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// On the free surface vx stands for half a cell, so a horizontal force there moves it
+    /// twice as much; vz sits half a node below, a whole cell, and doesn't.
+    #[test]
+    fn a_force_on_the_free_surface_acts_on_half_a_cell() {
+        let (free, open) = (solver(true), solver(false));
+        let x = Mechanism::Force([1e9, 0.0, 0.0]);
+        let on_free = Source::new(&free, [6, 6, 0], x, ricker());
+        let on_open = Source::new(&open, [6, 6, 0], x, ricker());
+        for (a, b) in on_free.op.terms.iter().zip(&on_open.op.terms) {
+            assert!((a.2 - 2.0 * b.2).abs() < 1e-6 * b.2.abs());
+        }
+        let z = Source::new(
+            &free,
+            [6, 6, 0],
+            Mechanism::Force([0.0, 0.0, 1e9]),
+            ricker(),
+        );
+        assert!((total(&z) - (1e-3 / 2500.0 * 1e9 / 1000.0) as f32).abs() < 1e-3);
+    }
+
+    #[test]
+    fn vertical_shear_sources_vanish_on_the_free_surface() {
+        let s = solver(true);
+        let m = Mechanism::Moment([0.0, 0.0, 0.0, 0.0, 1e9, 1e9]);
+        assert!(Source::new(&s, [6, 6, 0], m, ricker()).op.terms.is_empty());
+        assert!(!Source::new(&s, [6, 6, 1], m, ricker()).op.terms.is_empty());
+    }
 }

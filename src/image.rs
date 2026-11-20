@@ -84,3 +84,45 @@ fn write_png(path: &Path, w: usize, h: usize, rgb: &[u8]) -> Result<()> {
     writer.finish()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colours_follow_the_sign_and_saturate() {
+        assert_eq!(diverging(0.0), [1.0, 1.0, 1.0]);
+        assert_eq!(diverging(1.0), [1.0, 0.0, 0.0]);
+        assert_eq!(diverging(-1.0), [0.0, 0.0, 1.0]);
+        assert_eq!(diverging(7.0), diverging(1.0));
+        assert_eq!(diverging(f32::NAN), [1.0, 1.0, 1.0]);
+    }
+
+    fn size(path: &Path) -> (u32, u32) {
+        let file = std::io::BufReader::new(File::open(path).unwrap());
+        let reader = png::Decoder::new(file).read_info().unwrap();
+        (reader.info().width, reader.info().height)
+    }
+
+    #[test]
+    fn scales_sections_up_and_fits_gathers() {
+        let dir = std::env::temp_dir().join(format!("vibe-rations-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let values = vec![0.5f32; 40 * 20];
+        let shade = vec![1.0f32; 40 * 20];
+        let section = Section {
+            width: 40,
+            height: 20,
+            values: &values,
+            clip: 1.0,
+            shade: &shade,
+        };
+        write_section(&dir.join("s.png"), &section).unwrap();
+        // 512 / 40 = 12 times larger.
+        assert_eq!(size(&dir.join("s.png")), (480, 240));
+        // Three receivers get 8 pixels each; 2000 samples fold into 1000 rows.
+        write_gather(&dir.join("g.png"), 3, 2000, &vec![1.0; 6000]).unwrap();
+        assert_eq!(size(&dir.join("g.png")), (24, 1000));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

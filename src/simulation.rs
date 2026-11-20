@@ -498,4 +498,124 @@ mod tests {
         assert_eq!(human_time(125.0), "2m05s");
         assert_eq!(human_time(3725.0), "1h02m");
     }
+
+    use crate::config::Config;
+
+    const BASE: &str = r#"
+        [grid]
+        points = [30, 30, 30]
+        spacing = 10.0
+        [time]
+        duration = 0.05
+        [boundary]
+        pml_width = 8
+        [[model.layer]]
+        top = 0.0
+        vp = 2000.0
+        vs = 1000.0
+        rho = 2000.0
+        [[source]]
+        position = [150.0, 150.0, 100.0]
+        explosion = 1e12
+        wavelet = { kind = "ricker", frequency = 5.0 }
+        [receivers]
+        [[receivers.point]]
+        position = [150.0, 150.0, 0.0]
+    "#;
+
+    fn setup(text: &str) -> Result<Simulation> {
+        Simulation::new(&Config::from_toml(text)?, Path::new("."))
+    }
+
+    fn error(text: &str) -> String {
+        format!("{:#}", setup(text).err().expect("an error"))
+    }
+
+    #[test]
+    fn steps_at_a_fraction_of_the_stability_limit() {
+        let sim = setup(BASE).unwrap();
+        let i = &sim.info;
+        assert!((i.dt - 0.85 * i.dt_stable).abs() < 1e-15);
+        assert_eq!(sim.steps, (0.05 / i.dt).ceil() as usize);
+        assert_eq!(i.samples, sim.steps);
+        assert!(i.warnings.is_empty(), "{:?}", i.warnings);
+        let t = sim.sample_times();
+        assert!((t[0] - 0.5 * i.dt).abs() < 1e-15);
+        assert!((t[1] - t[0] - i.dt).abs() < 1e-15);
+    }
+
+    #[test]
+    fn takes_a_stable_dt_and_rejects_an_unstable_one() {
+        let sim = setup(&BASE.replace("duration = 0.05", "duration = 0.05\ndt = 1e-3")).unwrap();
+        assert_eq!(sim.info.dt, 1e-3);
+        let e = error(&BASE.replace("duration = 0.05", "duration = 0.05\ndt = 0.01"));
+        assert!(e.contains("unstable"), "{e}");
+        let e = error(&BASE.replace("duration = 0.05", "duration = 0.05\ncourant = 1.5"));
+        assert!(e.contains("courant"), "{e}");
+    }
+
+    #[test]
+    fn rejects_what_does_not_fit() {
+        let e = error(&BASE.replace("[150.0, 150.0, 100.0]", "[150.0, 150.0, 400.0]"));
+        assert!(e.contains("source") && e.contains("off the grid"), "{e}");
+        let e = error(&BASE.replace("[150.0, 150.0, 0.0]", "[150.0, -20.0, 0.0]"));
+        assert!(e.contains("receiver") && e.contains("off the grid"), "{e}");
+        let e = error(&BASE.replace("pml_width = 8", "pml_width = 13"));
+        assert!(e.contains("no room"), "{e}");
+        let start = BASE.find("[[source]]").unwrap();
+        let end = BASE.find("[receivers]").unwrap();
+        let e = error(&format!("{}{}", &BASE[..start], &BASE[end..]));
+        assert!(e.contains("no [[source]]"), "{e}");
+        let e = error(&format!("{BASE}\n[output]\nrecord_every = 0"));
+        assert!(e.contains("record_every"), "{e}");
+    }
+
+    #[test]
+    fn warns_about_coarse_grids_thin_layers_and_receivers_in_layers() {
+        let text = BASE
+            .replace("frequency = 5.0", "frequency = 20.0")
+            .replace("pml_width = 8", "pml_width = 5")
+            .replace("[150.0, 150.0, 0.0]", "[20.0, 150.0, 0.0]");
+        let w = setup(&text).unwrap().info.warnings;
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("points per shortest wavelength"), "{w:?}");
+        assert!(w[1].contains("5 nodes thick"), "{w:?}");
+        assert!(w[2].contains("receiver(s) inside"), "{w:?}");
+    }
+
+    #[test]
+    fn records_every_nth_step_and_snaps_snapshot_planes() {
+        let text = format!(
+            "{BASE}\n[[snapshot]]\nfield = \"vz\"\nplane = \"xz\"\nat = 154.0\ninterval = 0.01\n\
+             [output]\nrecord_every = 3"
+        );
+        let sim = setup(&text).unwrap();
+        assert_eq!(sim.receivers.samples, sim.steps.div_ceil(3));
+        let t = sim.sample_times();
+        assert!((t[1] - t[0] - 3.0 * sim.info.dt).abs() < 1e-15);
+        assert_eq!(sim.snapshots[0].index, 15);
+        assert_eq!(
+            sim.snapshots[0].every,
+            (0.01 / sim.info.dt).round() as usize
+        );
+        let e = error(&text.replace("at = 154.0", "at = 900.0"));
+        assert!(e.contains("snapshot plane"), "{e}");
+    }
+
+    #[test]
+    fn writes_traces_with_their_shapes() {
+        let mut sim = setup(BASE).unwrap();
+        sim.run(None, false).unwrap();
+        assert_eq!(sim.receivers.recorded(), sim.receivers.samples);
+        let dir = std::env::temp_dir().join(format!("vibe-rations-sim-{}", std::process::id()));
+        sim.write_outputs(&dir).unwrap();
+        let (shape, _) = npy::read(&dir.join("vz.npy")).unwrap();
+        assert_eq!(shape, vec![1, sim.receivers.samples]);
+        let (shape, _) = npy::read(&dir.join("time.npy")).unwrap();
+        assert_eq!(shape, vec![sim.receivers.samples]);
+        // One receiver makes no gather.
+        assert!(!dir.join("vz_gather.png").exists());
+        assert!(sim.info.summary().contains("free surface on top"));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
