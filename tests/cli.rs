@@ -92,6 +92,18 @@ fn memory_itemises_a_model_without_building_it() {
     ] {
         assert!(gradient.contains(part), "no {part} in\n{gradient}");
     }
+    assert!(gradient.contains("with --reconstruct"), "{gradient}");
+    let out = vibe(&[
+        "memory",
+        "--gradient",
+        "--reconstruct",
+        "examples/explosion.toml",
+    ]);
+    let rebuilt = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", stderr(&out));
+    for part in ["the band around the layers", "without --reconstruct"] {
+        assert!(rebuilt.contains(part), "no {part} in\n{rebuilt}");
+    }
     let dir = scratch("memory");
     let huge = dir.join("huge.toml");
     fs::write(
@@ -244,6 +256,27 @@ fn gradient_writes_one_array_per_parameter() {
     assert_eq!(info["weights"].as_array().unwrap().len(), 2);
     // TINY's receivers are clear of the layers.
     assert_eq!(info["receivers_next_to_layers"], 0, "vz is read along z");
+    assert!(info["strategy"]["checkpoints"]["every"].is_u64(), "{info}");
+    // Rebuilding the forward wavefield backwards instead: the same misfit.
+    let rebuilt = dir.join("rebuilt");
+    let out = vibe(&[
+        "gradient",
+        guess.to_str().unwrap(),
+        "--observed",
+        observed.to_str().unwrap(),
+        "--out",
+        rebuilt.to_str().unwrap(),
+        "--balance",
+        "--reconstruct",
+        "--segment",
+        "7",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--reconstruct"), "{}", stderr(&out));
+    let again: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(rebuilt.join("gradient.json")).unwrap()).unwrap();
+    assert_eq!(again["misfit"], info["misfit"]);
+    assert_eq!(again["strategy"]["reconstruct"]["segment"], 7, "{again}");
     // The observed traces must be there, sampled as the receivers record.
     fs::write(&guess, TINY.replace("vp = 2000.0", "vp = 2100.0")).unwrap();
     let out = args(&observed);
