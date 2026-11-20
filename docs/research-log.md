@@ -1028,6 +1028,51 @@ rather than guessed at.
 **Reproduce:** `just physics misfits_gradients`; `just unit stages`;
 `just unit counts_what_an_inversion_allocates`.
 
+## 2026-11-20 — Filtering up to the record's end
+
+**Question.** A research agent's check of the stages (previous entry) against ObsPy's
+filtering [@beyreuther2010] and the literature found the filter right (symmetric to
+$10^{-14}$, the same operator as ObsPy's zero-phase `lowpass`) but inexact near the end of a
+record: the forward pass rings on for several periods of the corner after the last sample,
+and the record cut that ringing off, so even a trace at rest by its end came out distorted.
+How much, and does padding keep the filter its own transpose?
+
+**Method.** Append $M$ zeros to each trace, filter forwards and backwards, and keep the first
+$N$ samples: $G = P^T F P$ with $P$ the padding, symmetric because $F$ is. The slowest pole of
+an order-$n$ Butterworth filter decays as $e^{-2\pi f_c \sin(\pi/2n)\, t}$, so
+$M = \lceil 2.4 / (f_c \Delta \sin(\pi / 2n)) \rceil$ samples bring it below $10^{-6}$ (2091 samples
+at 3 Hz, 1 ms, order 4). The start needs nothing: the forward pass runs first, from rest, so
+a trace at rest at its start is filtered exactly there. A 12 Hz Ricker filtered at 3 Hz was
+compared with the same pulse in a record ten times as long.
+
+**Results.** Largest error relative to the filtered pulse's peak:
+
+| Pulse ends before the record does | Without zeros | With them |
+|---|---|---|
+| about $0.5 / f_c$ | 0.56 | $8.1 \times 10^{-14}$ |
+| about $3 / f_c$ | $1.4 \times 10^{-3}$ | $3.0 \times 10^{-14}$ |
+
+The padded filter stays symmetric to $10^{-12}$ (unit test). Through the inversion's
+finite-difference check (previous entry's model, whose 0.25 s records at a 10 Hz corner are
+2.5 periods of the corner long, so their ends mattered), the filtered L2 misfit's gradient now
+agrees to $4.4 \times 10^{-7}$ at $h = 10^{-2}$ ($1.5 \times 10^{-5}$ before). The filtered time
+shifts changed with the traces, and at $h = 2 \times 10^{-3}$, which had happened to miss every
+lag jump before, the coarse difference now crossed one ($8.5 \times 10^{-4}$). Scanning $h$:
+$2.2, 1.4, 1.3 \times 10^{-4}$ at $h = 2.5 \times 10^{-4}, 5 \times 10^{-4}, 10^{-3}$, no trend,
+which is round-off in the shifts of single-precision traces; $8.5 \times 10^{-4}$ and
+$2.0 \times 10^{-3}$ at $2 \times 10^{-3}$ and $3 \times 10^{-3}$, the jumps.
+
+**Decision.** Pad. The time shifts' check runs at $h = 10^{-3}$ against $5 \times 10^{-4}$: their
+derivative is exact between lag jumps, a wrong one would be off by tens of per cent, and a
+smooth sub-sample estimate (Newton on the correlation's band-limited interpolant, which a
+research prototype found unbiased and free of jumps) would cost all $2N - 1$ lags of every
+trace without an FFT; it stays an option if the jumps hamper L-BFGS. Records shorter than a
+few periods of a stage's corner are still edge-dominated: a cut arrival can't be filtered
+correctly by any filter.
+
+**Reproduce:** `just physics misfits_gradients`; the table,
+`cargo test --release --lib misfit_study -- --ignored --nocapture`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

@@ -1018,30 +1018,34 @@ fn the_inversion_gradient_matches_finite_differences() {
 /// low-pass filtered traces (a frequency-continuation stage), the cross-correlation time shifts
 /// of filtered traces, and the time–frequency phase misfit.
 ///
-/// Measured (extrapolated, at the step given): filtered L2 1.5e-5 (h = 1e-2; 1.4e-5 at 2e-3);
-/// filtered time shifts 7.5e-6 (h = 2e-3); phase 4.2e-6 (h = 1e-2), and filtered 1.0e-5. The
-/// time shifts are checked at a smaller step because each trace's shift is only piecewise
-/// smooth: its derivative jumps where the correlation's peak moves to the next lag, and
-/// larger steps cross such jumps (2.2e-4 at h = 1e-2; unfiltered, 4.3e-5 at 2e-3 and 4.4e-4
-/// at 1e-2).
+/// Measured (extrapolated, at the step given): filtered L2 4.4e-7 (h = 1e-2); phase 4.2e-6
+/// (h = 1e-2). The time shifts are checked at a smaller step and against a looser bound: each
+/// trace's shift is only piecewise smooth, its derivative jumping where the correlation's peak
+/// moves to the next lag, and steps from 2e-3 up cross such jumps (8.5e-4 at 2e-3, 2.0e-3 at
+/// 3e-3); below that the check sits on a floor of round-off in the shifts of single-precision
+/// traces, 1.3e-4 to 2.2e-4 for h from 2.5e-4 to 1e-3 without a trend. A wrong derivative
+/// would be off by tens of per cent. (Before the filter padded the traces' ends: filtered L2
+/// 1.5e-5, filtered time shifts 7.5e-6 at 2e-3, by luck clear of the jumps.)
 #[test]
 fn the_misfits_gradients_match_finite_differences() {
-    for (label, settings, h) in [
+    for (label, settings, h, tolerance) in [
         (
             "filtered l2",
             "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 1",
             1e-2,
+            3e-5,
         ),
         (
             "filtered traveltime",
             "misfit = \"traveltime\"\nmax_shift = 0.05\n\
              [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1",
-            2e-3,
+            1e-3,
+            5e-4,
         ),
-        ("phase", "misfit = \"phase\"", 1e-2),
+        ("phase", "misfit = \"phase\"", 1e-2, 3e-5),
     ] {
         let e = inversion_gradient_check(label, settings, h);
-        assert!(e < 3e-5, "{label}: {e}");
+        assert!(e < tolerance, "{label}: {e}");
     }
 }
 

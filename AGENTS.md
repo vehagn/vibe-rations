@@ -132,11 +132,13 @@ doesn't show.
   different shape. Weights and trace selections come from the observed traces only; one that
   depends on the synthetic makes the misfit jump between models. The time shift is a
   parabola through the correlation's peak: continuous, but its derivative jumps where the
-  peak changes lag, so check it at small steps ($h = 2 \times 10^{-3}$). The phase misfit is
+  peak changes lag, so check it at small steps ($h = 10^{-3}$, where round-off in the
+  shifts holds it near $10^{-4}$). The phase misfit is
   regularised ($z/\sqrt{|z|^2 + \epsilon^2}$): taken literally, $\Delta\varphi^2$ has a branch
   cut and blows up where the synthetic lacks an arrival. The forward–backward Butterworth
-  filter, started at rest without padding, is symmetric, so it is its own adjoint; padding
-  would break that. A stage rebuilds the misfits (balancing weights from the filtered data)
+  filter, started at rest, is symmetric, so it is its own adjoint; zeros appended to the end
+  keep it so and stop the forward pass's ringing from being cut off (it distorted the last
+  ~3/f_c of every trace), but steady-state starts or mirrored padding would not. A stage rebuilds the misfits (balancing weights from the filtered data)
   and clears L-BFGS, whose pairs describe the previous misfit.
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients

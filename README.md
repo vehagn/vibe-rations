@@ -570,7 +570,10 @@ Planned next, following Fichtner (2011), ch. 7–11:
    for traces of different shape; and the time–frequency phase misfit (Fichtner et al. 2008),
    regularised so that it stays smooth where the synthetic lacks an arrival. Each is an exact
    function of the samples; the inversion's gradient matches finite differences to
-   $\le 1.5 \times 10^{-5}$ with each. Still to come: windowing of single arrivals.
+   $4.4 \times 10^{-7}$ (filtered L2) and $4.2 \times 10^{-6}$ (phase), and the time shifts to
+   $1.3 \times 10^{-4}$, round-off in their single-precision traces (their derivative jumps
+   where a correlation's peak moves to the next lag). Still to come: windowing of single
+   arrivals.
 6. **Optimisation** (L-BFGS and frequency continuation done: `src/inversion.rs`).
    Preconditioned L-BFGS (Nocedal 1980; Liu & Nocedal 1989) on relative model changes, with
    bounds and an Armijo line search; each source a shot; the illumination (Shin et al. 2001)

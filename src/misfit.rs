@@ -59,19 +59,27 @@ impl Measure {
 }
 
 /// A digital Butterworth low-pass (Butterworth 1930) applied forwards, then backwards, with
-/// zero initial conditions and no padding: zero phase, and the magnitude response squared, so
-/// the corner frequency is where the amplitude halves and the roll-off is twice the order's.
+/// zero initial conditions: zero phase, and the magnitude response squared, so the corner
+/// frequency is where the amplitude halves and the roll-off is twice the order's.
 ///
 /// Each pass is a causal recursive filter started at rest, which on N samples is the lower
 /// triangular Toeplitz matrix H of its impulse response. Reversing time turns H into
 /// R H R = Hᵀ, so the forward–backward filter F = R H R H = Hᵀ H is symmetric: it is its own
-/// transpose, and the adjoint source of χ(F s, F d) is F applied to ∂χ/∂(F s). Padding or
-/// steady-state initial conditions, as some libraries use, would break that.
+/// transpose, and the adjoint source of χ(F s, F d) is F applied to ∂χ/∂(F s).
+///
+/// The forward pass rings on after the last sample, so each trace is extended with zeros for
+/// as long as that ringing lasts, filtered, and cut back: Pᵀ F P, still symmetric, and exact
+/// for a trace at rest by its end. Without the zeros the last ~3/f_c of every trace came out
+/// distorted. A trace at rest at its start needs no zeros there: the forward pass runs first.
+/// Steady-state initial conditions or mirrored padding, as some libraries use, would make the
+/// filter unsymmetric.
 #[derive(Clone, Debug)]
 pub struct Lowpass {
     /// Second-order sections (b0, b1, b2, a1, a2), with a first-order one as (b0, b1, 0, a1, 0)
     /// for odd orders.
     sections: Vec<[f64; 5]>,
+    /// Zeros appended to each trace before filtering.
+    pad: usize,
 }
 
 impl Lowpass {
@@ -109,15 +117,23 @@ impl Lowpass {
             let norm = 1.0 / (1.0 + k);
             sections.push([k * norm, k * norm, 0.0, (k - 1.0) * norm, 0.0]);
         }
-        Ok(Self { sections })
+        // The slowest pole decays as exp(-2π f_c sin(π/2n) t): wait until it is below 10⁻⁶ of
+        // where it started, ln 10⁶ / 2π ≈ 2.2, with a margin.
+        let decay = corner * interval * (std::f64::consts::PI / (2 * order) as f64).sin();
+        let pad = (2.4 / decay).ceil() as usize;
+        Ok(Self { sections, pad })
     }
 
-    /// Filters `x` in place, forwards then backwards.
+    /// Filters `x` in place, forwards then backwards, as if zeros followed it.
     pub fn apply(&self, x: &mut [f64]) {
-        self.causal(x);
-        x.reverse();
-        self.causal(x);
-        x.reverse();
+        let mut y = Vec::with_capacity(x.len() + self.pad);
+        y.extend_from_slice(x);
+        y.resize(x.len() + self.pad, 0.0);
+        self.causal(&mut y);
+        y.reverse();
+        self.causal(&mut y);
+        y.reverse();
+        x.copy_from_slice(&y[..x.len()]);
     }
 
     /// One causal pass from rest, section by section (transposed direct form II).
@@ -1088,6 +1104,36 @@ mod tests {
         let a: f64 = fx.iter().zip(&y).map(|(a, b)| a * b).sum();
         let b: f64 = x.iter().zip(&fy).map(|(a, b)| a * b).sum();
         eprintln!("filter symmetry: {:.1e}", (a - b).abs() / a.abs());
+        // The record's end: a 12 Hz pulse ending 0.15 s (0.5/f_c) and 1 s (3/f_c) before it,
+        // filtered at 3 Hz, against the same pulse in a record ten times as long; without the
+        // zeros (the passes alone) and with them.
+        let f = Lowpass::butterworth(3.0, 1e-3, 4).unwrap();
+        for (label, len) in [("0.5/fc", 600), ("3/fc", 1450)] {
+            let short = ricker(12.0, 0.4, 1e-3, len);
+            let mut long = short.clone();
+            long.resize(10 * len, 0.0);
+            f.apply(&mut long);
+            let peak = long.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let mut bare = short.clone();
+            f.causal(&mut bare);
+            bare.reverse();
+            f.causal(&mut bare);
+            bare.reverse();
+            let mut padded = short.clone();
+            f.apply(&mut padded);
+            let err = |x: &[f64]| {
+                x.iter()
+                    .zip(&long)
+                    .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()))
+                    / peak
+            };
+            eprintln!(
+                "end of record, pulse ending {label} before it: {:.1e} without zeros, {:.1e} with {}",
+                err(&bare),
+                err(&padded),
+                f.pad
+            );
+        }
         // Phase: cells and the transpose.
         let gabor = Gabor::new(12.0, 30.0, 1e-3).unwrap();
         eprintln!(
@@ -1096,6 +1142,38 @@ mod tests {
             gabor.half,
             gabor.frequencies.len()
         );
+    }
+
+    /// A trace at rest by its end comes out as if the record were longer, and one cut short
+    /// by the record's end is still filtered symmetrically.
+    #[test]
+    fn filters_up_to_the_last_sample() {
+        let dt = 1e-3;
+        let f = Lowpass::butterworth(3.0, dt, 4).unwrap();
+        // The pulse ends 0.15 s before the record does, half a period of the corner.
+        let short = ricker(12.0, 0.4, dt, 600);
+        let mut long = short.clone();
+        long.resize(6000, 0.0);
+        let mut a = short.clone();
+        f.apply(&mut a);
+        f.apply(&mut long);
+        let peak = long.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let err = a
+            .iter()
+            .zip(&long)
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(err < 1e-6 * peak, "{err} of {peak}");
+        // Symmetric still.
+        let x: Vec<f64> = (0..300).map(|i| ((i * 7919) % 101) as f64 - 50.0).collect();
+        let y: Vec<f64> = (0..300)
+            .map(|i| ((i * 104729) % 97) as f64 - 48.0)
+            .collect();
+        let (mut fx, mut fy) = (x.clone(), y.clone());
+        f.apply(&mut fx);
+        f.apply(&mut fy);
+        let l: f64 = fx.iter().zip(&y).map(|(a, b)| a * b).sum();
+        let r: f64 = x.iter().zip(&fy).map(|(a, b)| a * b).sum();
+        assert!((l - r).abs() <= 1e-12 * l.abs().max(r.abs()), "{l} {r}");
     }
 
     #[test]
