@@ -260,6 +260,14 @@ impl Simulation {
             !cfg.receivers.components.is_empty() || nodes.is_empty(),
             "receivers need at least one component"
         );
+        // A second copy records nothing new, and the adjoint would back-propagate both.
+        for (i, c) in cfg.receivers.components.iter().enumerate() {
+            ensure!(
+                !cfg.receivers.components[..i].contains(c),
+                "the receivers list {} twice",
+                c.name()
+            );
+        }
         let receivers = Receivers::new(&solver, nodes, cfg.receivers.components.clone(), samples);
 
         let mut snapshots = Vec::new();
@@ -677,6 +685,11 @@ mod tests {
         assert!(e.contains("no [[source]]"), "{e}");
         let e = error(&format!("{BASE}\n[output]\nrecord_every = 0"));
         assert!(e.contains("record_every"), "{e}");
+        let e = error(&BASE.replace(
+            "[receivers]",
+            "[receivers]\ncomponents = [\"vz\", \"p\", \"p\"]",
+        ));
+        assert!(e.contains("list p twice"), "{e}");
     }
 
     #[test]
