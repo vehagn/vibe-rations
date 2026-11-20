@@ -26,8 +26,11 @@ Then, in the container:
 
 | Command | Does |
 |---|---|
-| `just test` | All tests, optimised; the physics tests run whole simulations (~20 s) |
+| `just unit` | Unit tests, the CLI tests and the examples check (seconds) |
+| `just physics` | Whole simulations against analytic answers, printing misfits (~20 s) |
+| `just test` | All tests, optimised |
 | `just lint` | rustfmt and clippy with `-D warnings` |
+| `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
 | `just run <config>` | Runs a simulation |
 
@@ -35,7 +38,11 @@ Then, in the container:
 just run examples/explosion.toml
 ```
 
-`just dev down` stops the container and keeps its volumes.
+From the host, `just in <recipe>` runs any of these in the container without opening a
+shell (`just in ci`). `just dev down` stops the container and keeps its volumes.
+
+Working on the code with an agent: [AGENTS.md](AGENTS.md) has the conventions and the
+notes behind the numerics, and `.claude/skills/` has task guides.
 
 ## Configuration
 

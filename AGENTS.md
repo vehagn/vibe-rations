@@ -1,21 +1,38 @@
 # vibe-rations, for coding agents
 
 A 3D elastic wave simulator (fourth-order staggered-grid velocity–stress finite differences,
-CPML, free surface), built as the forward engine for elastic full waveform inversion. The
-[README](README.md) explains the numerics and how they are verified.
+CPML, free surface), built as the forward engine for elastic full waveform inversion (FWI).
+The [README](README.md) explains the numerics and how they are verified; this file is what
+an agent needs to work on it, and the notes below record why things are the way they are.
 
 ## Commands
 
-Run these in the dev container (`just dev` on the host opens a shell in it). Nothing is
-installed on the host.
+Everything runs in the dev container; nothing is installed on the host. From the host,
+`just in <recipe>` runs a recipe in the container (starting it if need be); `just dev`
+opens a shell there instead.
 
-| Command | Does |
+| Command | Does | Time |
+|---|---|---|
+| `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
+| `just physics` | Whole simulations against analytic answers, misfits printed | ~20 s |
+| `just test` | Everything | ~25 s |
+| `just lint` | rustfmt check and clippy with `-D warnings` | |
+| `just ci` | `lint` then `test`: what must pass before every commit | |
+| `just fmt` | Format the code | |
+| `just check <config>` / `just run <config>` | Set up / run a simulation | |
+
+## Skills
+
+Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
+
+| Skill | When |
 |---|---|
-| `just test` | All tests, optimised (`cargo test --release`) |
-| `just lint` | rustfmt check and clippy with `-D warnings` |
-| `just check <config>` / `just run <config>` | Set up / run a simulation |
-
-`just test` and `just lint` must pass.
+| `dev-container` | Running cargo, just or the simulator; container trouble |
+| `run-simulation` | Writing a configuration, sizing a grid, reading the outputs |
+| `verify-solver` | Changing the solver, layers, free surface, sources or receivers; adding a physics test |
+| `debug-instability` | A run blows up or doesn't drain |
+| `conventional-commit` | Committing work |
+| `fwi-literature` | Looking up the theory: adjoints, kernels, misfits, PML, free surface |
 
 ## Map
 
@@ -33,14 +50,65 @@ src/
   snapshot.rs    sections and volumes during a run
   simulation.rs  a run set up from a configuration; outputs
   image.rs, npy.rs
-tests/physics.rs whole simulations against analytic solutions, reciprocity, stability
+tests/
+  physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
+  cli.rs         the binary, run as a process
+  examples.rs    every example sets up without warnings
 examples/        annotated configurations
 ```
 
 ## Conventions
 
-- Keep sources the exact transpose of receivers (`Solver::stagger_weights`, `PointOp`):
-  adjoint-based FWI depends on it, and the reciprocity test checks it.
-- Any change to the update loops, the free surface or the CPML must keep every test in
-  `tests/physics.rs` passing; don't loosen a tolerance to make a change pass.
-- Physical units are SI; z points down; arrays are x-fastest.
+- **Commits:** conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `build:`,
+  `refactor:`, `perf:`, `chore:`), unsigned (`git commit --no-gpg-sign`: signing is on in
+  the maintainer's global config), one logical change each, and `just ci` green before each.
+  Commit as you go, on a branch rather than `main`. The `conventional-commit` skill has the
+  details.
+- **Tests:** unit tests sit next to the code in `#[cfg(test)] mod tests`; anything that
+  runs a whole simulation goes in `tests/physics.rs`. New behaviour gets a test. Don't
+  loosen a physics tolerance to make a change pass; the baselines are below.
+- **Sources are the transpose of receivers** (`Solver::stagger_weights`, `PointOp`).
+  Adjoint FWI depends on it; the reciprocity test checks it to 1e-6.
+- SI units; z points down; arrays are x-fastest, padded by `grid::HALO` = 2 nodes.
+- Comments say why, not what. Doc comments on public items.
+
+## Notes
+
+Decisions and lessons, newest first. Add to them when you learn something the code
+doesn't show.
+
+- **Physics test baselines** (fail if they get worse; update this list if they get better):
+  explosion vs analytic 0.7–1.6%; point force vs Stokes 0.3–0.8%; free-surface P doubling
+  1.9%; CPML reflection 0.015% of peak without a free surface, 0.18% along one; reciprocity
+  ≤ 1e-6; the 9 s soft-sediment run drains to 4e-6 of its peak.
+- **Snapshots:** colour ∝ √amplitude, scaled by the 99.5th percentile of |value|. A
+  Gaussian moment rate leaves a static stress at the source that swamps pressure (`p`)
+  sections; velocity has no static part, so the examples snapshot velocity. In a soft
+  near-surface layer the surface amplitudes dominate a vertical section; that is physics.
+- **The CPML instability along a free surface.** With a free surface, a soft layer
+  (vp/vs ≈ 3.3) and CPML side layers, the field grew exponentially from about 2 s,
+  starting in the layer corners at the surface (Festa et al. 2005). The free surface alone
+  (no PML) was stable; larger α, κ_max = 4 and a smaller dt didn't help. The fix is a plain
+  damping exp(-p·d·x³·dt) in the x and y layers, only when there is a free surface:
+  `pml_sponge`, default 0.2. Measured trade-off (reflection at 9 nodes from the layer /
+  stable?): d·x⁰ with p 0.1: 0.23% / yes; d·x² 0.1: 0.06–0.15% / yes; d·x⁴ 0.05: — / no;
+  d·x³ 0.2 on side layers only: 0.07–0.18% / yes.
+- **Sources on the free surface act on half a cell.** vx, vy, σxx, σyy, σzz and σxy on
+  the surface plane stand for half a cell (their other half is the mirror image), so their
+  source weights are doubled (`Solver::cell_share`). Without it, reciprocity with one end on
+  the surface was off by exactly 2.
+- **The free surface mirrors velocities evenly.** First version: second-order derivatives
+  next to the surface. They were not the adjoint of the stress-imaging operators, energy
+  wasn't conserved, and the free-surface misfit was 7.6%. Mirroring vx, vy and vz evenly
+  (σ oddly) makes the pair adjoint, keeps fourth order everywhere, and brought it to 1.9%.
+  The textbook image method (Fichtner 2011 §3.2.3; Graves 1996) instead derives the
+  velocities above the surface from the boundary conditions. It hasn't been tried here; any
+  alternative must pass the reciprocity and long-run tests.
+- **Cubic interpolation for receivers and sources.** Averaging two staggered values onto a
+  node costs ~cos(kh/2), about 2% at 8 points per wavelength; cubic weights
+  (-1, 9, 9, -1)/16 cut the misfits roughly threefold.
+- **Performance:** about 200–230 Mcell updates/s on the container's 4 cores (Apple
+  Silicon, Colima VM with 8 GiB). Memory is 17 padded f32 arrays plus CPML memory: the
+  examples need 0.1–0.25 GiB. The work splits by z-plane, each plane a row at a time
+  through nine scratch rows.
+- **Next:** elastic FWI; the README's roadmap lists the steps.
