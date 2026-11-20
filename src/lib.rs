@@ -11,6 +11,7 @@ pub mod cpml;
 pub mod fd;
 pub mod grid;
 pub mod image;
+pub mod memory;
 pub mod model;
 pub mod npy;
 pub mod receiver;

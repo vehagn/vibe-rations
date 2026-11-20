@@ -67,6 +67,80 @@ impl Model {
         Ok(model)
     }
 
+    /// The fastest P speed and the slowest wave (S in solids, P in fluids) of the model `cfg`
+    /// describes, found without building it, so that a model too large to hold can still be
+    /// planned: from the layers that reach a node and the spheres that contain one, or from
+    /// the files, read through a piece at a time. A layer that spheres cover entirely still
+    /// counts, so in that rare case the answer is conservative.
+    pub fn extremes(grid: Grid, cfg: &ModelConfig, base: &Path) -> Result<[f64; 2]> {
+        let slow = |vp: f64, vs: f64| if vs > 0.0 { vs } else { vp };
+        let (mut fast, mut slowest) = (f64::NEG_INFINITY, f64::INFINITY);
+        let mut take = |vp: f64, vs: f64| {
+            fast = fast.max(vp);
+            slowest = slowest.min(slow(vp, vs));
+        };
+        match (&cfg.files, cfg.layers.is_empty()) {
+            (Some(_), false) => anyhow::bail!("the model takes either layers or files, not both"),
+            (None, true) => anyhow::bail!("the model needs [[model.layer]]s or [model.files]"),
+            (None, false) => {
+                let mut layers = cfg.layers.clone();
+                layers.sort_by(|a, b| a.top.total_cmp(&b.top));
+                ensure!(
+                    layers[0].top <= 0.0,
+                    "the shallowest layer must start at depth 0 or above"
+                );
+                for k in 0..grid.n[2] {
+                    let z = k as f64 * grid.h[2];
+                    let layer = layers
+                        .iter()
+                        .rev()
+                        .find(|l| l.top <= z + 1e-6 * grid.h[2])
+                        .expect("the first layer starts at the surface");
+                    take(layer.vp, layer.vs);
+                }
+            }
+            (Some(files), true) => {
+                let want = vec![grid.n[2], grid.n[1], grid.n[0]];
+                let open = |p: &Path| -> Result<npy::Stream> {
+                    let path = base.join(p);
+                    let s = npy::stream(&path)
+                        .with_context(|| format!("reading {}", path.display()))?;
+                    ensure!(
+                        s.shape == want,
+                        "{} has shape {:?}; the grid needs (nz, ny, nx) = {want:?}",
+                        path.display(),
+                        s.shape
+                    );
+                    Ok(s)
+                };
+                let (mut vp, mut vs) = (open(&files.vp)?, open(&files.vs)?);
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                while vp.next_chunk(&mut a, 1 << 16)? {
+                    vs.next_chunk(&mut b, 1 << 16)?;
+                    for (&p, &s) in a.iter().zip(&b) {
+                        take(p as f64, s as f64);
+                    }
+                }
+            }
+        }
+        for s in &cfg.spheres {
+            // The node nearest the centre: the distance is a sum over the axes, so the nearest
+            // index along each one.
+            let r2: f64 = (0..3)
+                .map(|a| {
+                    let i = (s.center[a] / grid.h[a])
+                        .round()
+                        .clamp(0.0, (grid.n[a] - 1) as f64);
+                    (i * grid.h[a] - s.center[a]).powi(2)
+                })
+                .sum();
+            if r2 <= s.radius * s.radius {
+                take(s.vp, s.vs);
+            }
+        }
+        Ok([fast, slowest])
+    }
+
     fn layered(grid: Grid, cfg: &ModelConfig) -> Result<Self> {
         let mut layers = cfg.layers.clone();
         layers.sort_by(|a, b| a.top.total_cmp(&b.top));

@@ -15,12 +15,13 @@ use crate::cpml::PmlSettings;
 use crate::fd::Stencil;
 use crate::grid::Grid;
 use crate::image;
+use crate::memory::{Memory, Plan, human};
 use crate::model::Model;
 use crate::npy;
 use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
 use crate::solver::Solver;
-use crate::source::{Mechanism, Source};
+use crate::source::{Mechanism, Source, Wavelet};
 use crate::tdt::Warp;
 
 /// Fewer grid points than this per shortest wavelength and numerical dispersion shows: a few
@@ -92,7 +93,10 @@ pub struct RunInfo {
     /// they were designed for.
     pub coefficients: Coefficients,
     pub band: Option<f64>,
+    /// The most memory the run holds at once (`memory.peak`).
     pub memory_bytes: usize,
+    /// What it holds, part by part (crate::memory).
+    pub memory: Memory,
     pub sources: Vec<SourceInfo>,
     pub receivers: usize,
     pub components: Vec<String>,
@@ -112,6 +116,96 @@ pub struct SourceInfo {
     pub dominant_frequency: f64,
 }
 
+/// What follows from a configuration and its model's extremes before anything is allocated:
+/// the stencil, the time step and the number of steps. [`Simulation::new`] and
+/// [`crate::memory::estimate`] share it.
+pub(crate) struct Timing {
+    pub stencil: Stencil,
+    pub dt: f64,
+    pub dt_stable: f64,
+    pub steps: usize,
+    pub ppw: f64,
+    pub slowest: f64,
+    pub f_max: f64,
+    pub f_dominant: f64,
+    pub wavelets: Vec<Wavelet>,
+}
+
+/// The run's timing on `grid` (with its halo) for a model whose fastest P speed is `vp_max`
+/// and slowest wave `slowest`.
+pub(crate) fn timing(cfg: &Config, grid: &Grid, vp_max: f64, slowest: f64) -> Result<Timing> {
+    ensure!(
+        !cfg.sources.is_empty(),
+        "the configuration has no [[source]]"
+    );
+    let wavelets = cfg
+        .sources
+        .iter()
+        .map(|s| s.wavelet.wavelet())
+        .collect::<Result<Vec<_>>>()?;
+    let f_dominant = wavelets
+        .iter()
+        .map(|w| w.dominant_frequency())
+        .fold(0.0, f64::max);
+    let f_max = wavelets
+        .iter()
+        .map(|w| w.max_frequency())
+        .fold(0.0, f64::max);
+
+    let h_max = grid.h.iter().copied().fold(0.0, f64::max);
+    let ppw = slowest / f_max / h_max;
+    let stencil = match cfg.scheme.coefficients {
+        Coefficients::Taylor => Stencil::taylor(cfg.scheme.order)?,
+        // The grid can't hold waves shorter than two nodes anyway.
+        Coefficients::Optimised => {
+            if let Some(p) = cfg.scheme.optimised_for {
+                ensure!(
+                    p > 2.0,
+                    "optimised_for must be more than 2 points per wavelength, not {p}"
+                );
+            }
+            let design = cfg.scheme.optimised_for.unwrap_or(ppw);
+            Stencil::optimised(
+                cfg.scheme.order,
+                (2.0 * PI / design).min(0.9 * PI),
+                PHASE_TOLERANCE,
+            )?
+        }
+    };
+
+    let dt_stable = stable_dt(grid, vp_max, &stencil);
+    let dt = match cfg.time.dt {
+        Some(dt) => {
+            ensure!(dt > 0.0, "dt must be positive");
+            ensure!(
+                dt <= dt_stable,
+                "dt = {dt:e} s is unstable; the limit for this grid and model is {dt_stable:e} s"
+            );
+            dt
+        }
+        None => {
+            let c = cfg.time.courant.unwrap_or_else(|| {
+                default_courant(cfg.scheme.order, cfg.scheme.remove_time_dispersion)
+            });
+            ensure!(c > 0.0 && c <= 1.0, "courant must be in (0, 1]");
+            c * dt_stable
+        }
+    };
+    ensure!(cfg.time.duration > 0.0, "duration must be positive");
+    let steps = (cfg.time.duration / dt).ceil() as usize;
+    Ok(Timing {
+        stencil,
+        dt,
+        dt_stable,
+        steps,
+        ppw,
+        slowest,
+        f_max,
+        f_dominant,
+        wavelets,
+    })
+}
+
 impl Simulation {
     /// Sets up a run; `base` is the directory relative paths in the configuration start from.
     pub fn new(cfg: &Config, base: &Path) -> Result<Self> {
@@ -119,68 +213,18 @@ impl Simulation {
         let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
         let model = Model::from_config(grid, &cfg.model, base)?;
         let mut warnings = Vec::new();
-
-        ensure!(
-            !cfg.sources.is_empty(),
-            "the configuration has no [[source]]"
-        );
-        let wavelets = cfg
-            .sources
-            .iter()
-            .map(|s| s.wavelet.wavelet())
-            .collect::<Result<Vec<_>>>()?;
-        let f_dominant = wavelets
-            .iter()
-            .map(|w| w.dominant_frequency())
-            .fold(0.0, f64::max);
-        let f_max = wavelets
-            .iter()
-            .map(|w| w.max_frequency())
-            .fold(0.0, f64::max);
-
-        let slowest = model.slowest_wave();
-        let h_max = grid.h.iter().copied().fold(0.0, f64::max);
-        let ppw = slowest / f_max / h_max;
-        let stencil = match cfg.scheme.coefficients {
-            Coefficients::Taylor => taylor,
-            // The grid can't hold waves shorter than two nodes anyway.
-            Coefficients::Optimised => {
-                if let Some(p) = cfg.scheme.optimised_for {
-                    ensure!(
-                        p > 2.0,
-                        "optimised_for must be more than 2 points per wavelength, not {p}"
-                    );
-                }
-                let design = cfg.scheme.optimised_for.unwrap_or(ppw);
-                Stencil::optimised(
-                    cfg.scheme.order,
-                    (2.0 * PI / design).min(0.9 * PI),
-                    PHASE_TOLERANCE,
-                )?
-            }
-        };
-
         let [_, vp_max] = model.vp_range();
-        let dt_stable = stable_dt(&grid, vp_max, &stencil);
-        let dt = match cfg.time.dt {
-            Some(dt) => {
-                ensure!(dt > 0.0, "dt must be positive");
-                ensure!(
-                    dt <= dt_stable,
-                    "dt = {dt:e} s is unstable; the limit for this grid and model is {dt_stable:e} s"
-                );
-                dt
-            }
-            None => {
-                let c = cfg.time.courant.unwrap_or_else(|| {
-                    default_courant(cfg.scheme.order, cfg.scheme.remove_time_dispersion)
-                });
-                ensure!(c > 0.0 && c <= 1.0, "courant must be in (0, 1]");
-                c * dt_stable
-            }
-        };
-        ensure!(cfg.time.duration > 0.0, "duration must be positive");
-        let steps = (cfg.time.duration / dt).ceil() as usize;
+        let Timing {
+            stencil,
+            dt,
+            dt_stable,
+            steps,
+            ppw,
+            slowest,
+            f_max,
+            f_dominant,
+            wavelets,
+        } = timing(cfg, &grid, vp_max, model.slowest_wave())?;
 
         let min_ppw = min_points_per_wavelength(cfg.scheme.order, cfg.scheme.coefficients);
         if ppw < min_ppw {
@@ -307,6 +351,7 @@ impl Simulation {
             });
         }
 
+        let memory = Plan::new(cfg, grid, steps)?.memory();
         let m = &solver.model;
         let info = RunInfo {
             points: grid.n,
@@ -328,7 +373,8 @@ impl Simulation {
             remove_time_dispersion: cfg.scheme.remove_time_dispersion,
             coefficients: cfg.scheme.coefficients,
             band: solver.stencil.band(),
-            memory_bytes: solver.memory_bytes(),
+            memory_bytes: memory.peak as usize,
+            memory,
             sources: source_info,
             receivers: receivers.nodes.len(),
             components: receivers
@@ -600,8 +646,8 @@ impl RunInfo {
         );
         let _ = write!(
             s,
-            "memory    {:.2} GiB",
-            self.memory_bytes as f64 / (1u64 << 30) as f64
+            "memory    {} at most; `vibe-rations memory` itemises it",
+            human(self.memory.peak)
         );
         s
     }

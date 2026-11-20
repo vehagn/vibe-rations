@@ -100,3 +100,8 @@ run config *args:
 [group("simulate")]
 check config:
     cargo run --release -- check {{ config }}
+
+# The memory a simulation needs, part by part, worked out without setting it up
+[group("simulate")]
+memory config:
+    cargo run --release -- memory {{ config }}

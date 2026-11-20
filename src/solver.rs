@@ -283,10 +283,21 @@ impl Solver {
 
     /// Bytes the solver holds.
     pub fn memory_bytes(&self) -> usize {
-        let padded = 17 * self.grid.padded_len();
-        let model = 3 * self.grid.interior_len();
-        let psi: usize = self.psi_v.iter().chain(&self.psi_s).map(Vec::len).sum();
-        4 * (padded + model + psi)
+        let f = &self.fields;
+        let m = &self.material;
+        let d = &self.model;
+        let arrays = [
+            &f.vx, &f.vy, &f.vz, &f.sxx, &f.syy, &f.szz, &f.sxy, &f.sxz, &f.syz, &m.bx, &m.by,
+            &m.bz, &m.lam, &m.l2m, &m.mxy, &m.mxz, &m.myz, &d.vp, &d.vs, &d.rho,
+        ];
+        let psi = self.psi_v.iter().chain(&self.psi_s);
+        let sponge = self.sponge.iter().flatten();
+        4 * arrays
+            .into_iter()
+            .chain(psi)
+            .chain(sponge)
+            .map(Vec::len)
+            .sum::<usize>()
     }
 
     /// Time of the velocities now held: steps × dt - dt/2.

@@ -70,6 +70,35 @@ fn check_describes_a_configuration() {
     }
 }
 
+/// `memory` itemises a model's memory without setting it up, so even one far larger than this
+/// machine is answered at once; `check` refuses such a model before allocating it.
+#[test]
+fn memory_itemises_a_model_without_building_it() {
+    let out = vibe(&["memory", "examples/explosion.toml"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", stderr(&out));
+    for part in ["wavefield", "material", "model", "traces", "at most"] {
+        assert!(text.contains(part), "no {part} in\n{text}");
+    }
+    let dir = scratch("memory");
+    let huge = dir.join("huge.toml");
+    fs::write(
+        &huge,
+        TINY.replace("points = [24, 24, 20]", "points = [4000, 4000, 2000]"),
+    )
+    .unwrap();
+    let out = vibe(&["memory", huge.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(text.contains("GiB"), "{text}");
+    if Path::new("/proc/meminfo").exists() {
+        let out = vibe(&["check", huge.to_str().unwrap()]);
+        assert!(!out.status.success());
+        assert!(stderr(&out).contains("only"), "{}", stderr(&out));
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn run_writes_traces_gathers_snapshots_and_settings() {
     let dir = scratch("run");
