@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 
 use vibe_rations::config::{Config, shot_dir};
 use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
+use vibe_rations::inversion::Inversion;
 use vibe_rations::npy;
 use vibe_rations::simulation::Simulation;
 
@@ -41,6 +42,19 @@ enum Command {
     Check {
         /// The TOML configuration.
         config: PathBuf,
+    },
+    /// Invert observed traces for the model with L-BFGS, as the configuration's [inversion]
+    /// section says: each source is a shot.
+    ///
+    /// Writes the model as it stands after each iteration (vp.npy, vs.npy, rho.npy, shape nz,
+    /// ny, nx, ready for [model.files]) and inversion.json, the settings and every
+    /// iteration's misfit.
+    Invert {
+        /// The TOML configuration, with the starting model and an [inversion] section.
+        config: PathBuf,
+        /// Where to write results, instead of the configuration's [output] dir.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// The gradient of the L2 misfit to observed traces with respect to vp, vs and ρ.
     ///
@@ -113,6 +127,52 @@ fn run() -> Result<()> {
         Command::Check { config } => {
             let (_, sim) = load(&config)?;
             report(&sim);
+        }
+        Command::Invert { config, out } => {
+            let (cfg, sim) = load(&config)?;
+            let settings = cfg
+                .inversion
+                .clone()
+                .context("the configuration has no [inversion] section")?;
+            let out = out.unwrap_or_else(|| cfg.output.dir.clone());
+            report(&sim);
+            let next_to_layers = sim.receivers_next_to_layers();
+            if next_to_layers > 0 {
+                eprintln!(
+                    "warning: {next_to_layers} receiver(s) next to the absorbing layers read \
+                     velocities inside them, which makes the gradient approximate"
+                );
+            }
+            drop(sim);
+            let base = config.parent().unwrap_or(Path::new("."));
+            eprintln!(
+                "the starting misfit and gradient, {} shot(s)",
+                cfg.sources.len()
+            );
+            let mut inversion = Inversion::from_config(&cfg, base)?;
+            let first = inversion.misfit();
+            eprintln!("{} unknowns; misfit {first:.6e}", inversion.unknowns());
+            std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+            save(&out, &inversion, &settings, first)?;
+            for _ in 0..settings.iterations {
+                let Some(it) = inversion.iterate()? else {
+                    eprintln!("no step lowers the misfit further; stopping");
+                    break;
+                };
+                eprintln!(
+                    "iteration {:>3}: misfit {:.6e} ({:.1}% of the start), step {:.2} after {} \
+                     trial(s), largest change {:.1}%{}",
+                    it.iteration,
+                    it.misfit,
+                    100.0 * it.misfit / first,
+                    it.step,
+                    it.trials,
+                    100.0 * it.largest_change,
+                    if it.restarted { ", restarted" } else { "" }
+                );
+                save(&out, &inversion, &settings, first)?;
+            }
+            eprintln!("wrote {}", out.display());
         }
         Command::Gradient {
             config,
@@ -194,6 +254,31 @@ fn load(path: &Path) -> Result<(Config, Simulation)> {
     let sim =
         Simulation::new(&cfg, base).with_context(|| format!("setting up {}", path.display()))?;
     Ok((cfg, sim))
+}
+
+/// Writes the model as it stands and the history so far.
+fn save(
+    out: &Path,
+    inversion: &Inversion,
+    settings: &vibe_rations::config::InversionConfig,
+    first: f64,
+) -> Result<()> {
+    let m = &inversion.model;
+    let shape = [m.grid.n[2], m.grid.n[1], m.grid.n[0]];
+    for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
+        npy::write(&out.join(format!("{name}.npy")), &shape, values)?;
+    }
+    let summary = serde_json::json!({
+        "settings": settings,
+        "unknowns": inversion.unknowns(),
+        "starting_misfit": first,
+        "iterations": inversion.history,
+    });
+    std::fs::write(
+        out.join("inversion.json"),
+        serde_json::to_string_pretty(&summary)? + "\n",
+    )?;
+    Ok(())
 }
 
 fn report(sim: &Simulation) {

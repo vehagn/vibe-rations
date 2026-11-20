@@ -206,6 +206,69 @@ fn gradient_writes_one_array_per_parameter() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// An inversion of two shots another model recorded, one iteration: the model and the
+/// history come out, and a configuration without [inversion] is refused.
+#[test]
+fn invert_writes_the_model_and_its_history() {
+    let dir = scratch("invert");
+    let survey = TINY
+        .replace("duration = 0.05", "duration = 0.05\ndt = 6e-4")
+        .replace("pml_width = 8", "pml_width = 8\npml_vp_max = 2500.0")
+        .replace(
+            "[receivers]",
+            "[[source]]\nposition = [150.0, 110.0, 60.0]\nforce = [0.0, 0.0, 1e9]\n\
+             wavelet = { kind = \"ricker\", frequency = 10.0 }\n[receivers]",
+        );
+    let truth = dir.join("truth.toml");
+    fs::write(&truth, &survey).unwrap();
+    let observed = dir.join("observed");
+    let out = vibe(&[
+        "run",
+        truth.to_str().unwrap(),
+        "--out",
+        observed.to_str().unwrap(),
+        "--quiet",
+        "--shots",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let guess = dir.join("guess.toml");
+    let model_out = dir.join("inverted");
+    fs::write(
+        &guess,
+        survey.replace("vp = 2000.0", "vp = 2080.0")
+            + "\n[inversion]\nobserved = \"observed\"\niterations = 1\n",
+    )
+    .unwrap();
+    let out = vibe(&[
+        "invert",
+        guess.to_str().unwrap(),
+        "--out",
+        model_out.to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("iteration   1"), "{err}");
+    for name in ["vp", "vs", "rho"] {
+        let bytes = fs::read(model_out.join(format!("{name}.npy"))).unwrap();
+        assert_eq!(bytes.len(), 128 + 4 * 24 * 24 * 20, "{name}.npy");
+    }
+    let info: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(model_out.join("inversion.json")).unwrap())
+            .unwrap();
+    let iterations = info["iterations"].as_array().unwrap();
+    assert_eq!(iterations.len(), 1, "{info}");
+    let (start, now) = (
+        info["starting_misfit"].as_f64().unwrap(),
+        iterations[0]["misfit"].as_f64().unwrap(),
+    );
+    assert!(now < start, "{now} vs {start}");
+    // Without [inversion] there is nothing to do.
+    let out = vibe(&["invert", truth.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("[inversion]"), "{}", stderr(&out));
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn reports_a_typo_and_fails() {
     let dir = scratch("typo");
