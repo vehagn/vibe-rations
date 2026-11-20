@@ -902,67 +902,108 @@ the water stays sharp (a Gaussian, $\sigma = 250$ m, takes $v_s$'s minimum to 40
   of the smoothed model ($v_p$, $v_s$; true $\rho$) against the true model's traces, all five
   shots fired at once.
 
-`just marmousi2-bench` (`examples/marmousi2/bench.sh`) runs each once, on the dev container's
-four cores (Apple M1 Max, Colima VM with 8 GiB, nothing else running), and measures wall time
-and peak resident memory; the forward speed is the run's own count of interior nodes times
-steps over stepping time.
+`just marmousi2-bench` (`examples/marmousi2/bench.sh`) runs each on the dev container's four
+cores (Apple M1 Max, Colima VM with 8 GiB, nothing else running) and measures wall time and
+peak resident memory; the forward speed is the run's own count of interior nodes times steps
+over stepping time. It ran twice, a reboot apart; the ranges below are the two runs, and the
+memory was the same both times.
 
 **Results.**
 
 | Run | Nodes | Steps | Stepping | Wall | Peak memory | Planned |
 |---|---|---|---|---|---|---|
-| Forward, whole section, order 8 | 3.94 M | 3,034 | 178 Mcell/s | 69.1 s | 425 MiB | 471 MiB |
-| Forward, whole section, order 4 | 3.94 M | 2,694 | 258 Mcell/s | 42.6 s | 420 MiB | 433 MiB |
-| Forward, central, order 8 | 1.39 M | 1,750 | 160 Mcell/s | 15.5 s | | 169 MiB |
-| Forward, central, order 4 | 1.39 M | 1,750 | 211 Mcell/s | 12.4 s | | |
-| Gradient, central, order 8 | 1.39 M | 1,750 | | 71.0 s | 4,396 MiB | 4,372 MiB |
-| Gradient, central, order 4 | 1.39 M | 1,750 | | 53.2 s | 3,998 MiB | 3,953 MiB |
+| Forward, whole section, order 8 | 3.94 M | 3,034 | 178–181 Mcell/s | 67.8–69.1 s | 425 MiB | 471 MiB |
+| Forward, whole section, order 4 | 3.94 M | 2,694 | 258–271 Mcell/s | 40.5–42.6 s | 420 MiB | 433 MiB |
+| Forward, central, order 8 | 1.39 M | 1,750 | 160–165 Mcell/s | 15.1–15.5 s | 162 MiB | 169 MiB |
+| Forward, central, order 4 | 1.39 M | 1,750 | 211–222 Mcell/s | 11.8–12.4 s | 159 MiB | 155 MiB |
+| Gradient, central, order 8 | 1.39 M | 1,750 | | 68.0–71.0 s | 4,396 MiB | 4,372 MiB |
+| Gradient, central, order 4 | 1.39 M | 1,750 | | 51.7–53.2 s | 3,998 MiB | 3,953 MiB |
 
-- *Speed.* Order 8 steps the whole section at 178 Mcell/s and order 4 at 258, a little above
-  the 160 and 220 the examples gave (README, "Accuracy"). The central part is slower, 160
-  and 211, because a larger share of it is in the absorbing layers (along $x$, 32 of 241
+- *Speed.* Order 8 steps the whole section at 178–181 Mcell/s and order 4 at 258–271, a
+  little above the 160 and 220 the examples gave (README, "Accuracy"). The central part is
+  slower, 160–165 and 211–222, because a larger share of it is in the absorbing layers (along $x$, 32 of 241
   nodes against 32 of 681; along $y$, 32 of 41 in both), whose memory variables cost extra.
-  Order 4 at $C = 0.85$ takes a longer step (2.23 ms against 1.98), so its run takes 62% of
-  order 8's time. It is no bargain here: at 4.0 points per shortest wavelength it is outside
+  Order 4 at $C = 0.85$ takes a longer step (2.23 ms against 1.98), so its run takes 60–62%
+  of order 8's time. It is no bargain here: at 4.0 points per shortest wavelength it is outside
   its range (it warns below 5). For order 8's accuracy it needs 8–9 points per wavelength
   where order 8 needs 4.5 (2026-11-20, "Stencil order and time step"): on this 2.5D grid
   $(8.5/4.5)^3 \approx 6.7$ times the node-steps ($n_x$, $n_z$ and the steps grow as $1/h$;
-  $n_y$ is set by the layers), which its 1.45 times faster stepping and 1.13 times longer step
-  bring to about 4 times order 8's time.
-- *Gradients* take 4.6 (order 8) and 4.3 (order 4) forward runs: the forward run, its replay
+  $n_y$ is set by the layers), which its 1.45–1.5 times faster stepping and 1.13 times longer
+  step bring to about 4 times order 8's time.
+- *Gradients* take 4.5–4.6 (order 8) and 4.3–4.4 (order 4) forward runs: the forward run, its replay
   from checkpoints, the adjoint run and the strains' correlations, besides setting up two
   solvers and writing the results. They hold 26 times the forward run's memory (checkpoints
   2.23 GiB and the replayed segment 1.50 GiB of the 4.27; 24 checkpoints, every 73 steps). The
   whole section's gradient would need 15 GiB (32 checkpoints, 8.05 GiB; a segment of 97
   steps, 5.45 GiB) against the forward run's 471 MiB, more than the container's 7 GiB:
   `gradient` refuses it before allocating anything.
-- *Memory.* Forward runs peak 3–10% below the plan, which counts what is allocated: pages
-  never written (zeros the allocator hands out lazily) aren't resident. Gradient runs peak 24 and 45 MiB (0.5% and 1.1%) above it: the process itself (the
-  program, threads' stacks, the allocator's arenas), which the plan leaves out as "a few
+- *Memory.* Forward runs peak between 10% below the plan and 3% (4 MiB) above it, gradient
+  runs 24 and 45 MiB (0.5% and 1.1%) above. The plan counts what is allocated, so pages never
+  written (zeros the allocator hands out lazily) aren't resident; the process itself (the
+  program, threads' stacks, the allocator's arenas) is, and the plan leaves it out as "a few
   MiB".
 - *The wavefield* (`marmousi2.toml`, with snapshots: 72 s) stays bounded: its peak falls
   from $2.9 \times 10^{-2}$ m/s near the source at 0.8 s to $1.3 \times 10^{-5}$ at 6 s. Most
-  of the energy left at the end travels as Scholte and S waves in the slow sediments under the seafloor, which also
-  dominate the gradient: it sits almost entirely in the top few hundred metres below the
-  seafloor, and for $v_s$ it is anticorrelated with the true update (the inner product of
-  $-\nabla_{v_s}$ with $v_{s,\text{true}} - v_{s,\text{start}}$ is negative), as one would
-  expect if the smoothed start is a cycle or more off for those waves: over 2.5 km their
-  traveltime changes by about 2 s, at a period of 0.8 s.
+  of the energy left at the end travels as Scholte and S waves in the slow sediments under
+  the seafloor.
+- *The gradient* sits almost entirely in the top few hundred metres below the seafloor, where
+  those waves travel, and for $v_s$ its inner product with the true update,
+  $-\nabla_{v_s} \cdot (v_{s,\text{true}} - v_{s,\text{start}})$, is negative.
+
+**Inversion.** Five L-BFGS iterations of `central.toml` ($v_p$ and $v_s$, 395,010 unknowns;
+the water and the seafloor's first solid row fixed; illumination preconditioning and
+balanced components, the defaults) against `central-true.toml`'s five shots took 40 minutes:
+340 s for the starting misfit and gradient, then about 410 s an iteration, five gradient runs
+and five forward runs for the line search, which took the full step at the first try every
+time. `memory --invert` planned 4.41 GiB. The misfit fell to 97.2%, 83.7%, 73.3%, 64.0% and
+57.9% of the start's, but the model came no nearer the truth: over the free nodes
+$\lVert m - m_\text{true} \rVert / \lVert m_0 - m_\text{true} \rVert$ is 1.001 for $v_p$ and
+1.004 for $v_s$, whose start is off by 11.5% and 21.4% (RMS). By depth, with the cosine
+between the update $m - m_0$ and the true one $m_\text{true} - m_0$:
+
+| Depth | $v_p$ error ratio | cosine | $v_s$ error ratio | cosine |
+|---|---|---|---|---|
+| 500–750 m | 0.900 | +0.44 | 0.973 | +0.25 |
+| 750–1000 m | 0.994 | +0.12 | 1.095 | −0.15 |
+| 1000–1500 m | 1.020 | −0.15 | 1.070 | −0.17 |
+| 1500–2500 m | 1.001 | −0.02 | 0.999 | +0.04 |
+| 2500–3100 m | 1.003 | −0.22 | 0.999 | +0.14 |
+
+The updates are a few percent (RMS 2.5% for $v_p$ and 5.6% for $v_s$ in the top band, under
+1% below 1.5 km) and blotchy where the true update is layered. In the first 250 m under the
+seafloor both speeds move towards the truth; from 750 m to 1.5 km $v_s$ moves away from it;
+deeper, nothing moves. That is what one would expect if the slow waves along the seafloor
+dominate the misfit and the smoothed start predicts them a cycle or more off: taking 300 and
+400 m/s for the sediments' S speed in the true and the smoothed model, their traveltime over
+2.5 km differs by about 2 s, at a period of 0.8 s. How much of the misfit they carry was not
+measured.
 
 **Decision.** Marmousi2 is now one command away (`just marmousi2`), and
 `vibe-rations extrude` makes model files from any 2D SEG-Y section. These numbers are the
 benchmark to compare later speed-ups with. Gradients of the whole section need the forward
 field rebuilt rather than stored (`feat/reconstruct`, not merged yet) or a machine with
 16 GiB; the central part is the gradient and inversion test case meanwhile. The sediments'
-303 m/s S waves set the grid: the seafloor is where the cost and the gradient are, so an
-inversion of Marmousi2's elastic data needs a starting model or a misfit that copes with
-slow, cycle-skipped surface waves.
+303 m/s S waves set the grid, and the seafloor is where the cost and the gradient are. Plain
+L2 on all the data from a smoothed start lowers the misfit without recovering the model, so
+an inversion of Marmousi2's elastic data needs more: lower frequencies first
+[@fichtner2013], the slow seafloor waves muted or down-weighted, a better shallow start, or
+a misfit less prone to cycle skipping [@engquist2014; @yang2016] (`feat/misfits`).
+`central.toml` is the test case for them, these five iterations the baseline.
 
 **Reproduce:** `just in marmousi2`, then `just in marmousi2-bench` (about 10 minutes);
-`just in run examples/marmousi2/marmousi2.toml` for the example with snapshots.
+`just in run examples/marmousi2/marmousi2.toml` for the example with snapshots. The
+inversion: `just in run examples/marmousi2/central-true.toml --shots --out
+out/marmousi2/observed`, then `just in invert examples/marmousi2/central.toml` (40 minutes,
+writing the model after each iteration to `out/marmousi2/central`).
 
 ## Open questions
 
+- **Inverting Marmousi2's elastic data.** From a start smoothed over 250 m, L2 on all the
+  ocean-bottom data lowers the misfit to 58% in five iterations without bringing the model
+  nearer the truth (2026-11-20, "Marmousi2"). Measure how much of the misfit the slow
+  seafloor waves carry, then try muting them, starting at lower frequencies
+  [@fichtner2013], and misfits less prone to cycle skipping [@engquist2014; @yang2016], on
+  `examples/marmousi2/central.toml`.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw

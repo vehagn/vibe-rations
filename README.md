@@ -320,20 +320,23 @@ the seafloor have S waves as slow as 303 m/s, so at 25 m the grid carries 3 Hz: 
 wavelet at 1.2 Hz.
 
 `just in marmousi2-bench` times them on the dev container's four cores (Apple M1 Max, Colima,
-8 GiB):
+8 GiB; two runs):
 
 | Run | Nodes × steps | Wall | Speed | Peak memory (planned) |
 |---|---|---|---|---|
-| Forward, whole section, order 8 | 3.94 M × 3,034 | 69 s | 178 Mcell/s | 425 MiB (471) |
-| Forward, whole section, order 4 | 3.94 M × 2,694 | 43 s | 258 Mcell/s | 420 MiB (433) |
-| Gradient, central part, order 8 | 1.39 M × 1,750 | 71 s | 4.6 forward runs | 4.29 GiB (4.27) |
-| Gradient, central part, order 4 | 1.39 M × 1,750 | 53 s | 4.3 forward runs | 3.90 GiB (3.86) |
+| Forward, whole section, order 8 | 3.94 M × 3,034 | 68–69 s | 178–181 Mcell/s | 425 MiB (471) |
+| Forward, whole section, order 4 | 3.94 M × 2,694 | 41–43 s | 258–271 Mcell/s | 420 MiB (433) |
+| Gradient, central part, order 8 | 1.39 M × 1,750 | 68–71 s | 4.5–4.6 forward runs | 4.29 GiB (4.27) |
+| Gradient, central part, order 4 | 1.39 M × 1,750 | 52–53 s | 4.3–4.4 forward runs | 3.90 GiB (3.86) |
 
 The peak is the resident memory measured, the plan `vibe-rations memory`'s. Order 4 runs
 faster on the same grid, but at 4 points per wavelength it is outside its range; for order 8's
 accuracy it would take about four times as long. A gradient holds 26 times the forward run's
 memory, so one of the whole section (15 GiB) doesn't fit the container, and the gradient runs
-use the central part. The research log ("Marmousi2") has the details.
+use the central part. Five iterations of `invert` from the smoothed start (40 minutes, 4.4 GiB)
+bring the misfit to 58% of the start's, but not the model nearer the truth: the slow waves
+along the seafloor seem to dominate the misfit. The research log ("Marmousi2") has the
+details.
 
 ## Numerics
 
