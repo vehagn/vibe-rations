@@ -133,9 +133,15 @@ pub struct Step {
 }
 
 /// Looks for a step from `x` (value `f`, gradient `g`) along the L-BFGS direction (with the
-/// diagonal `preconditioner`): scaled to `limits`, projected by `project`, shortened until the
-/// value (from `value`) falls by at least 10⁻⁴ of what the gradient predicts (Armijo). None if
-/// eight tries don't find one.
+/// diagonal `preconditioner`), scaled to `limits` and projected by `project`, shortened until
+/// the value (from `value`) falls by at least 10⁻⁴ of what the gradient predicts for the
+/// projected step (Armijo).
+///
+/// Unknowns held at a bound that the gradient pushes against are left out of the direction,
+/// so that the search runs along the bound's face instead of into it (projected gradient). A
+/// trial `value` can't compute, or whose value isn't finite, counts as too long a step. If the
+/// L-BFGS direction finds no step in eight tries, the memory is dropped and steepest descent
+/// tried; None if that fails too. An error only if every trial was one.
 #[allow(clippy::too_many_arguments)]
 pub fn line_search(
     lbfgs: &mut Lbfgs,
@@ -147,56 +153,110 @@ pub fn line_search(
     project: impl Fn(&mut [f64]),
     mut value: impl FnMut(&[f64]) -> Result<f64>,
 ) -> Result<Option<Step>> {
-    let mut restarted = false;
-    let mut d = lbfgs.direction(g, preconditioner);
-    if dot(g, &d) >= 0.0 {
-        lbfgs.clear();
-        restarted = true;
-        d = lbfgs.direction(g, preconditioner);
-    }
-    let largest = d.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    if largest == 0.0 {
+    // Unknowns a small step down the gradient leaves where they are: pinned to a bound.
+    let largest_g = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    if largest_g == 0.0 {
         return Ok(None);
     }
-    let cap = if lbfgs.is_empty() {
-        limits.initial
-    } else {
-        limits.max
-    };
-    if largest > cap || lbfgs.is_empty() {
-        let scale = cap / largest;
-        d.iter_mut().for_each(|v| *v *= scale);
-    }
-    const ARMIJO: f64 = 1e-4;
-    let mut alpha = 1.0;
-    for trial in 1..=8 {
-        let mut t: Vec<f64> = x.iter().zip(&d).map(|(a, b)| a + alpha * b).collect();
-        project(&mut t);
-        let s: Vec<f64> = t.iter().zip(x).map(|(a, b)| a - b).collect();
-        // What the gradient predicts for the step actually taken, after projection.
-        let predicted = dot(g, &s);
-        let ft = value(&t)?;
-        if predicted < 0.0 && ft <= f + ARMIJO * predicted {
-            return Ok(Some(Step {
-                x: t,
-                value: ft,
-                length: alpha,
-                trials: trial,
-                restarted,
-            }));
+    let mut probe: Vec<f64> = x
+        .iter()
+        .zip(g)
+        .map(|(x, g)| x - 1e-6 * g / largest_g)
+        .collect();
+    project(&mut probe);
+    // (A zero gradient also leaves an unknown in place, but no bound holds it there.)
+    let pinned: Vec<bool> = probe
+        .iter()
+        .zip(x)
+        .zip(g)
+        .map(|((p, x), g)| p == x && *g != 0.0)
+        .collect();
+    let reduced: Vec<f64> = g
+        .iter()
+        .zip(&pinned)
+        .map(|(&g, &p)| if p { 0.0 } else { g })
+        .collect();
+
+    let mut restarted = false;
+    let mut last_error = None;
+    let mut errors = 0;
+    let mut trials = 0;
+    loop {
+        let mut d = lbfgs.direction(&reduced, preconditioner);
+        if dot(&reduced, &d) >= 0.0 && !lbfgs.is_empty() {
+            lbfgs.clear();
+            restarted = true;
+            d = lbfgs.direction(&reduced, preconditioner);
         }
-        // The minimum of the parabola through f, its slope and ft, kept within [0.1, 0.5] of
-        // the step that failed.
-        let slope = predicted / alpha;
-        let curvature = ft - f - slope * alpha;
-        let next = if curvature > 0.0 && slope < 0.0 {
-            -slope * alpha * alpha / (2.0 * curvature)
+        d.iter_mut()
+            .zip(&pinned)
+            .filter(|(_, p)| **p)
+            .for_each(|(d, _)| *d = 0.0);
+        let largest = d.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        if largest == 0.0 || dot(&reduced, &d) >= 0.0 {
+            return Ok(None);
+        }
+        let cap = if lbfgs.is_empty() {
+            limits.initial
         } else {
-            0.5 * alpha
+            limits.max
         };
-        alpha = next.clamp(0.1 * alpha, 0.5 * alpha);
+        if largest > cap || lbfgs.is_empty() {
+            let scale = cap / largest;
+            d.iter_mut().for_each(|v| *v *= scale);
+        }
+        const ARMIJO: f64 = 1e-4;
+        let mut alpha = 1.0;
+        for _ in 0..8 {
+            trials += 1;
+            let mut t: Vec<f64> = x.iter().zip(&d).map(|(a, b)| a + alpha * b).collect();
+            project(&mut t);
+            let s: Vec<f64> = t.iter().zip(x).map(|(a, b)| a - b).collect();
+            // What the gradient predicts for the step actually taken, after projection.
+            let predicted = dot(g, &s);
+            let ft = match value(&t) {
+                Ok(v) if v.is_finite() => v,
+                Ok(_) => {
+                    alpha *= 0.5;
+                    continue;
+                }
+                Err(e) => {
+                    errors += 1;
+                    last_error = Some(e);
+                    alpha *= 0.5;
+                    continue;
+                }
+            };
+            if predicted < 0.0 && ft <= f + ARMIJO * predicted {
+                return Ok(Some(Step {
+                    x: t,
+                    value: ft,
+                    length: alpha,
+                    trials,
+                    restarted,
+                }));
+            }
+            // The minimum of the parabola through f, its slope and ft, kept within [0.1, 0.5]
+            // of the step that failed.
+            let slope = predicted / alpha;
+            let curvature = ft - f - slope * alpha;
+            let next = if curvature > 0.0 && slope < 0.0 {
+                -slope * alpha * alpha / (2.0 * curvature)
+            } else {
+                0.5 * alpha
+            };
+            alpha = next.clamp(0.1 * alpha, 0.5 * alpha);
+        }
+        if lbfgs.is_empty() {
+            break;
+        }
+        lbfgs.clear();
+        restarted = true;
     }
-    Ok(None)
+    match last_error {
+        Some(e) if errors == trials => Err(e),
+        _ => Ok(None),
+    }
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -278,23 +338,25 @@ impl Inversion {
         let dir = base.join(&settings.observed);
         let observed = (0..cfg.sources.len())
             .map(|s| {
-                let shot = if cfg.sources.len() == 1 {
-                    dir.clone()
+                // run --shots writes shot-NNN/ even for one source; a plain run doesn't.
+                let shot = dir.join(shot_dir(s));
+                let shot = if shot.is_dir() || cfg.sources.len() > 1 {
+                    shot
                 } else {
-                    dir.join(shot_dir(s))
+                    dir.clone()
                 };
-                load_traces(cfg, &shot)
+                Observed::load(cfg, &shot)
             })
             .collect::<Result<Vec<_>>>()?;
         Self::new(cfg, model, observed, &settings)
     }
 
     /// Sets up an inversion of `start` against `observed` traces, one set per source of `cfg`
-    /// (each source a shot), in the layout of the receivers' traces.
+    /// (each source a shot).
     pub fn new(
         cfg: &Config,
         start: Model,
-        observed: Vec<Vec<Vec<f32>>>,
+        observed: Vec<Observed>,
         settings: &InversionConfig,
     ) -> Result<Self> {
         ensure!(
@@ -332,19 +394,10 @@ impl Inversion {
             let config = fixed.shot(s)?;
             let sim = Simulation::with_model(&config, start.clone())?;
             let r = &sim.receivers;
-            ensure!(
-                observed.len() == r.components.len()
-                    && observed
-                        .iter()
-                        .all(|o| o.len() == r.nodes.len() * r.samples),
-                "shot {s}: the observed traces don't fit {} receivers × {} samples of {} \
-                 component(s); observed and synthetic traces must share their sampling",
-                r.nodes.len(),
-                r.samples,
-                r.components.len()
-            );
+            observed.check(&sim).with_context(|| format!("shot {s}"))?;
+            let observed = observed.traces;
             let weights = if settings.balance {
-                balancing_weights(&observed)
+                balancing_weights(&observed, &r.components)
             } else {
                 vec![1.0; observed.len()]
             };
@@ -388,34 +441,69 @@ impl Inversion {
         let stencil = Stencil::taylor(cfg.scheme.order)?;
         let vp_limit = 0.999 * stable_dt(&g, 1.0, &stencil) / dt;
         let around = |range: [f64; 2]| [0.5 * range[0], 2.0 * range[1]];
-        let bounds = settings
-            .parameters
+        let smallest_vs = start
+            .vs
             .iter()
-            .map(|p| {
-                let [lo, hi] = match p {
-                    Parameter::Vp => settings.vp_range.unwrap_or_else(|| {
-                        let [lo, hi] = around(start.vp_range());
-                        [lo, hi.min(vp_limit)]
-                    }),
-                    Parameter::Vs => settings.vs_range.unwrap_or_else(|| {
-                        let [_, hi] = around(start.vs_range());
-                        [0.0, hi]
-                    }),
-                    Parameter::Rho => settings
-                        .rho_range
-                        .unwrap_or_else(|| around(start.rho_range())),
-                };
-                ensure!(lo >= 0.0 && lo < hi, "the {} range is empty", p.name());
-                Ok([
-                    lo,
-                    if *p == Parameter::Vp {
-                        hi.min(vp_limit)
-                    } else {
-                        hi
-                    },
-                ])
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .filter(|&&v| v > 0.0)
+            .fold(f64::INFINITY, |m, &v| m.min(v as f64));
+        let mut bounds = Vec::with_capacity(free.len());
+        for (p, nodes) in &free {
+            let [lo, hi] = match p {
+                Parameter::Vp => settings
+                    .vp_range
+                    .unwrap_or_else(|| around(start.vp_range())),
+                Parameter::Vs => settings
+                    .vs_range
+                    .unwrap_or_else(|| [0.5 * smallest_vs, 2.0 * start.vs_range()[1]]),
+                Parameter::Rho => settings
+                    .rho_range
+                    .unwrap_or_else(|| around(start.rho_range())),
+            };
+            ensure!(
+                lo >= 0.0 && lo < hi,
+                "the {} range [{lo}, {hi}] is empty",
+                p.name()
+            );
+            let hi = if *p == Parameter::Vp {
+                ensure!(
+                    lo < vp_limit,
+                    "vp_range starts at {lo} m/s, above the {vp_limit:.0} m/s the time step allows"
+                );
+                hi.min(vp_limit)
+            } else {
+                hi
+            };
+            let values = match p {
+                Parameter::Vp => &start.vp,
+                Parameter::Vs => &start.vs,
+                Parameter::Rho => &start.rho,
+            };
+            // A little slack: the default vp limit sits 0.1% below the stability limit.
+            if let Some(&n) = nodes.iter().find(|&&n| {
+                let v = values[n] as f64;
+                v < lo * (1.0 - 1e-6) || v > hi * (1.0 + 2e-3)
+            }) {
+                bail!(
+                    "the starting model's {} at node {n} ({}) is outside [{lo}, {hi}]",
+                    p.name(),
+                    values[n]
+                );
+            }
+            bounds.push([lo, hi]);
+        }
+        // λ ≥ 0 (vs ≤ vp/√2) is a bound too: the start must keep it where either is free.
+        for (p, nodes) in &free {
+            if matches!(p, Parameter::Vp | Parameter::Vs)
+                && let Some(&n) = nodes.iter().find(|&&n| {
+                    2.0 * (start.vs[n] as f64).powi(2) > (start.vp[n] as f64).powi(2) * (1.0 + 1e-6)
+                })
+            {
+                bail!(
+                    "the starting model has vs > vp/√2 (λ < 0) at node {n}, which the \
+                     inversion's bounds exclude"
+                );
+            }
+        }
 
         let n: usize = free.iter().map(|(_, nodes)| nodes.len()).sum();
         let mut inversion = Self {
@@ -476,23 +564,24 @@ impl Inversion {
         m
     }
 
-    /// Projects unknowns onto the bounds: each value into its range, then vs below vp/√2.
+    /// Projects unknowns onto the bounds: each value into its range, and λ ≥ 0. vp goes first,
+    /// whatever order the parameters are listed in, so vs is capped at the projected vp/√2;
+    /// where vs isn't inverted, vp is kept at or above √2 vs instead.
     fn project(&self, x: &mut [f64]) {
+        let mut offsets = Vec::with_capacity(self.free.len());
         let mut offset = 0;
-        let vp_at = |n: usize, x: &[f64]| -> f64 {
-            // vp as x has it, if vp is inverted, else as it stands.
-            let mut o = 0;
-            for (p, nodes) in &self.free {
-                if *p == Parameter::Vp
-                    && let Ok(i) = nodes.binary_search(&n)
-                {
-                    return self.start.vp[n] as f64 * (1.0 + x[o + i]);
-                }
-                o += nodes.len();
-            }
-            self.model.vp[n] as f64
-        };
-        for ((p, nodes), &[lo, hi]) in self.free.iter().zip(&self.bounds) {
+        for (_, nodes) in &self.free {
+            offsets.push(offset);
+            offset += nodes.len();
+        }
+        let find = |p: Parameter| self.free.iter().position(|(q, _)| *q == p);
+        let (vp, vs) = (find(Parameter::Vp), find(Parameter::Vs));
+        let order = [Parameter::Vp, Parameter::Rho, Parameter::Vs]
+            .into_iter()
+            .filter_map(find);
+        for f in order {
+            let (p, nodes) = &self.free[f];
+            let [lo, hi] = self.bounds[f];
             let start = match p {
                 Parameter::Vp => &self.start.vp,
                 Parameter::Vs => &self.start.vs,
@@ -500,13 +589,28 @@ impl Inversion {
             };
             for (i, &n) in nodes.iter().enumerate() {
                 let m0 = start[n] as f64;
-                let mut v = (m0 * (1.0 + x[offset + i])).clamp(lo, hi);
-                if *p == Parameter::Vs {
-                    v = v.min(vp_at(n, x) / 2f64.sqrt());
+                let mut v = (m0 * (1.0 + x[offsets[f] + i])).clamp(lo, hi);
+                match p {
+                    Parameter::Vs => {
+                        let vp_n = match vp
+                            .and_then(|v| self.free[v].1.binary_search(&n).ok().map(|i| (v, i)))
+                        {
+                            Some((v, i)) => self.start.vp[n] as f64 * (1.0 + x[offsets[v] + i]),
+                            None => self.model.vp[n] as f64,
+                        };
+                        v = v.min(vp_n / 2f64.sqrt());
+                    }
+                    Parameter::Vp => {
+                        let vs_free = vs.is_some_and(|v| self.free[v].1.binary_search(&n).is_ok());
+                        if !vs_free {
+                            let floor = 2f64.sqrt() * self.model.vs[n] as f64;
+                            v = v.max(floor.min(m0).min(hi));
+                        }
+                    }
+                    Parameter::Rho => {}
                 }
-                x[offset + i] = v / m0 - 1.0;
+                x[offsets[f] + i] = v / m0 - 1.0;
             }
-            offset += nodes.len();
         }
     }
 
@@ -645,19 +749,97 @@ impl Inversion {
     }
 }
 
-/// The observed traces in `dir`, `<component>.npy` for every component the configuration
-/// records, each (receivers, samples).
-pub fn load_traces(cfg: &Config, dir: &Path) -> Result<Vec<Vec<f32>>> {
-    cfg.receivers
-        .components
-        .iter()
-        .map(|c| {
+/// One shot's observed traces, in the layout of [`crate::receiver::Receivers::traces`], with
+/// what is known of how they were recorded.
+#[derive(Clone, Debug, Default)]
+pub struct Observed {
+    pub traces: Vec<Vec<f32>>,
+    /// Each component's array shape, (receivers, samples), if it came from a file.
+    pub shapes: Option<Vec<Vec<usize>>>,
+    /// The sample times, if known (`time.npy`).
+    pub times: Option<Vec<f32>>,
+}
+
+impl From<Vec<Vec<f32>>> for Observed {
+    fn from(traces: Vec<Vec<f32>>) -> Self {
+        Self {
+            traces,
+            ..Self::default()
+        }
+    }
+}
+
+impl Observed {
+    /// The traces `run` wrote into `dir`: `<component>.npy` for every component the
+    /// configuration records, and `time.npy` if it is there.
+    pub fn load(cfg: &Config, dir: &Path) -> Result<Self> {
+        let mut traces = Vec::new();
+        let mut shapes = Vec::new();
+        for c in &cfg.receivers.components {
             let path = dir.join(format!("{}.npy", c.name()));
-            let (_, data) =
+            let (shape, data) =
                 npy::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            Ok(data)
+            traces.push(data);
+            shapes.push(shape);
+        }
+        let time = dir.join("time.npy");
+        let times = if time.is_file() {
+            Some(npy::read(&time)?.1)
+        } else {
+            None
+        };
+        Ok(Self {
+            traces,
+            shapes: Some(shapes),
+            times,
         })
-        .collect()
+    }
+
+    /// Fails unless these traces fit `sim`'s receivers: every component, each (receivers,
+    /// samples), sampled at the same times.
+    pub fn check(&self, sim: &Simulation) -> Result<()> {
+        let r = &sim.receivers;
+        let want = [r.nodes.len(), r.samples];
+        let hint = "observed and synthetic traces must share their sampling: give both runs \
+                    the same [time] dt and record_every";
+        ensure!(
+            self.traces.len() == r.components.len(),
+            "{} observed components for the {} recorded",
+            self.traces.len(),
+            r.components.len()
+        );
+        for (c, t) in r.components.iter().zip(&self.traces) {
+            ensure!(
+                t.len() == want[0] * want[1],
+                "{} holds {} values for {} receivers × {} samples; {hint}",
+                c.name(),
+                t.len(),
+                want[0],
+                want[1]
+            );
+        }
+        if let Some(shapes) = &self.shapes {
+            for (c, shape) in r.components.iter().zip(shapes) {
+                ensure!(
+                    shape[..] == want[..],
+                    "{}.npy has shape {shape:?}, not (receivers, samples) = {want:?}",
+                    c.name()
+                );
+            }
+        }
+        if let Some(times) = &self.times {
+            let synthetic = sim.sample_times();
+            let off = times.len() != synthetic.len()
+                || times.iter().zip(&synthetic).any(|(&a, &b)| {
+                    (a as f64 - b).abs() > 1e-6 * sim.info.duration.max(1.0) + 1e-5 * b.abs()
+                });
+            ensure!(
+                !off,
+                "the observed traces are sampled at other times; {hint}"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -826,6 +1008,145 @@ mod tests {
         );
     }
 
+    /// The oldest pair goes first; NaN or non-positive curvature, or no memory, keeps none;
+    /// with one pair and a preconditioner the direction is the two-loop recursion by hand.
+    #[test]
+    fn remembers_the_newest_pairs_and_scales_by_the_preconditioner() {
+        let pairs = [
+            (vec![1.0, 0.0], vec![2.0, 0.5]),
+            (vec![0.0, 1.0], vec![0.3, 3.0]),
+            (vec![1.0, 1.0], vec![1.5, 1.0]),
+        ];
+        let mut three = Lbfgs::new(2);
+        for (s, y) in pairs.clone() {
+            assert!(three.update(s, y));
+        }
+        let mut last_two = Lbfgs::new(2);
+        for (s, y) in pairs[1..].iter().cloned() {
+            last_two.update(s, y);
+        }
+        let g = [0.7, -1.1];
+        assert_eq!(three.direction(&g, None), last_two.direction(&g, None));
+        assert!(!three.update(vec![f64::NAN, 1.0], vec![1.0, 1.0]));
+        assert!(!Lbfgs::new(0).update(vec![1.0], vec![1.0]));
+
+        let (s, y) = (vec![1.0, 2.0], vec![3.0, 1.0]);
+        let p = [0.5, 4.0];
+        let mut one = Lbfgs::new(3);
+        one.update(s.clone(), y.clone());
+        let rho = 1.0 / dot(&y, &s);
+        let a = rho * dot(&s, &g);
+        let q: Vec<f64> = g.iter().zip(&y).map(|(g, y)| g - a * y).collect();
+        let py: Vec<f64> = y.iter().zip(&p).map(|(y, p)| y * p).collect();
+        let gamma = dot(&s, &y) / dot(&y, &py);
+        let r: Vec<f64> = q.iter().zip(&p).map(|(q, p)| gamma * p * q).collect();
+        let b = rho * dot(&y, &r);
+        let want: Vec<f64> = r.iter().zip(&s).map(|(r, s)| -(r + s * (a - b))).collect();
+        let got = one.direction(&g, Some(&p));
+        assert!(
+            got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-12),
+            "{got:?}"
+        );
+    }
+
+    /// Trials that can't be computed count as too long; only if every one fails is that an
+    /// error.
+    #[test]
+    fn shortens_steps_it_cannot_compute() {
+        let mut lbfgs = Lbfgs::new(2);
+        let g = [1.0];
+        let step = line_search(
+            &mut lbfgs,
+            &[0.0],
+            1.0,
+            &g,
+            None,
+            FREE,
+            |_| {},
+            |t| {
+                if t[0] < -0.2 {
+                    bail!("unphysical")
+                } else {
+                    Ok(1.0 + t[0])
+                }
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            step.x[0] >= -0.2 && step.x[0] < 0.0 && step.trials > 1,
+            "{step:?}"
+        );
+        let e = line_search(
+            &mut lbfgs,
+            &[0.0],
+            1.0,
+            &g,
+            None,
+            FREE,
+            |_| {},
+            |_| bail!("no disk"),
+        );
+        assert!(e.is_err());
+        let nan = line_search(
+            &mut lbfgs,
+            &[0.0],
+            1.0,
+            &g,
+            None,
+            FREE,
+            |_| {},
+            |_| Ok(f64::NAN),
+        );
+        assert!(nan.unwrap().is_none());
+    }
+
+    /// With the minimum on a face of the box, the search slides along the face to it rather
+    /// than stopping where the gradient first points out of the box.
+    #[test]
+    fn slides_along_a_bound() {
+        let f = |x: &[f64]| {
+            let target = [2.0, 0.3];
+            (
+                (x[0] - target[0]).powi(2) + 4.0 * (x[1] - target[1]).powi(2),
+                vec![2.0 * (x[0] - target[0]), 8.0 * (x[1] - target[1])],
+            )
+        };
+        let project = |x: &mut [f64]| x.iter_mut().for_each(|v| *v = v.clamp(-1.0, 1.0));
+        let (x, _) = minimise(vec![0.9, -0.8], f, project, FREE, 1e-12);
+        assert!(
+            (x[0] - 1.0).abs() < 1e-12 && (x[1] - 0.3).abs() < 1e-6,
+            "{x:?}"
+        );
+    }
+
+    /// A direction from a memory that misleads: the search drops it and goes downhill.
+    #[test]
+    fn falls_back_to_steepest_descent() {
+        // The value rises steeply as soon as x₀ moves, which the gradient (0 along x₀) can't
+        // tell; the remembered pair mixes x₀ into the direction, so only steepest descent,
+        // along x₁ alone, finds a lower value.
+        let value = |t: &[f64]| 1.0 + 1e3 * t[0].abs() + t[1];
+        let mut lbfgs = Lbfgs::new(2);
+        assert!(lbfgs.update(vec![1.0, 1.0], vec![1.0, 2.0]));
+        let d = lbfgs.direction(&[0.0, 1.0], None);
+        assert!(d[0] != 0.0 && d[1] < 0.0, "{d:?}");
+        let step = line_search(
+            &mut lbfgs,
+            &[0.0, 0.0],
+            1.0,
+            &[0.0, 1.0],
+            None,
+            FREE,
+            |_| {},
+            |t| Ok(value(t)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(step.value < 1.0 && step.x[0] == 0.0, "{step:?}");
+        assert!(step.restarted && lbfgs.is_empty() && step.trials > 8);
+    }
+
     /// A direction that doesn't go downhill and a value that never falls: no step.
     #[test]
     fn gives_up_when_nothing_lowers_the_value() {
@@ -855,5 +1176,206 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    use crate::config::Config;
+    use crate::model::Model;
+
+    /// A small survey: one explosion, two receivers on the free surface.
+    fn survey(layers: &str, extra: &str) -> Config {
+        Config::from_toml(&format!(
+            r#"
+            [grid]
+            points = [16, 16, 14]
+            spacing = 10.0
+            [time]
+            duration = 0.03
+            dt = 1e-3
+            [boundary]
+            pml_width = 4
+            {layers}
+            [[source]]
+            position = [80.0, 80.0, 60.0]
+            explosion = 1e12
+            wavelet = {{ kind = "ricker", frequency = 25.0 }}
+            [receivers]
+            components = ["vx", "vz"]
+            [[receivers.point]]
+            position = [60.0, 80.0, 0.0]
+            [[receivers.point]]
+            position = [100.0, 80.0, 0.0]
+            [inversion]
+            observed = "observed"
+            {extra}
+            "#
+        ))
+        .unwrap()
+    }
+
+    const SOLID: &str = "[[model.layer]]\ntop = 0.0\nvp = 2000.0\nvs = 1300.0\nrho = 2000.0";
+
+    fn start(cfg: &Config) -> Model {
+        Model::from_config(Simulation::grid(cfg).unwrap(), &cfg.model, Path::new(".")).unwrap()
+    }
+
+    /// The traces the configuration's own model records, shaped and timed as run writes them.
+    fn recorded(cfg: &Config) -> Observed {
+        let mut sim = Simulation::new(cfg, Path::new(".")).unwrap();
+        sim.run(None, false).unwrap();
+        let r = &sim.receivers;
+        Observed {
+            shapes: Some(vec![vec![r.nodes.len(), r.samples]; r.components.len()]),
+            times: Some(sim.sample_times().iter().map(|&t| t as f32).collect()),
+            traces: sim.receivers.traces,
+        }
+    }
+
+    fn setup(cfg: &Config) -> Result<Inversion> {
+        let settings = cfg.inversion.clone().unwrap();
+        Inversion::new(cfg, start(cfg), vec![recorded(cfg)], &settings)
+    }
+
+    /// vs stays zero in a water layer; the time step and the layers are fixed at the start's;
+    /// the illumination preconditions every unknown.
+    #[test]
+    fn keeps_fluids_fluid_and_the_time_step_and_layers_fixed() {
+        let water = "[[model.layer]]\ntop = 0.0\nvp = 1500.0\nvs = 0.0\nrho = 1000.0\n\
+                     [[model.layer]]\ntop = 30.0\nvp = 2000.0\nvs = 1300.0\nrho = 2000.0";
+        let cfg = survey(water, r#"parameters = ["vs", "vp"]"#);
+        let inv = setup(&cfg).unwrap();
+        let interior = 8 * 8 * 10; // 16 - 2·4 by 16 - 2·4 by 14 - 4 nodes
+        let fluid = 8 * 8 * 3; // z = 0, 10, 20 m
+        assert_eq!(inv.unknowns(), (interior - fluid) + interior);
+        let shot = &inv.shots[0].config;
+        assert_eq!(shot.time.dt, Some(1e-3));
+        assert_eq!(shot.boundary.pml_vp_max, Some(2000.0));
+        let p = inv.preconditioner.as_ref().unwrap();
+        assert_eq!(p.len(), inv.unknowns());
+        assert!(p.iter().all(|&v| v.is_finite() && v > 0.0));
+        // Pushed hard, vs in the fluid stays 0 and the model stays valid.
+        let mut x = vec![0.5; inv.unknowns()];
+        inv.project(&mut x);
+        let m = inv.model_at(&x);
+        assert!(m.vs[..16 * 16 * 3].iter().all(|&v| v == 0.0));
+        m.validate().unwrap();
+    }
+
+    /// λ ≥ 0 survives projection in every case: vp inverted alone (vp held above √2 vs), and
+    /// vs listed before vp (vs capped at the projected vp).
+    #[test]
+    fn projection_keeps_lambda_non_negative() {
+        let inv = setup(&survey(SOLID, r#"parameters = ["vp"]"#)).unwrap();
+        let mut x = vec![-0.4; inv.unknowns()];
+        inv.project(&mut x);
+        let m = inv.model_at(&x);
+        m.validate().unwrap();
+        let n = inv.free[0].1[0];
+        assert!(
+            (m.vp[n] as f64 - 2f64.sqrt() * 1300.0).abs() < 1e-2,
+            "{}",
+            m.vp[n]
+        );
+
+        let inv = setup(&survey(
+            SOLID,
+            "parameters = [\"vs\", \"vp\"]\nvp_range = [1500.0, 2100.0]",
+        ))
+        .unwrap();
+        let half = inv.unknowns() / 2;
+        let mut x: Vec<f64> = (0..inv.unknowns())
+            .map(|i| if i < half { 0.3 } else { 0.15 })
+            .collect();
+        inv.project(&mut x);
+        let m = inv.model_at(&x);
+        for &n in &inv.free[0].1 {
+            assert!(m.vp[n] <= 2100.0 + 1e-3);
+            assert!(2.0 * (m.vs[n] as f64).powi(2) <= (m.vp[n] as f64).powi(2) * (1.0 + 1e-6));
+        }
+    }
+
+    /// By default vs may fall to half the smallest non-zero vs, not to 0.
+    #[test]
+    fn vs_stays_above_half_its_smallest() {
+        let inv = setup(&survey(SOLID, r#"parameters = ["vs"]"#)).unwrap();
+        let mut x = vec![-0.9; inv.unknowns()];
+        inv.project(&mut x);
+        let m = inv.model_at(&x);
+        let n = inv.free[0].1[0];
+        assert!((m.vs[n] - 650.0).abs() < 1e-3, "{}", m.vs[n]);
+    }
+
+    /// Ranges the time step can't run, empty ranges and a start outside them are refused
+    /// before any wave is computed.
+    #[test]
+    fn refuses_impossible_bounds() {
+        let e = |extra: &str| format!("{:#}", setup(&survey(SOLID, extra)).err().unwrap());
+        let msg = e("vp_range = [6000.0, 9000.0]");
+        assert!(msg.contains("time step allows"), "{msg}");
+        let msg = e("vs_range = [1000.0, 900.0]");
+        assert!(msg.contains("empty"), "{msg}");
+        let msg = e("rho_range = [2500.0, 3000.0]\nparameters = [\"rho\"]");
+        assert!(msg.contains("outside"), "{msg}");
+        let lambda = "[[model.layer]]\ntop = 0.0\nvp = 2000.0\nvs = 1500.0\nrho = 2000.0";
+        let msg = format!("{:#}", setup(&survey(lambda, "")).err().unwrap());
+        assert!(msg.contains("λ < 0"), "{msg}");
+    }
+
+    /// Observed traces must have the receivers' shape and sampling; a one-source survey reads
+    /// shot-000/ if run --shots wrote it, the directory itself if not.
+    #[test]
+    fn reads_and_checks_the_observed_traces() {
+        let cfg = survey(SOLID, "iterations = 1");
+        let good = recorded(&cfg);
+        let settings = cfg.inversion.clone().unwrap();
+        let try_with = |o: Observed| {
+            Inversion::new(&cfg, start(&cfg), vec![o], &settings)
+                .err()
+                .map(|e| format!("{e:#}"))
+        };
+        assert_eq!(try_with(good.clone()), None);
+        let samples = good.traces[0].len() / 2;
+        let transposed = Observed {
+            shapes: Some(vec![vec![samples, 2]; 2]),
+            ..good.clone()
+        };
+        assert!(try_with(transposed).unwrap().contains("shape"));
+        let shifted = Observed {
+            times: good
+                .times
+                .as_ref()
+                .map(|t| t.iter().map(|&t| 1.5 * t).collect()),
+            ..good.clone()
+        };
+        assert!(
+            try_with(shifted)
+                .unwrap()
+                .contains("sampled at other times")
+        );
+        let short = Observed::from(vec![good.traces[0][1..].to_vec(), good.traces[1].clone()]);
+        assert!(try_with(short).unwrap().contains("[time] dt"));
+
+        // Laid out as files.
+        let dir =
+            std::env::temp_dir().join(format!("vibe-rations-observed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let write = |into: &Path| {
+            std::fs::create_dir_all(into).unwrap();
+            for (c, t) in cfg.receivers.components.iter().zip(&good.traces) {
+                npy::write(&into.join(format!("{}.npy", c.name())), &[2, samples], t).unwrap();
+            }
+            let times = good.times.clone().unwrap();
+            npy::write(&into.join("time.npy"), &[times.len()], &times).unwrap();
+        };
+        let toml_dir = |cfg: &Config| {
+            let mut c = cfg.clone();
+            c.inversion.as_mut().unwrap().observed = dir.join("observed");
+            c
+        };
+        write(&dir.join("observed"));
+        Inversion::from_config(&toml_dir(&cfg), &dir).unwrap();
+        std::fs::remove_dir_all(dir.join("observed")).unwrap();
+        write(&dir.join("observed").join(shot_dir(0)));
+        Inversion::from_config(&toml_dir(&cfg), &dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

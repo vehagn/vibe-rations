@@ -77,16 +77,28 @@ pub fn l2_misfit(
     Ok((misfit, residuals))
 }
 
-/// Weights 1/‖d_obs,c‖² that make each component's misfit relative to its own energy, so
-/// that pressure and velocity count alike. A component that observed nothing gets 0; one that
-/// observed next to nothing (vy on a symmetry plane, say) gets a huge weight, and its noise
-/// as much say as the other components' signal, so leave such components out.
-pub fn balancing_weights(observed: &[Vec<f32>]) -> Vec<f64> {
-    observed
+/// Weights 1/‖d_obs,c‖² that make each recorded component's misfit relative to its own
+/// energy, so that pressure and velocity count alike. A velocity component that observed less
+/// than 10⁻⁴ of the loudest velocity component's energy (vy on a symmetry plane, say) is
+/// weighted as if it had that much, so its noise can't outweigh the others' signal; one that
+/// observed nothing at all gets 0. `components` names the traces, as the receivers do.
+pub fn balancing_weights(observed: &[Vec<f32>], components: &[Component]) -> Vec<f64> {
+    let energy: Vec<f64> = observed
         .iter()
-        .map(|o| {
-            let energy: f64 = o.iter().map(|&x| (x as f64).powi(2)).sum();
-            if energy > 0.0 { 1.0 / energy } else { 0.0 }
+        .map(|o| o.iter().map(|&x| (x as f64).powi(2)).sum())
+        .collect();
+    let velocity = |c: &Component| !matches!(c, Component::P);
+    let loudest = components
+        .iter()
+        .zip(&energy)
+        .filter(|(c, _)| velocity(c))
+        .fold(0.0f64, |m, (_, &e)| m.max(e));
+    components
+        .iter()
+        .zip(&energy)
+        .map(|(c, &e)| {
+            let floor = if velocity(c) { 1e-4 * loudest } else { 0.0 };
+            if e > 0.0 { 1.0 / e.max(floor) } else { 0.0 }
         })
         .collect()
 }
@@ -523,8 +535,14 @@ mod tests {
 
     #[test]
     fn balancing_weights_divide_by_the_observed_energy() {
-        let w = balancing_weights(&[vec![3.0, 4.0], vec![0.0; 2]]);
+        use Component::{P, Vx, Vy, Vz};
+        let w = balancing_weights(&[vec![3.0, 4.0], vec![0.0; 2]], &[Vx, Vz]);
         assert_eq!(w, vec![1.0 / 25.0, 0.0]);
+        // A nearly silent velocity component is weighed as if it had 10⁻⁴ of the loudest's
+        // energy; pressure, in other units, isn't compared with velocity.
+        let w = balancing_weights(&[vec![100.0], vec![0.1], vec![0.5]], &[Vx, Vy, P]);
+        assert_eq!(w, vec![1e-4, 1.0, 4.0]);
+        let _ = Vz;
     }
 
     /// The replay is exact, so how often the run keeps checkpoints doesn't change the

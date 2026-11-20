@@ -459,11 +459,11 @@ pub struct InversionConfig {
     /// Model changes and gradient changes L-BFGS remembers.
     #[serde(default = "default_memory")]
     pub memory: usize,
-    /// The largest relative change of any value in the first iteration (and after a
-    /// restart), which sets the scale L-BFGS starts from.
+    /// The largest change of any value in the first iteration (and after a restart), as a
+    /// fraction of its starting value: the scale L-BFGS starts from.
     #[serde(default = "default_initial_step")]
     pub initial_step: f64,
-    /// No value changes by more than this fraction in one iteration.
+    /// No value changes by more than this fraction of its starting value in one iteration.
     #[serde(default = "default_max_step")]
     pub max_step: f64,
     /// Weigh each component of each shot by 1/(its observed energy), so pressure and
@@ -480,9 +480,10 @@ pub struct InversionConfig {
     /// The fraction of the largest energy added to every node's before dividing by it.
     #[serde(default = "default_water_level")]
     pub water_level: f64,
-    /// Bounds on the inverted values; by default half the smallest and twice the largest of
-    /// the starting model's, and for vp no faster than the time step allows. vs also stays
-    /// below vp/√2 (λ ≥ 0).
+    /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice
+    /// the largest of the starting model's, and for vp no faster than the time step allows.
+    /// λ ≥ 0 too: vs stays below vp/√2, or vp above √2 vs where vs isn't inverted. The
+    /// starting model must lie within them.
     pub vp_range: Option<[f64; 2]>,
     pub vs_range: Option<[f64; 2]>,
     pub rho_range: Option<[f64; 2]>,

@@ -107,6 +107,8 @@ fn run() -> Result<()> {
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
             if shots {
+                // Each shot sets up its own; this one would only hold memory.
+                drop(sim);
                 let base = config.parent().unwrap_or(Path::new("."));
                 for s in 0..cfg.sources.len() {
                     let mut shot = Simulation::new(&cfg.shot(s)?, base)?;
@@ -211,7 +213,7 @@ fn run() -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let weights = if balance {
-                balancing_weights(&data)
+                balancing_weights(&data, &r.components)
             } else {
                 vec![1.0; data.len()]
             };

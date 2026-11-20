@@ -712,8 +712,9 @@ fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) 
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
-    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers.traces;
-    let weights = balancing_weights(&observed);
+    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers;
+    let weights = balancing_weights(&observed.traces, &observed.components);
+    let observed = observed.traces;
     let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
     let cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
     let base = std::path::Path::new(".");
@@ -803,7 +804,7 @@ fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) 
 #[test]
 fn an_inversion_finds_a_sphere() {
     use vibe_rations::config::Config;
-    use vibe_rations::inversion::Inversion;
+    use vibe_rations::inversion::{Inversion, Observed};
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
@@ -858,11 +859,11 @@ fn an_inversion_finds_a_sphere() {
                   vp = 2700.0\nvs = 1500.0\nrho = 2100.0";
     let base = std::path::Path::new(".");
     let truth = Config::from_toml(&model(sphere)).unwrap();
-    let observed: Vec<Vec<Vec<f32>>> = (0..truth.sources.len())
+    let observed: Vec<Observed> = (0..truth.sources.len())
         .map(|s| {
             let mut sim = Simulation::new(&truth.shot(s).unwrap(), base).unwrap();
             sim.run(None, false).unwrap();
-            sim.receivers.traces
+            sim.receivers.traces.into()
         })
         .collect();
     let true_model =
