@@ -24,6 +24,7 @@ opens a shell there instead.
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
 | `just memory <config>` | The memory a run needs, part by part, without building it | instant |
+| `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -40,12 +41,13 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 | `conventional-commit` | Committing work |
 | `fwi-literature` | Looking up the theory: adjoints, kernels, misfits, PML, free surface; citing it |
 | `web-app` | Changing, building, testing or deploying the browser front end |
+| `remote-runs` | Runs on another machine: `serve`, `run --remote`, the page's server mode, the solver image |
 
 ## Map
 
 ```
 src/
-  main.rs        the CLI: run | check
+  main.rs        the CLI: run [--remote] | check | memory | serve | remote
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
@@ -56,26 +58,32 @@ src/
   source.rs      wavelets, moment tensors, how sources enter the grid
   tdt.rs         the time-dispersion transform: pre-warped sources, un-warped traces
   receiver.rs    recording traces through PointOps
+  server.rs      `vibe-rations serve`: runs kept for clients that come and go, an HTTP API
+  remote.rs      its client: submit, follow, fetch; an SSH tunnel through the system's ssh
+  view.rs        sections and gathers of a live run (the browser and the server share it)
   snapshot.rs    sections and volumes during a run
   simulation.rs  a run set up from a configuration; outputs
   image.rs, npy.rs
 web/
   src/lib.rs     wasm-bindgen wrapper (Simulator) over a plain-Rust View with native tests
-  www/           the page: index.html, app.js (UI), worker.js (runs the solver), style.css
+  www/           the page: index.html, app.js (UI), worker.js (the solver here),
+                 remote.js (the server's solver, same messages), style.css
   build.sh       builds web/dist: single-threaded and threaded WebAssembly, page, examples
   sws.toml       static-web-server settings, with the cross-origin isolation headers
-  Containerfile  the hosted image
+  Containerfile  the hosted page's image
+Containerfile    the solver's image: `vibe-rations serve` with the page, for remote machines
 docs/
   references.bib every work cited anywhere in the repository
   research-log.md experiments, results and decisions, for the paper
   analysis/      von Neumann analysis (pure Python): dispersion, time-space, time dispersion
 deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
-.github/workflows/  ci.yaml (`just ci`), web.yaml (builds and pushes the image)
+.github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
   common/        closed-form solutions and setup helpers the two share
   cli.rs         the binary, run as a process
+  remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
 examples/        annotated configurations
 ```
@@ -109,6 +117,21 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Remote runs** (`vibe-rations serve`, `run --remote`, `remote`; README, "Remote runs").
+  The server keeps runs by id in its data directory and steps them in one scheduler thread,
+  a chunk of about 0.1 s at a time; request threads draw pictures between chunks under the
+  run's lock. It listens on localhost (0.0.0.0 inside its container, published on the host's
+  127.0.0.1): SSH is the security, so never publish it more widely without adding
+  authentication. The page and the CLI share the API; `web/www/remote.js` answers the
+  worker's messages so `app.js` drives either solver the same way. A run the page set up but
+  never ran is deleted when replaced. After a server restart, finished runs keep their
+  results and set-up ones are interrupted (no checkpoints yet). The dev container has no SSH
+  agent, so its CLI reaches remotes through a tunnel opened on the host
+  (`http://host.docker.internal:8089`); `--remote user@host` itself (the CLI's own tunnel) is
+  untested against a real remote. `tests/remote.rs` checks remote traces match local ones bit
+  for bit. In the built-in browser, open local servers through `.claude/launch.json` entries
+  (`solver`), not `navigate`: on other origins it blocks nested workers, which threaded
+  WebAssembly needs (the `remote-runs` skill).
 - **Memory is counted before it is allocated** (`memory::estimate`, `vibe-rations memory`).
   It shares `simulation::timing` with `Simulation::new`, takes the model's extremes from
   `Model::extremes` (layers, spheres, or `.npy` files streamed), and must stay exact:

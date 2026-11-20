@@ -8,7 +8,9 @@ description: Change, build, test or deploy the vibe-rations web app - the solver
 The visitor's browser does all the computing; the server only serves files. The solver runs
 in a module Web Worker (`web/www/worker.js`), which steps it in ~50 ms chunks and posts back
 ImageBitmaps of the section and the gather. The page (`app.js`) draws them with axes and
-handles the controls.
+handles the controls. Served by `vibe-rations serve` instead (the `remote-runs` skill), the
+page can also use that server's solver through `remote.js`, which answers the same messages;
+the pictures come from `src/view.rs` either way.
 
 ```
 web/src/lib.rs   Simulator (wasm-bindgen) → View (plain Rust; unit-tested natively)

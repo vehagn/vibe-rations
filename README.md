@@ -38,6 +38,7 @@ Then, in the container:
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
 | `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory") |
+| `just remote-up <host>`, `just tunnel <host>` | On the host: start the solver server on a remote machine, and reach it (see "Remote runs") |
 | `just run <config>` | Runs a simulation |
 | `just web` | Builds the web app into `web/dist` |
 
@@ -153,8 +154,65 @@ layers and spheres, or from its `.npy` files a piece at a time. A test checks th
 matches what a run allocates, byte for byte.
 
 `run` and `check` refuse a run that needs more than the machine has available (Linux's
-`MemAvailable`) before allocating anything. The web app shows the estimate under the
-configuration as it is edited, and refuses runs above the 4 GiB a browser gives WebAssembly.
+`MemAvailable`, or a container's memory limit) before allocating anything. The web app shows
+the estimate under the configuration as it is edited, and refuses runs above the 4 GiB a
+browser gives WebAssembly; the server below has no such limit.
+
+## Remote runs
+
+A machine with more cores and memory can do the computing for both the command line and the
+web page. It runs `vibe-rations serve`, which keeps runs going whether or not anyone is
+connected, so a long run survives a dropped connection and can be picked up again. The server
+listens on that machine's localhost only, and SSH, with your keys and `~/.ssh/config`, does
+the authentication and encryption.
+
+On the remote machine, which needs Docker or Podman (`ENGINE=podman`), from your machine:
+
+```bash
+just remote-up me@bigbox
+```
+
+That starts the image `ghcr.io/vehagn/vibe-rations` there, with the runs and their results
+in a volume. `just remote-update me@bigbox` replaces it with the latest image (runs in
+progress are lost; results are kept). Without `just`, it is one `docker run`:
+
+```bash
+ssh me@bigbox docker run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v vibe-rations:/data ghcr.io/vehagn/vibe-rations:main
+```
+
+**Command line.** `--remote` sends the configuration (and any `.npy` model files) over an SSH
+tunnel the CLI opens itself, follows the run, and writes its results locally as a local run
+would:
+
+```bash
+vibe-rations run examples/layered.toml --remote me@bigbox
+vibe-rations remote me@bigbox list
+vibe-rations remote me@bigbox attach layered-1795184607-3f2a
+vibe-rations remote me@bigbox cancel layered-1795184607-3f2a
+```
+
+If the CLI stops, the run carries on; `attach` follows it again and fetches its results. The
+destination can be anything `ssh` accepts, or a URL (`--remote http://localhost:8089`) for a
+tunnel opened another way. In the dev container, which has no SSH keys, open the tunnel on the
+host (`just tunnel me@bigbox`) and use `--remote http://host.docker.internal:8089`.
+
+**Web page.** The server also serves the page:
+
+```bash
+just tunnel me@bigbox     # ssh -N -L 8089:127.0.0.1:8088 me@bigbox
+```
+
+and open http://localhost:8089. **Compute** chooses between the server and this browser;
+**Runs** lists the server's runs to attach to, including ones started from the command line.
+A run started from the page keeps going when the page is closed. The memory line shows what
+the server has available.
+
+**The API** is plain HTTP and JSON (listed in `src/server.rs`): create a run from a
+configuration, upload its model files, start, pause, resume or delete it, read its status,
+draw sections and gathers as PNG, and fetch its traces and outputs. Each run keeps its
+configuration, model files, status and outputs in a directory of its own under the server's
+`--data`; after a restart, finished runs' results are still there, and runs that were in
+progress are marked interrupted.
 
 ## Numerics
 
