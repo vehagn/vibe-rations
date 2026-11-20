@@ -865,6 +865,74 @@ $10^{-5}$ off at one step, scan $h$ before suspecting the gradient.
 
 **Reproduce:** `just physics inversion`; `just unit counts_what_an_inversion_allocates`.
 
+## 2026-11-20 — Rebuilding the forward wavefield backwards
+
+**Question.** A gradient run replays the forward wavefield from checkpoints and keeps a
+segment's velocities, about $42\sqrt N$ bytes per padded node: 3.64 GiB for
+`examples/layered.toml`, 25 times its forward run. The interior scheme is reversible, so the
+field could instead be rebuilt backwards from the final state and values saved around the
+absorbing layers [@dussaud2008; @aaker2020; @nguyen2015 compare such schemes in 2D]. How much
+does that save, where does it lose, and how far does single precision let it drift? The
+alternative it competes with is checkpointing [@griewank2000; @symes2007].
+
+**Step 1: a step back** (`Solver::step_back_with`, `Band`). A forward step is: velocity
+update, forces, velocity mirror, stress update (plane-stress moduli and $\sigma_{zz} = 0$ on
+the free surface), moments, sponge, stress mirror. The step back undoes these in reverse
+order: moments, the stress update, then the band's stresses and the stress mirror, forces,
+the velocity update, then the band's velocities and the velocity mirror. Each increment is
+computed from the same values as forward and subtracted: the kernels take a sign of $\pm 1$,
+which leaves the forward step bit for bit as it was, and a source withdraws exactly what it
+added. The CPML and the sponge act only in the layers, which the step back doesn't rebuild,
+and $\sigma_{zz}$ on the surface was zero before the step as after it. So in exact
+arithmetic the region outside the layers, $I$, comes back exactly, given what the stencils
+read from outside it: values within $L$ nodes of $I$ along an axis ($L$ the stencil's
+half-length). The band keeps the velocities on that whole shell, edges included, and each
+stress only on the faces across which the velocity update differentiates it (6 values per face
+node). The velocities on the edges are there for the gradient: the strain rates at positions
+just outside $I$ that feed its first nodes (the shear moduli's harmonic means, the density's
+arithmetic means) read velocities along the faces. Above a free surface the mirrors rebuild
+everything. Records are taken before each forward step, so the step back from $n + 1$ to $n$
+reads the record of state $n$. Stepping back 80 steps from the end of a run with a force and an
+explosion on a $30^3$ grid, 5-node layers, retraced $I$ to $1.5 \times 10^{-6}$ of each array's
+peak, with a free surface and with layers all round alike
+(`simulation::tests::steps_back_inside_the_band`).
+
+**Step 2: in the gradient** (`gradient_with`, `Strategy::Reconstruct`). The forward field is
+needed in reverse order: the stiffness term pairs $\tilde\varepsilon^{n+1}$ with the strain
+rate of $v^{n+\frac12}$, the density term uses $v^{n+\frac12} - v^{n-\frac12}$. So each
+backward step copies $v^{n+\frac12}$, steps back, and correlates with the copy and the rebuilt
+$v^{n-\frac12}$. Saving the band for the whole run is one way; the other, which the memory
+below argues for, saves it for segments of $k$ steps, replaying each segment but the last
+from a checkpoint at its start (the last is saved on the way forward) and rebuilding it from
+its end, which the replay reaches bit for bit. The error then accumulates over a segment, not
+the run, at the cost of one more pass of the solver for all but the last segment. On the
+small run of the gradient's unit tests (21 steps, two layers, a force; free surface; 4-node
+layers) the rebuilt gradient at every node of $I$ matches the replay's to
+$7.4 \times 10^{-8}$ (segments of 1 step), $3.5 \times 10^{-7}$ (7), $5.7 \times 10^{-7}$ (the
+default) and $4.0 \times 10^{-6}$ (the whole run) of its largest value
+(`gradient::tests::rebuilt_gradients_match_the_replay`). Inside the layers the rebuilt field,
+and the gradient, mean nothing; the inversion only updates nodes in $I$.
+
+**Step 3: memory.** A band record holds $3\,|\text{shell}| + 3\,\Sigma\,\text{faces}$ values,
+about $6L$ per node of $I$'s surface; a checkpoint 9 arrays and the CPML memory. With
+segments of $k$ steps the reconstruction holds $\lceil N/k\rceil - 1$ checkpoints and $k$
+records, least at $k \approx \sqrt{N C / B}$ (`reconstruction_segment`); the plan counts it
+exactly (`counts_what_a_rebuilding_gradient_run_allocates`). The gradient's peak:
+
+| Grid | Checkpoints | Rebuilt, segments | Rebuilt, whole run |
+|---|---|---|---|
+| `examples/layered.toml`, $129 \times 129 \times 81$, 1,611 steps | 3.64 GiB | 1.68 GiB ($k = 202$) | 5.67 GiB |
+| the same on $1001 \times 1001 \times 401$ | 798 GiB | 245 GiB ($k = 323$) | 466 GiB |
+
+A record of `layered.toml` is 862,968 values (3.3 MiB), against 60 MiB for a checkpoint and
+19 MiB for a step of the replayed segment. Saving the band for the whole run loses on the
+small grid, where its surface is large next to its volume ($B N$ grows as $N$, the
+checkpoints as $\sqrt N$), and wins on the large one; segments win on both, by 54% and 69%,
+for one more pass.
+
+**Decision so far.** Offer it as `gradient --reconstruct [--segment N]` beside the default,
+checkpoints, which stay the default (also in the inversion) until the drift is measured.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
