@@ -1,0 +1,31 @@
+# The web app: the solver compiled to WebAssembly, served by static-web-server. The browser
+# does all the computing; the server only hands out files.
+#
+#   docker build --file web/Containerfile --tag vibe-rations-web .
+#
+# Build from the repository root. The build stage runs on the build machine's platform (the
+# WebAssembly is the same everywhere); only the small serving stage is per platform.
+
+FROM --platform=$BUILDPLATFORM docker.io/library/rust:1.99.1-trixie AS build
+
+# Must match the wasm-bindgen crate version in web/Cargo.toml exactly.
+ARG WASM_BINDGEN_VERSION=0.2.130
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update; \
+    apt-get install -y --no-install-recommends binaryen; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup target add wasm32-unknown-unknown; \
+    cargo install --locked "wasm-bindgen-cli@${WASM_BINDGEN_VERSION}"
+
+WORKDIR /src
+COPY . .
+RUN web/build.sh
+
+FROM ghcr.io/static-web-server/static-web-server:2.44.3
+
+COPY --from=build /src/web/dist /public
+COPY web/sws.toml /etc/sws.toml
+ENV SERVER_CONFIG_FILE=/etc/sws.toml
+USER 65534:65534
+EXPOSE 8080

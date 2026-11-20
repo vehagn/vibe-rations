@@ -1,0 +1,50 @@
+# Static files only: the visitors' browsers do the computing, so this needs next to nothing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vibe-rations-web
+  labels:
+    app: vibe-rations-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vibe-rations-web
+  template:
+    metadata:
+      labels:
+        app: vibe-rations-web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: ghcr.io/vehagn/vibe-rations-web
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 500m
+              memory: 64Mi

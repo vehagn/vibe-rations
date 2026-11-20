@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vibe-rations-web
+spec:
+  selector:
+    app: vibe-rations-web
+  ports:
+    - name: web
+      port: 80
+      targetPort: http
