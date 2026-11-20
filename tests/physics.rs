@@ -10,8 +10,9 @@ use common::*;
 use vibe_rations::receiver::Component;
 use vibe_rations::source::Wavelet;
 
-/// At the default: 0.002–0.006%. Opting out of the time-dispersion transform, at C = 0.3:
-/// 0.07–0.19%.
+/// At the default: 0.005–0.007%; with Taylor's coefficients 0.002–0.006%, as they are near
+/// exact for waves this long (8 points per shortest P wavelength). Opting out of the
+/// time-dispersion transform, at C = 0.3: 0.07–0.19%.
 #[test]
 fn an_explosion_matches_the_full_space_solution() {
     let source = [400.0, 400.0, 400.0];
@@ -64,10 +65,18 @@ fn an_explosion_matches_the_full_space_solution() {
     }
 }
 
-/// At the default, with leapfrog's time error removed and C = 0.85: 0.001–0.008%.
+/// At the default, with leapfrog's time error removed and C = 0.85: 0.001–0.005%.
 #[test]
 fn a_point_force_matches_stokes_solution() {
     for (what, e) in point_force_misfits("") {
+        assert!(e < 2e-4, "misfit {e} in {what}");
+    }
+}
+
+/// With Taylor's coefficients instead of optimised ones: 0.001–0.008%.
+#[test]
+fn a_point_force_matches_stokes_solution_with_taylor_coefficients() {
+    for (what, e) in point_force_misfits("[scheme]\ncoefficients = \"taylor\"") {
         assert!(e < 2e-4, "misfit {e} in {what}");
     }
 }
@@ -132,10 +141,10 @@ fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
             let what = format!("{} at offset {d:?}", c.name());
             println!(
                 "force{}, {what}: misfit {:.3}%",
-                if scheme.is_empty() {
-                    ""
-                } else {
-                    ", without the transform"
+                match scheme {
+                    "" => "",
+                    s if s.contains("taylor") => ", Taylor's coefficients",
+                    _ => ", without the transform",
                 },
                 100.0 * e
             );
@@ -148,7 +157,7 @@ fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
 /// At the epicentre a P wave meets the free surface head-on, and the surface moves twice as
 /// much as the same wave would in a full space.
 ///
-/// The misfit is 2.53% at the default (2.40% opting out of the time-dispersion transform, at
+/// The misfit is 2.52% at the default (2.53% with Taylor's coefficients, 2.40% opting out of the time-dispersion transform, at
 /// C = 0.3, where the time error partly cancels the free surface's). Most of it is the
 /// reference: doubling is exact only for a plane wave. On finer grids the misfit tends to
 /// about 2.2% (`free_surface_on_finer_grids` in `just accuracy`), so the scheme's own share at

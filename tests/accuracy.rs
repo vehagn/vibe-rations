@@ -37,6 +37,17 @@ fn config(wave: &Wave, h: f64, order: usize, courant: f64) -> String {
 }
 
 fn config_with(wave: &Wave, h: f64, order: usize, courant: f64, transform: bool) -> String {
+    config_full(wave, h, order, courant, transform, "taylor")
+}
+
+fn config_full(
+    wave: &Wave,
+    h: f64,
+    order: usize,
+    courant: f64,
+    transform: bool,
+    coefficients: &str,
+) -> String {
     let pml = 12;
     let pad = (pml + 4) as f64 * h;
     let x0 = pad;
@@ -66,6 +77,7 @@ fn config_with(wave: &Wave, h: f64, order: usize, courant: f64, transform: bool)
         [scheme]
         order = {order}
         remove_time_dispersion = {transform}
+        coefficients = "{coefficients}"
         [[model.layer]]
         top = 0.0
         vp = {VP}
@@ -251,6 +263,7 @@ fn free_surface_on_finer_grids() {
                 [scheme]
                 order = {order}
                 remove_time_dispersion = {transform}
+                coefficients = "taylor"
                 [[model.layer]]
                 top = 0.0
                 vp = {VP}
@@ -280,6 +293,41 @@ fn free_surface_on_finer_grids() {
                 "{h:5}  {order:5}  {transform:9}  {:6.2}  {speed:7.0}",
                 100.0 * e
             );
+        }
+    }
+}
+
+/// Optimised coefficients (`coefficients = "optimised"`) against Taylor's, both with the time
+/// error removed at C = 0.85, down to three points per shortest wavelength. The spacings divide
+/// the distances, so the receivers sit on nodes.
+#[test]
+#[ignore = "a study, not a check: run with `just accuracy`"]
+fn optimised_coefficients() {
+    for (wave, h, label) in [
+        (Wave::P, 300.0 / 11.0, "P, 2.9 points per wavelength"),
+        (Wave::P, 300.0 / 13.0, "P, 3.5 points per wavelength"),
+        (Wave::P, 20.0, "P, 4.0 points per wavelength"),
+        (Wave::S, 300.0 / 13.0, "S, 3.0 points per wavelength"),
+        (Wave::S, 20.0, "S, 3.5 points per wavelength"),
+        (Wave::S, 300.0 / 17.0, "S, 3.9 points per wavelength"),
+        (Wave::S, 15.0, "S, 4.6 points per wavelength"),
+    ] {
+        println!("\n{label}, time dispersion removed: L2 misfit (%) at {DISTANCES:?} m");
+        println!("{:24} {:>32}  Mcell/s", "order, coefficients", "");
+        for order in [8, 12, 16] {
+            for coefficients in ["taylor", "optimised"] {
+                let (sim, speed) =
+                    simulate_timed(&config_full(&wave, h, order, 0.85, true, coefficients));
+                let cells: Vec<String> = misfits(&wave, &sim, false)
+                    .iter()
+                    .map(|x| format!("{:7.2}", 100.0 * x))
+                    .collect();
+                println!(
+                    "{:24} {}  {speed:7.0}",
+                    format!("{order:2}, {coefficients}"),
+                    cells.join(" ")
+                );
+            }
         }
     }
 }

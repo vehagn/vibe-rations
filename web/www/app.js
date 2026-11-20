@@ -393,6 +393,7 @@ function showInfo(info) {
     [
       "Accuracy",
       `${info.points_per_wavelength.toFixed(1)} points per wavelength, order ${info.order}` +
+        (info.band ? ", optimised coefficients" : "") +
         (info.remove_time_dispersion ? ", time dispersion removed" : ""),
     ],
     ["Boundary", `${info.pml_width}-node layers${info.free_surface ? ", free surface" : ""}`],

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::grid::Grid;
 use crate::receiver::Component;
@@ -166,6 +166,14 @@ pub struct SchemeConfig {
     /// last step. `false` records what leapfrog computes, at a small time step.
     #[serde(default = "default_true")]
     pub remove_time_dispersion: bool,
+    /// The derivative coefficients: optimised for every wavenumber the run's grid and wavelets
+    /// need (`Stencil::optimised`, the default), or Taylor's, exact for the longest waves.
+    #[serde(default)]
+    pub coefficients: Coefficients,
+    /// Optimise for this many grid points per shortest wavelength instead of the run's own,
+    /// which depends on the model's slowest wave. An inversion should fix it, so that the
+    /// operator stays the same while the model changes.
+    pub optimised_for: Option<f64>,
 }
 
 impl Default for SchemeConfig {
@@ -173,8 +181,23 @@ impl Default for SchemeConfig {
         Self {
             order: default_order(),
             remove_time_dispersion: true,
+            coefficients: Coefficients::default(),
+            optimised_for: None,
         }
     }
+}
+
+/// How the stencil's coefficients are chosen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Coefficients {
+    /// Exact for polynomials up to the order: best for the longest waves.
+    Taylor,
+    /// Least phase error per node over every direction and every wavenumber up to the run's
+    /// shortest wavelength, in the manner of Holberg (1987), with leapfrog's time error
+    /// assumed removed.
+    #[default]
+    Optimised,
 }
 
 fn default_order() -> usize {
@@ -467,6 +490,8 @@ mod tests {
         assert_eq!(c.scheme.order, 8);
         assert_eq!(c.time.courant, None);
         assert!(c.scheme.remove_time_dispersion);
+        assert_eq!(c.scheme.coefficients, Coefficients::Optimised);
+        assert_eq!(c.scheme.optimised_for, None);
         assert_eq!(default_courant(8, false), 0.3);
         assert_eq!(default_courant(4, false), 0.85);
         assert_eq!(default_courant(8, true), 0.85);

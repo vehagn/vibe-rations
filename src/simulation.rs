@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::config::{Config, Format, PlaneKind, default_courant};
+use crate::config::{Coefficients, Config, Format, PlaneKind, default_courant};
 use crate::cpml::PmlSettings;
 use crate::fd::Stencil;
 use crate::grid::Grid;
@@ -25,12 +25,14 @@ use crate::tdt::Warp;
 
 /// Fewer grid points than this per shortest wavelength and numerical dispersion shows: a few
 /// percent of misfit after ten wavelengths at the default time step (README, "Accuracy").
-pub fn min_points_per_wavelength(order: usize) -> f64 {
-    match order {
-        2 => 10.0,
-        4 => 5.0,
-        6 => 4.5,
-        _ => 4.0,
+pub fn min_points_per_wavelength(order: usize, coefficients: Coefficients) -> f64 {
+    match (order, coefficients) {
+        (2, _) => 10.0,
+        (4, _) => 5.0,
+        (6, _) => 4.5,
+        (_, Coefficients::Taylor) => 4.0,
+        (8, Coefficients::Optimised) => 3.5,
+        (_, Coefficients::Optimised) => 3.0,
     }
 }
 
@@ -54,6 +56,11 @@ pub struct Simulation {
     /// Whether the traces have been un-warped ([`Simulation::finish`]).
     finished: bool,
 }
+
+/// The largest phase error per node optimised coefficients may have at the edge of their
+/// band (`Stencil::optimised`). 1e-3 let waves inside the band, P waves in particular, do
+/// worse than with Taylor's coefficients (research log).
+pub const PHASE_TOLERANCE: f64 = 1e-4;
 
 /// The time-dispersion transforms keep frequencies up to this multiple of the sources' highest
 /// (2.5 f0): a Ricker wavelet's spectrum there is 1e-9 of its peak.
@@ -81,6 +88,10 @@ pub struct RunInfo {
     pub order: usize,
     /// Whether leapfrog's time error is removed from the traces (crate::tdt).
     pub remove_time_dispersion: bool,
+    /// How the derivative coefficients were chosen, and for optimised ones the largest k·h
+    /// they were designed for.
+    pub coefficients: Coefficients,
+    pub band: Option<f64>,
     pub memory_bytes: usize,
     pub sources: Vec<SourceInfo>,
     pub receivers: usize,
@@ -104,8 +115,8 @@ pub struct SourceInfo {
 impl Simulation {
     /// Sets up a run; `base` is the directory relative paths in the configuration start from.
     pub fn new(cfg: &Config, base: &Path) -> Result<Self> {
-        let stencil = Stencil::taylor(cfg.scheme.order)?;
-        let grid = cfg.grid.grid()?.with_halo(stencil.half_length());
+        let taylor = Stencil::taylor(cfg.scheme.order)?;
+        let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
         let model = Model::from_config(grid, &cfg.model, base)?;
         let mut warnings = Vec::new();
 
@@ -126,6 +137,28 @@ impl Simulation {
             .iter()
             .map(|w| w.max_frequency())
             .fold(0.0, f64::max);
+
+        let slowest = model.slowest_wave();
+        let h_max = grid.h.iter().copied().fold(0.0, f64::max);
+        let ppw = slowest / f_max / h_max;
+        let stencil = match cfg.scheme.coefficients {
+            Coefficients::Taylor => taylor,
+            // The grid can't hold waves shorter than two nodes anyway.
+            Coefficients::Optimised => {
+                if let Some(p) = cfg.scheme.optimised_for {
+                    ensure!(
+                        p > 2.0,
+                        "optimised_for must be more than 2 points per wavelength, not {p}"
+                    );
+                }
+                let design = cfg.scheme.optimised_for.unwrap_or(ppw);
+                Stencil::optimised(
+                    cfg.scheme.order,
+                    (2.0 * PI / design).min(0.9 * PI),
+                    PHASE_TOLERANCE,
+                )?
+            }
+        };
 
         let [_, vp_max] = model.vp_range();
         let dt_stable = stable_dt(&grid, vp_max, &stencil);
@@ -149,10 +182,7 @@ impl Simulation {
         ensure!(cfg.time.duration > 0.0, "duration must be positive");
         let steps = (cfg.time.duration / dt).ceil() as usize;
 
-        let slowest = model.slowest_wave();
-        let h_max = grid.h.iter().copied().fold(0.0, f64::max);
-        let ppw = slowest / f_max / h_max;
-        let min_ppw = min_points_per_wavelength(cfg.scheme.order);
+        let min_ppw = min_points_per_wavelength(cfg.scheme.order, cfg.scheme.coefficients);
         if ppw < min_ppw {
             warnings.push(format!(
                 "only {ppw:.1} grid points per shortest wavelength ({slowest} m/s at {f_max:.1} Hz); \
@@ -296,6 +326,8 @@ impl Simulation {
             free_surface: b.free_surface,
             order: cfg.scheme.order,
             remove_time_dispersion: cfg.scheme.remove_time_dispersion,
+            coefficients: cfg.scheme.coefficients,
+            band: solver.stencil.band(),
             memory_bytes: solver.memory_bytes(),
             sources: source_info,
             receivers: receivers.nodes.len(),
@@ -532,11 +564,15 @@ impl RunInfo {
         );
         let _ = writeln!(
             s,
-            "accuracy  {:.1} points per shortest wavelength ({:.0} m/s at {:.1} Hz), order-{} stencils{}",
+            "accuracy  {:.1} points per shortest wavelength ({:.0} m/s at {:.1} Hz), order-{} stencils{}{}",
             self.points_per_wavelength,
             self.slowest_wave,
             self.max_frequency,
             self.order,
+            match self.band {
+                Some(b) => format!(" optimised up to k·h = {b:.2}"),
+                None => String::new(),
+            },
             if self.remove_time_dispersion {
                 ", time dispersion removed from the traces"
             } else {
@@ -658,12 +694,33 @@ mod tests {
         assert!((fourth.info.dt - 0.85 * fourth.info.dt_stable).abs() < 1e-15);
         // A grid fine enough for eighth order is too coarse for second.
         let ppw = i.points_per_wavelength;
-        assert!(ppw >= min_points_per_wavelength(8) && ppw < min_points_per_wavelength(2));
+        assert!(
+            ppw >= min_points_per_wavelength(8, Coefficients::Taylor)
+                && ppw < min_points_per_wavelength(2, Coefficients::Taylor)
+        );
         let second = setup(&format!("{BASE}\n[scheme]\norder = 2")).unwrap();
         assert_eq!(second.info.warnings.len(), 1, "{:?}", second.info.warnings);
         let t = sim.sample_times();
         assert!((t[0] - 0.5 * i.dt).abs() < 1e-15);
         assert!((t[1] - t[0] - i.dt).abs() < 1e-15);
+    }
+
+    /// Optimised coefficients, the default, are designed for the run's shortest wavelength
+    /// unless told otherwise, and their larger Σ|cₙ| shortens the time step.
+    #[test]
+    fn optimises_coefficients_for_the_grid() {
+        let taylor = setup(&format!("{BASE}\n[scheme]\ncoefficients = \"taylor\"")).unwrap();
+        assert_eq!(taylor.info.band, None);
+        let sim = setup(BASE).unwrap();
+        let band = sim.info.band.expect("a band");
+        assert!(band <= 2.0 * PI / sim.info.points_per_wavelength + 1e-12);
+        assert_eq!(sim.info.coefficients, Coefficients::Optimised);
+        assert!(sim.info.dt_stable < taylor.info.dt_stable);
+        assert_ne!(sim.solver.stencil, taylor.solver.stencil);
+        assert!(sim.info.summary().contains("optimised up to"));
+        let fixed = setup(&format!("{BASE}\n[scheme]\noptimised_for = 6.0")).unwrap();
+        assert!((fixed.info.band.unwrap() - 2.0 * PI / 6.0).abs() < 1e-12);
+        assert!(setup(&format!("{BASE}\n[scheme]\noptimised_for = 1.5")).is_err());
     }
 
     #[test]
