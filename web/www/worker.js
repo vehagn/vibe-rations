@@ -2,9 +2,13 @@
 // it steps the simulation in chunks of about CHUNK_MS and sends back a picture of the section
 // and of the gather after each chunk, so the page stays responsive and pausing is immediate.
 
-import init, { Simulator } from "./pkg/vibe_rations_web.js";
-
 const CHUNK_MS = 50;
+
+// Threads need SharedArrayBuffer, so a cross-origin-isolated page; otherwise one thread. The
+// page can ask for a number with ?threads=N.
+const asked = Number(new URL(self.location.href).searchParams.get("threads"));
+const threads = self.crossOriginIsolated ? Math.max(1, asked || navigator.hardwareConcurrency || 1) : 1;
+let Simulator;
 
 let sim = null;
 let running = false;
@@ -119,8 +123,11 @@ const handlers = {
 onmessage = ({ data }) => handlers[data.type]?.(data);
 
 try {
-  await init();
-  send({ type: "ready" });
+  const pkg = await import(threads > 1 ? "./pkg-threads/vibe_rations_web.js" : "./pkg/vibe_rations_web.js");
+  await pkg.default();
+  if (threads > 1) await pkg.initThreadPool(threads);
+  Simulator = pkg.Simulator;
+  send({ type: "ready", threads, isolated: self.crossOriginIsolated });
 } catch (e) {
   fail("init", e);
 }

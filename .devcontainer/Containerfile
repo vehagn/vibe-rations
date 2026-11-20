@@ -7,6 +7,9 @@ ARG USERNAME=dev
 ARG USER_UID=1000
 # Must match the wasm-bindgen crate version in web/Cargo.toml exactly.
 ARG WASM_BINDGEN_VERSION=0.2.130
+# For the web app's threaded build (a std rebuilt with atomics); WASM_THREADS_TOOLCHAIN in
+# web/build.sh must name the same one.
+ARG WASM_THREADS_TOOLCHAIN=nightly-2026-11-18
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -19,6 +22,8 @@ RUN apt-get update; \
 
 RUN rustup component add clippy rustfmt rust-src rust-analyzer; \
     rustup target add wasm32-unknown-unknown; \
+    rustup toolchain install "${WASM_THREADS_TOOLCHAIN}" --profile minimal \
+      --component rust-src --target wasm32-unknown-unknown; \
     cargo install --locked "wasm-bindgen-cli@${WASM_BINDGEN_VERSION}"; \
     rm -rf "${CARGO_HOME}/registry/"* "${CARGO_HOME}/git"
 

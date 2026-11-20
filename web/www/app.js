@@ -17,7 +17,11 @@ const state = {
   totalSteps: 0,
 };
 
-const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+// ?threads=N picks the solver's thread count, e.g. 1 to compare.
+const workerUrl = new URL("./worker.js", import.meta.url);
+const askedThreads = new URLSearchParams(location.search).get("threads");
+if (askedThreads) workerUrl.searchParams.set("threads", askedThreads);
+const worker = new Worker(workerUrl, { type: "module" });
 worker.onmessage = ({ data }) => on[data.type]?.(data);
 worker.onerror = (e) => showError(`The solver failed to start: ${e.message}`);
 
@@ -25,8 +29,9 @@ worker.onerror = (e) => showError(`The solver failed to start: ${e.message}`);
 let examplesLoaded;
 
 const on = {
-  async ready() {
+  async ready({ threads, isolated }) {
     await examplesLoaded;
+    $("#stat-threads").textContent = threads > 1 ? `${threads}` : isolated ? "1" : "1 (page not isolated)";
     setStatus("ready", "Solver ready");
     loadExample($("#example").value);
   },

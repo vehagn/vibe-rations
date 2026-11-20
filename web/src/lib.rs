@@ -22,6 +22,11 @@ extern "C" {
     fn error(message: &str);
 }
 
+/// Starts rayon's thread pool on Web Workers: `await initThreadPool(navigator.hardwareConcurrency)`
+/// once before running anything.
+#[cfg(feature = "threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 /// Sends panics to the console, which otherwise shows only "unreachable".
 #[wasm_bindgen(start)]
 pub fn start() {

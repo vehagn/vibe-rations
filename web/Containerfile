@@ -10,17 +10,22 @@ FROM --platform=$BUILDPLATFORM docker.io/library/rust:1.99.1-trixie AS build
 
 # Must match the wasm-bindgen crate version in web/Cargo.toml exactly.
 ARG WASM_BINDGEN_VERSION=0.2.130
+# For the web app's threaded build (a std rebuilt with atomics); WASM_THREADS_TOOLCHAIN in
+# web/build.sh must name the same one.
+ARG WASM_THREADS_TOOLCHAIN=nightly-2026-11-18
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 RUN apt-get update; \
     apt-get install -y --no-install-recommends binaryen; \
     rm -rf /var/lib/apt/lists/*; \
     rustup target add wasm32-unknown-unknown; \
+    rustup toolchain install "${WASM_THREADS_TOOLCHAIN}" --profile minimal \
+      --component rust-src --target wasm32-unknown-unknown; \
     cargo install --locked "wasm-bindgen-cli@${WASM_BINDGEN_VERSION}"
 
 WORKDIR /src
 COPY . .
-RUN web/build.sh
+RUN WASM_THREADS_TOOLCHAIN="${WASM_THREADS_TOOLCHAIN}" web/build.sh
 
 FROM ghcr.io/static-web-server/static-web-server:2.44.3
 
