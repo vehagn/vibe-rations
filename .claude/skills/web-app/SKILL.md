@@ -27,8 +27,13 @@ just serve         # on the host: the production server on http://localhost:8088
 ```
 
 Open the page with the built-in browser (`.claude/launch.json` has a `web` entry for
-`preview_start`). Check:
+`preview_start`, and `web-running` to attach when `just serve` is already up: its container
+name is taken then). Don't `navigate` to it instead: on an origin it didn't open through
+`launch.json` the pane blocks the solver's workers, and the page hangs on "Loading the
+solver…". Check:
 
+- served by `just serve`, the Compute switch and the Runs list are hidden (they belong to
+  `vibe-rations serve`);
 - the status line says "Solver ready" and **Threads** shows the core count (1 means the page
   isn't cross-origin isolated, or `?threads=1`);
 - Run produces wavefronts in the section and a gather filling in; there are no console errors;
