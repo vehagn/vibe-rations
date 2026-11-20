@@ -6,6 +6,15 @@
       "runtimeExecutable": "just",
       "runtimeArgs": ["serve"],
       "port": 8088
+    },
+    {
+      "name": "solver",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": [
+        "run", "--rm", "--name", "vibe-rations-solver", "-p", "127.0.0.1:8090:8088",
+        "vibe-rations-solver:test"
+      ],
+      "port": 8090
     }
   ]
 }

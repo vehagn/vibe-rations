@@ -1,4 +1,5 @@
-# Recipes run inside the dev container, except `dev`, `in` and `serve`, which run on the host.
+# Recipes run inside the dev container, except `dev`, `in`, `serve` and the remote ones
+# (`remote-up`, `remote-update`, `tunnel`), which run on the host.
 #
 # The container engine for `just dev` and `just in`, e.g. ENGINE=podman. Any Compose
 # implementation works, e.g. COMPOSE=docker-compose.
@@ -100,6 +101,29 @@ run config *args:
 [group("simulate")]
 check config:
     cargo run --release -- check {{ config }}
+
+# Starts `vibe-rations serve` on a remote machine with Docker (or Podman: ENGINE=podman), from
+# the published image, if it isn't running already. Its runs and results live in the
+# vibe-rations volume there; it listens on that machine's localhost only.
+[doc("On the host: start the solver server on a remote machine, e.g. `just remote-up me@box`")]
+[group("remote")]
+remote-up host image="ghcr.io/vehagn/vibe-rations:main":
+    ssh {{ host }} '{{ engine }} start vibe-rations 2>/dev/null || {{ engine }} run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v vibe-rations:/data {{ image }}'
+
+# Replaces the remote server with the image's latest version. Runs in progress there are lost;
+# finished runs' results stay in the volume.
+[doc("On the host: update the remote solver server to the latest image")]
+[group("remote")]
+remote-update host image="ghcr.io/vehagn/vibe-rations:main":
+    ssh {{ host }} '{{ engine }} pull {{ image }} && {{ engine }} rm -f vibe-rations && {{ engine }} run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v vibe-rations:/data {{ image }}'
+
+# Forwards a local port to the remote server for the web page (and for the CLI in the dev
+# container, at http://host.docker.internal:<port>). Stop it with Ctrl-C.
+[doc("On the host: tunnel to a remote solver server; open http://localhost:8089")]
+[group("remote")]
+tunnel host port="8089":
+    @echo "open http://localhost:{{ port }} (Ctrl-C to close the tunnel)"
+    ssh -N -o ExitOnForwardFailure=yes -L {{ port }}:127.0.0.1:8088 {{ host }}
 
 # The memory a simulation needs, part by part, worked out without setting it up
 [group("simulate")]
