@@ -360,23 +360,41 @@ fn run() -> Result<()> {
             eprintln!("{} unknowns; misfit {first:.6e}", inversion.unknowns());
             std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
             save(&out, &inversion, &settings, first)?;
-            for _ in 0..settings.iterations {
-                let Some(it) = inversion.iterate()? else {
-                    eprintln!("no step lowers the misfit further; stopping");
-                    break;
-                };
-                eprintln!(
-                    "iteration {:>3}: misfit {:.6e} ({:.1}% of the start), step {:.2} after {} \
-                     trial(s), largest change {:.1}%{}",
-                    it.iteration,
-                    it.misfit,
-                    100.0 * it.misfit / first,
-                    it.step,
-                    it.trials,
-                    100.0 * it.largest_change,
-                    if it.restarted { ", restarted" } else { "" }
-                );
-                save(&out, &inversion, &settings, first)?;
+            let stages = inversion.stages().to_vec();
+            for (s, stage) in stages.iter().enumerate() {
+                if s > 0 {
+                    inversion.begin_stage(s)?;
+                }
+                let start = inversion.misfit();
+                if stages.len() > 1 {
+                    eprintln!(
+                        "stage {}: {} misfit{}, {} iteration(s); misfit {start:.6e}",
+                        s + 1,
+                        stage.misfit.unwrap_or_default().name(),
+                        stage
+                            .max_frequency
+                            .map_or(String::new(), |f| format!(" below {f} Hz")),
+                        stage.iterations
+                    );
+                }
+                for _ in 0..stage.iterations {
+                    let Some(it) = inversion.iterate()? else {
+                        eprintln!("no step lowers the misfit further; ending the stage");
+                        break;
+                    };
+                    eprintln!(
+                        "iteration {:>3}: misfit {:.6e} ({:.1}% of the stage's start), step \
+                         {:.2} after {} trial(s), largest change {:.1}%{}",
+                        it.iteration,
+                        it.misfit,
+                        100.0 * it.misfit / start,
+                        it.step,
+                        it.trials,
+                        100.0 * it.largest_change,
+                        if it.restarted { ", restarted" } else { "" }
+                    );
+                    save(&out, &inversion, &settings, first)?;
+                }
             }
             eprintln!("wrote {}", out.display());
         }
@@ -534,6 +552,17 @@ fn save(
         "settings": settings,
         "unknowns": inversion.unknowns(),
         "starting_misfit": first,
+        "stages": inversion
+            .stages()
+            .iter()
+            .zip(&inversion.stage_misfits)
+            .map(|(stage, misfit)| serde_json::json!({
+                "max_frequency": stage.max_frequency,
+                "misfit": stage.misfit,
+                "iterations": stage.iterations,
+                "starting_misfit": misfit,
+            }))
+            .collect::<Vec<_>>(),
         "iterations": inversion.history,
         "memory_bytes": inversion.memory_bytes,
     });

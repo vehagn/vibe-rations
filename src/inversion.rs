@@ -20,12 +20,14 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::config::{Coefficients, Config, InversionConfig, Parameter, shot_dir};
-use crate::gradient::{balancing_weights, gradient, l2_misfit};
+use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
+use crate::gradient::gradient;
+use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
 use crate::simulation::{Simulation, stable_dt};
@@ -281,12 +283,16 @@ fn axpy(y: &mut [f64], a: f64, x: &[f64]) {
 }
 
 /// One shot of the survey: its configuration (one source, the inversion's time step and
-/// layers) and observed traces, with the weight of each component in the misfit.
+/// layers) and observed traces, with the misfit the current stage measures them by.
 #[derive(Clone, Debug)]
 pub struct Shot {
     pub config: Config,
-    pub observed: Vec<Vec<f32>>,
-    pub weights: Vec<f64>,
+    pub observed: Arc<Vec<Vec<f32>>>,
+    pub misfit: Misfit,
+    /// The receivers' components, samples per trace and sample interval.
+    components: Vec<crate::receiver::Component>,
+    samples: usize,
+    interval: f64,
 }
 
 /// The misfit, its gradient with respect to the unknowns, and the forward wavefields' energy
@@ -304,6 +310,8 @@ pub struct Evaluation {
 #[derive(Clone, Debug, Serialize)]
 pub struct Iteration {
     pub iteration: usize,
+    /// The stage it belongs to, counted from 0.
+    pub stage: usize,
     pub misfit: f64,
     /// The fraction of the scaled L-BFGS direction taken.
     pub step: f64,
@@ -326,6 +334,14 @@ pub struct Inversion {
     free: Vec<(Parameter, Vec<usize>)>,
     bounds: Vec<[f64; 2]>,
     limits: StepLimits,
+    /// The stages, each with its misfit, and the one under way.
+    stages: Vec<StageConfig>,
+    stage: usize,
+    /// The sources' dominant frequency, Hz: the phase misfit's scale on unfiltered traces.
+    source_frequency: f64,
+    /// The misfit at the start of each stage begun, as that stage measures it.
+    pub stage_misfits: Vec<f64>,
+    settings: InversionConfig,
     /// The water level of the preconditioner, if there is one.
     water_level: Option<f64>,
     preconditioner: Option<Vec<f64>>,
@@ -411,23 +427,45 @@ impl Inversion {
                 .pml_vp_max
                 .unwrap_or_else(|| start.vp_range()[1]),
         );
+        let stages = settings.stages()?;
+        let source_frequency = cfg
+            .sources
+            .iter()
+            .map(|s| Ok(s.wavelet.wavelet()?.dominant_frequency()))
+            .collect::<Result<Vec<f64>>>()?
+            .into_iter()
+            .fold(0.0, f64::max);
+        let measure = Measure::of(&stages[0], settings, source_frequency);
         let mut shots = Vec::with_capacity(cfg.sources.len());
         for (s, observed) in observed.into_iter().enumerate() {
             let config = fixed.shot(s)?;
             let sim = Simulation::with_model(&config, start.clone())?;
             let r = &sim.receivers;
             observed.check(&sim).with_context(|| format!("shot {s}"))?;
-            let observed = observed.traces;
-            let weights = if settings.balance {
-                balancing_weights(&observed, &r.components)
-            } else {
-                vec![1.0; observed.len()]
-            };
+            let observed = Arc::new(observed.traces);
+            let (components, samples) = (r.components.clone(), r.samples);
+            let interval = sim.info.sample_interval;
+            let misfit = Misfit::new(measure, &observed, &components, samples, interval)
+                .with_context(|| format!("shot {s}"))?;
             shots.push(Shot {
                 config,
                 observed,
-                weights,
+                misfit,
+                components,
+                samples,
+                interval,
             });
+        }
+        // Every stage's filter must suit the traces before the first one starts.
+        for stage in &stages[1..] {
+            let shot = &shots[0];
+            Misfit::new(
+                Measure::of(stage, settings, source_frequency),
+                &shot.observed,
+                &shot.components,
+                shot.samples,
+                shot.interval,
+            )?;
         }
 
         // The nodes each parameter may change at.
@@ -540,6 +578,11 @@ impl Inversion {
                 initial: settings.initial_step,
                 max: settings.max_step,
             },
+            stages,
+            stage: 0,
+            source_frequency,
+            stage_misfits: Vec::new(),
+            settings: settings.clone(),
             water_level: settings.precondition.then_some(settings.water_level),
             preconditioner: None,
             lbfgs: Lbfgs::new(settings.memory),
@@ -559,7 +602,51 @@ impl Inversion {
         inversion.misfit = e.misfit;
         inversion.g = e.gradient;
         inversion.preconditioner = inversion.preconditioner_for(&e.illumination);
+        inversion.stage_misfits.push(e.misfit);
         Ok(inversion)
+    }
+
+    /// The stages, each with its misfit.
+    pub fn stages(&self) -> &[StageConfig] {
+        &self.stages
+    }
+
+    /// The stage under way, counted from 0.
+    pub fn stage(&self) -> usize {
+        self.stage
+    }
+
+    /// Starts stage `s` from the model as it stands: each shot's misfit as the stage measures
+    /// it, and L-BFGS afresh, since the pairs it learnt describe another misfit.
+    pub fn begin_stage(&mut self, s: usize) -> Result<()> {
+        ensure!(
+            s < self.stages.len(),
+            "there is no stage {s}; the inversion has {}",
+            self.stages.len()
+        );
+        let measure = Measure::of(&self.stages[s], &self.settings, self.source_frequency);
+        for shot in &mut self.shots {
+            shot.misfit = Misfit::new(
+                measure,
+                &shot.observed,
+                &shot.components,
+                shot.samples,
+                shot.interval,
+            )?;
+        }
+        self.stage = s;
+        self.lbfgs.clear();
+        let e = self.evaluate(&self.model)?;
+        self.memory_bytes = self.memory_bytes.max(e.memory_bytes);
+        ensure!(
+            e.misfit.is_finite(),
+            "the misfit isn't finite at the start of stage {s}"
+        );
+        self.misfit = e.misfit;
+        self.g = e.gradient;
+        self.preconditioner = self.preconditioner_for(&e.illumination);
+        self.stage_misfits.push(e.misfit);
+        Ok(())
     }
 
     /// The misfit of the model as it now stands.
@@ -646,7 +733,7 @@ impl Inversion {
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
             sim.run(None, false)?;
-            total += l2_misfit(&sim.receivers.traces, &shot.observed, &shot.weights)?.0;
+            total += shot.misfit.value(&sim.receivers.traces)?;
         }
         Ok(total)
     }
@@ -667,11 +754,7 @@ impl Inversion {
         let mut memory_bytes = held;
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
-            let run = gradient(
-                &mut sim,
-                |r| l2_misfit(&r.traces, &shot.observed, &shot.weights),
-                None,
-            )?;
+            let run = gradient(&mut sim, |r| shot.misfit.evaluate(&r.traces), None)?;
             total += run.misfit;
             memory_bytes = memory_bytes.max(held + run.memory_bytes);
             illumination
@@ -707,12 +790,14 @@ impl Inversion {
         let observed: usize = self
             .shots
             .iter()
-            .flat_map(|s| &s.observed)
+            .flat_map(|s| s.observed.iter())
             .map(Vec::len)
             .sum();
+        let misfits: usize = self.shots.iter().map(|s| s.misfit.memory_bytes()).sum();
         let model = |m: &Model| 4 * (m.vp.len() + m.vs.len() + m.rho.len());
         let free: usize = self.free.iter().map(|(_, nodes)| nodes.len()).sum();
         4 * observed
+            + misfits
             + model(&self.model)
             + model(&self.start)
             + std::mem::size_of::<usize>() * free
@@ -794,6 +879,7 @@ impl Inversion {
         self.iteration += 1;
         let it = Iteration {
             iteration: self.iteration,
+            stage: self.stage,
             misfit,
             step: step.length,
             trials: step.trials,
@@ -1235,7 +1321,7 @@ mod tests {
         );
     }
 
-    use crate::config::Config;
+    use crate::config::{Config, MisfitKind};
     use crate::model::Model;
 
     /// A small survey: one explosion, two receivers on the free surface.
@@ -1315,6 +1401,76 @@ mod tests {
         let m = inv.model_at(&x);
         assert!(m.vs[..16 * 16 * 3].iter().all(|&v| v == 0.0));
         m.validate().unwrap();
+    }
+
+    /// Stages run in turn: each measures the misfit its own way, on its own filtered traces,
+    /// and starts L-BFGS afresh; iterations say which stage they belong to.
+    #[test]
+    fn stages_change_the_misfit_and_restart_lbfgs() {
+        let truth = survey(
+            "[[model.layer]]\ntop = 0.0\nvp = 2200.0\nvs = 1400.0\nrho = 2000.0",
+            "",
+        );
+        let cfg = survey(
+            SOLID,
+            "parameters = [\"vs\"]\n\
+             [[inversion.stage]]\nmax_frequency = 30.0\niterations = 1\nmisfit = \"traveltime\"\n\
+             [[inversion.stage]]\niterations = 1",
+        );
+        let settings = cfg.inversion.clone().unwrap();
+        let mut inv = Inversion::new(&cfg, start(&cfg), vec![recorded(&truth)], &settings).unwrap();
+        assert_eq!(inv.stages().len(), 2);
+        assert_eq!(inv.stages()[1].misfit, Some(MisfitKind::L2));
+        // The first stage measures time shifts of filtered traces.
+        let shot = &inv.shots[0];
+        let traveltime = Misfit::new(
+            Measure::of(&inv.stages()[0], &settings, inv.source_frequency),
+            &shot.observed,
+            &shot.components,
+            shot.samples,
+            shot.interval,
+        )
+        .unwrap();
+        let mut sim = Simulation::with_model(&shot.config, inv.model.clone()).unwrap();
+        sim.run(None, false).unwrap();
+        assert_eq!(
+            inv.misfit(),
+            traveltime.value(&sim.receivers.traces).unwrap()
+        );
+        let it = inv.iterate().unwrap().expect("a step");
+        assert_eq!(it.stage, 0);
+        let n = inv.unknowns();
+        assert!(inv.lbfgs.update(vec![1.0; n], vec![1.0; n]));
+
+        inv.begin_stage(1).unwrap();
+        assert_eq!((inv.stage(), inv.lbfgs.len()), (1, 0));
+        let l2 = Misfit::new(
+            Measure::l2(true),
+            &inv.shots[0].observed,
+            &inv.shots[0].components,
+            inv.shots[0].samples,
+            inv.shots[0].interval,
+        )
+        .unwrap();
+        assert_eq!(inv.misfit_of(&inv.model).unwrap(), inv.misfit());
+        let mut sim = Simulation::with_model(&inv.shots[0].config, inv.model.clone()).unwrap();
+        sim.run(None, false).unwrap();
+        assert_eq!(inv.misfit(), l2.value(&sim.receivers.traces).unwrap());
+        assert_eq!(inv.stage_misfits.len(), 2);
+        let it = inv.iterate().unwrap().expect("a step");
+        assert_eq!(it.stage, 1);
+        assert!(inv.begin_stage(2).is_err());
+
+        // Iterations go with the stages when there are any.
+        let both = survey(SOLID, "iterations = 3\n[[inversion.stage]]\niterations = 1");
+        assert!(setup(&both).is_err());
+        // A corner above the traces' Nyquist frequency is refused before anything runs.
+        let high = survey(
+            SOLID,
+            "[[inversion.stage]]\niterations = 1\n[[inversion.stage]]\nmax_frequency = 900.0\niterations = 1",
+        );
+        let e = setup(&high).err().expect("refused").to_string();
+        assert!(e.contains("Nyquist"), "{e}");
     }
 
     /// λ ≥ 0 survives projection in every case: vp inverted alone (vp held above √2 vs), and

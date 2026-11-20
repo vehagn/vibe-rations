@@ -963,6 +963,71 @@ the synthetics.
 **Reproduce:** `just unit misfit`; the numbers above,
 `cargo test --release --lib misfit_study -- --ignored --nocapture`.
 
+## 2026-11-20 — Choosing the misfit, and frequency continuation
+
+**Question.** Roadmap step 6 asks for frequency continuation: invert the low frequencies
+first, whose misfit has wider basins, then add the higher ones [@bunks1995]; frequency-domain
+codes choose the frequencies by the survey's geometry [@sirgue2004], and Fichtner et al.
+broaden the period band as the iterations go [@fichtner2013, §3.2.4; their "multiscale" is
+mainly about spatial scales]. How should stages and the new misfits (previous entry) enter
+the inversion without losing the exactness of its gradient?
+
+**Method** (`src/inversion.rs`, `[inversion] misfit`, `[[inversion.stage]]`). A stage
+low-pass filters the observed and the synthetic traces alike at its `max_frequency`, the
+standard way to apply a multiscale strategy in the time domain [@bunks1995], and runs its
+`iterations` with its own misfit, or the inversion's. Bunks et al. filtered the source
+wavelet and the data instead [as described by @boonyasiriwat2009], which lets the low stages
+run on coarser grids; here the grid and $\Delta t$ are pinned for the gradient's exactness, so
+that advantage is gone, and a filtered source can only give a causal filter, not the zero-phase
+one. Filtering the traces keeps one simulation per shot for every stage, and the filter is its
+own transpose, so the adjoint source needs nothing more. At each stage's start
+(`Inversion::begin_stage`): each shot's misfit is rebuilt from the observed traces (shared,
+not copied, when unfiltered); the L2 misfit's balancing weights are taken from the *filtered*
+observed traces; the phase misfit's scale $f_0$ is the stage's corner (the sources' dominant
+frequency without one); L-BFGS forgets its pairs, since $(s, y)$ pairs describe the curvature
+of another misfit [@nocedal2006] (Modrak & Tromp found restarting at each transition faster in
+all nine of their test cases, and without it four failed [@modrak2016, §8.1]); and the misfit, gradient and preconditioner are evaluated
+afresh at the model as it stands. The unknowns stay relative to the starting model, so stages
+continue one another's model. Every stage's filter is checked against the traces' Nyquist
+frequency before the first one runs. Without stages there is one stage on the traces as
+recorded, so the defaults reproduce the previous inversion bit for bit: the unfiltered L2
+misfit is still `l2_misfit` with the same weights.
+
+**Gradient checks.** The inversion's gradient against extrapolated central differences
+down the gradient (`the_inversion_gradient_matches_finite_differences`' model: two shots,
+$v_s$, $\rho$ and $v_p$, velocity and pressure), relative error, at steps $h$ and $h/2$:
+
+| Misfit | $h = 2 \times 10^{-3}$ | $5 \times 10^{-3}$ | $10^{-2}$ | $2 \times 10^{-2}$ |
+|---|---|---|---|---|
+| L2, filtered at 10 Hz | $1.4 \times 10^{-5}$ | $1.0 \times 10^{-5}$ | $1.5 \times 10^{-5}$ | $1.8 \times 10^{-4}$ |
+| time shifts | $4.3 \times 10^{-5}$ | $2.0 \times 10^{-4}$ | $4.4 \times 10^{-4}$ | $5.6 \times 10^{-4}$ |
+| time shifts, filtered at 10 Hz | $7.5 \times 10^{-6}$ | $3.1 \times 10^{-6}$ | $2.2 \times 10^{-4}$ | $1.7 \times 10^{-3}$ |
+| phase | $3.9 \times 10^{-5}$ | | $4.2 \times 10^{-6}$ | |
+| phase, filtered at 10 Hz | $3.4 \times 10^{-5}$ | | $1.0 \times 10^{-5}$ | |
+
+The filtered L2 and phase misfits behave like the plain L2 one (previous entries): round-off
+in single-precision traces below $h \approx 10^{-2}$, the extrapolation's $h^4$ above. The time
+shifts do not converge cleanly with $h$: their plain differences at $5 \times 10^{-3}$ were
+$7.5 \times 10^{-5}$ and, at half the step, $1.7 \times 10^{-4}$, worse. Each trace's shift is
+continuous but its derivative jumps where the correlation's peak moves to the next lag
+(previous entry), and with 36 traces some cross a jump within a few $10^{-3}$ of relative
+model change. The jumps are small (in a prototype the slope changed by 4%, 2% and 1% at 5, 10 and
+20 samples per period, less at the 70 these traces have, 100 filtered), so the check holds at
+small steps; a wrong derivative would be off by tens of per cent. Low-pass filtering makes the traces smoother and
+the check cleaner.
+
+**Memory.** A filtering stage keeps a filtered copy of every shot's observed traces; the plan
+(`memory --invert`) counts it when any stage filters, and `counts_what_an_inversion_allocates`
+still matches a real inversion byte for byte, with and without a filtering stage.
+
+**Decision.** The test checks filtered L2 and phase at $h = 10^{-2}$ and the filtered time
+shifts at $2 \times 10^{-3}$, all within the existing $3 \times 10^{-5}$
+(`the_misfits_gradients_match_finite_differences`). `iterations` beside stages is refused
+rather than guessed at.
+
+**Reproduce:** `just physics misfits_gradients`; `just unit stages`;
+`just unit counts_what_an_inversion_allocates`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

@@ -503,6 +503,19 @@ impl MisfitKind {
     }
 }
 
+/// One stage of an inversion: its iterations, on traces low-pass filtered up to
+/// `max_frequency`, with its own misfit if it names one.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageConfig {
+    /// The corner of the low-pass filter applied to observed and synthetic traces alike, in
+    /// Hz: where its amplitude halves. None: the traces as recorded.
+    pub max_frequency: Option<f64>,
+    pub iterations: usize,
+    /// The stage's misfit, instead of the inversion's.
+    pub misfit: Option<MisfitKind>,
+}
+
 /// An L-BFGS inversion of the observed traces for the model (`invert`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -514,8 +527,21 @@ pub struct InversionConfig {
     /// What to update; the rest stays as the configuration's model has it.
     #[serde(default = "default_parameters")]
     pub parameters: Vec<Parameter>,
-    #[serde(default = "default_iterations")]
-    pub iterations: usize,
+    /// Iterations, when there are no stages: 10 by default.
+    pub iterations: Option<usize>,
+    /// What the misfit compares: `l2` (the default), `traveltime` or `phase`.
+    #[serde(default)]
+    pub misfit: MisfitKind,
+    /// For the `traveltime` misfit: the largest time shift sought, in seconds.
+    pub max_shift: Option<f64>,
+    /// The order of the stages' Butterworth low-pass filters (each of its two passes).
+    #[serde(default = "default_filter_order")]
+    pub filter_order: usize,
+    /// Frequency continuation (Bunks et al. 1995): stages run in turn, each with its own
+    /// low-pass filter, iterations and misfit, L-BFGS starting afresh in each. Without them,
+    /// one stage of `iterations` on the traces as recorded.
+    #[serde(default, rename = "stage")]
+    pub stages: Vec<StageConfig>,
     /// Model changes and gradient changes L-BFGS remembers.
     #[serde(default = "default_memory")]
     pub memory: usize,
@@ -549,11 +575,37 @@ pub struct InversionConfig {
     pub rho_range: Option<[f64; 2]>,
 }
 
+impl InversionConfig {
+    /// The stages to run, each with its misfit: the configured ones, or one of `iterations`
+    /// (10 by default) on the traces as recorded.
+    pub fn stages(&self) -> Result<Vec<StageConfig>> {
+        if self.stages.is_empty() {
+            return Ok(vec![StageConfig {
+                max_frequency: None,
+                iterations: self.iterations.unwrap_or(10),
+                misfit: Some(self.misfit),
+            }]);
+        }
+        ensure!(
+            self.iterations.is_none(),
+            "give the iterations of each [[inversion.stage]], not of [inversion]"
+        );
+        Ok(self
+            .stages
+            .iter()
+            .map(|s| StageConfig {
+                misfit: Some(s.misfit.unwrap_or(self.misfit)),
+                ..s.clone()
+            })
+            .collect())
+    }
+}
+
 fn default_parameters() -> Vec<Parameter> {
     vec![Parameter::Vp, Parameter::Vs]
 }
-fn default_iterations() -> usize {
-    10
+fn default_filter_order() -> usize {
+    4
 }
 fn default_memory() -> usize {
     5

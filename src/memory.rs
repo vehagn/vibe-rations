@@ -51,6 +51,8 @@ pub struct InversionSize {
     /// Pairs L-BFGS keeps.
     pub memory: usize,
     pub precondition: bool,
+    /// Whether a stage low-pass filters the traces, holding a filtered copy of the observed.
+    pub filtered: bool,
 }
 
 /// What decides a run's memory.
@@ -136,9 +138,14 @@ impl Plan {
         let interior = self.grid.interior_len() as u64;
         let n = inversion.unknowns as u64;
         let shots = inversion.shots;
+        let copies = 1 + u64::from(inversion.filtered);
         let observed = part(
-            format!("observed traces of {shots} shot(s)"),
-            shots as u64 * self.trace_bytes(),
+            if inversion.filtered {
+                format!("observed traces of {shots} shot(s), as recorded and filtered")
+            } else {
+                format!("observed traces of {shots} shot(s)")
+            },
+            copies * shots as u64 * self.trace_bytes(),
         );
         let mut parts = self.gradient_parts(None, observed);
         parts.extend([
@@ -301,6 +308,7 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
         memory: settings.memory,
         precondition: settings.precondition,
+        filtered: settings.stages()?.iter().any(|s| s.max_frequency.is_some()),
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
 }
@@ -532,7 +540,7 @@ mod tests {
     #[test]
     fn counts_what_an_inversion_allocates() {
         use crate::inversion::{Inversion, Observed};
-        let model = |vs: f64| {
+        let model = |vs: f64, stages: &str| {
             format!(
                 r#"
                 [grid]
@@ -573,10 +581,11 @@ mod tests {
                 observed = "unused"
                 memory = 1
                 fixed_above = 85.0
+                {stages}
                 "#
             )
         };
-        let truth = Config::from_toml(&model(1350.0)).unwrap();
+        let truth = Config::from_toml(&model(1350.0, "")).unwrap();
         let observed: Vec<Observed> = (0..2)
             .map(|s| {
                 let mut sim = Simulation::new(&truth.shot(s).unwrap(), Path::new(".")).unwrap();
@@ -584,25 +593,35 @@ mod tests {
                 sim.receivers.traces.into()
             })
             .collect();
-        let cfg = Config::from_toml(&model(1200.0)).unwrap();
-        let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
-        let settings = cfg.inversion.clone().unwrap();
-        let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, Path::new("."))
-            .unwrap();
-        let mut inversion = Inversion::new(&cfg, start, observed, &settings).unwrap();
-        assert_eq!(
-            m.parts.last().unwrap().bytes as usize,
-            8 * inversion.unknowns(),
-            "the free nodes"
-        );
-        let first = inversion.iterate().unwrap().unwrap();
-        let second = inversion.iterate().unwrap().unwrap();
-        // The second gradient run had L-BFGS's one pair to hold.
-        assert!(
-            first.memory == 1 && !second.restarted,
-            "{first:?} {second:?}"
-        );
-        assert_eq!(m.peak, inversion.memory_bytes as u64, "\n{}", m.table());
+        // As recorded, and with a stage that filters (and so keeps filtered copies).
+        let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
+        for stages in ["", filtering] {
+            let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
+            let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
+            let settings = cfg.inversion.clone().unwrap();
+            let start =
+                Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, Path::new("."))
+                    .unwrap();
+            let mut inversion = Inversion::new(&cfg, start, observed.clone(), &settings).unwrap();
+            assert_eq!(
+                m.parts.last().unwrap().bytes as usize,
+                8 * inversion.unknowns(),
+                "the free nodes"
+            );
+            let first = inversion.iterate().unwrap().unwrap();
+            let second = inversion.iterate().unwrap().unwrap();
+            // The second gradient run had L-BFGS's one pair to hold.
+            assert!(
+                first.memory == 1 && !second.restarted,
+                "{stages}: {first:?} {second:?}"
+            );
+            assert_eq!(
+                m.peak,
+                inversion.memory_bytes as u64,
+                "{stages}\n{}",
+                m.table()
+            );
+        }
     }
 
     #[test]

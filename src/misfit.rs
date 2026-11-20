@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use rayon::prelude::*;
 
-use crate::config::MisfitKind;
+use crate::config::{InversionConfig, MisfitKind, StageConfig};
 use crate::gradient::{balancing_weights, l2_misfit};
 use crate::receiver::Component;
 
@@ -31,6 +31,20 @@ pub struct Measure {
 }
 
 impl Measure {
+    /// What `stage` of an inversion with `settings` measures, of data from sources of
+    /// dominant frequency `source_frequency`: the stage's corner frequency, if it filters, is
+    /// then the data's dominant frequency.
+    pub fn of(stage: &StageConfig, settings: &InversionConfig, source_frequency: f64) -> Self {
+        Self {
+            kind: stage.misfit.unwrap_or(settings.misfit),
+            max_frequency: stage.max_frequency,
+            filter_order: settings.filter_order,
+            max_shift: settings.max_shift,
+            balance: settings.balance,
+            dominant_frequency: Some(stage.max_frequency.unwrap_or(source_frequency)),
+        }
+    }
+
     /// The plain L2 misfit of the traces as recorded, with or without balancing.
     pub fn l2(balance: bool) -> Self {
         Self {

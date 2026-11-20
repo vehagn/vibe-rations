@@ -52,7 +52,8 @@ src/
   main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
-  inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search
+  inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search, stages
+  misfit.rs      misfits and their exact derivatives: L2, time shifts, phase; zero-phase low-pass
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
@@ -122,6 +123,21 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Misfits and frequency continuation** (`src/misfit.rs`, `[inversion] misfit`,
+  `[[inversion.stage]]`). Every misfit is a function of the samples with its *exact*
+  derivative, so the inversion's finite-difference check covers it
+  (`the_misfits_gradients_match_finite_differences`): don't swap in a textbook adjoint source
+  that assumes something about the data. Tromp et al.'s time-shift source $\dot s / \int s
+  \ddot s$ assumes the observed trace is a shifted copy, and was 45% off for traces of
+  different shape. Weights and trace selections come from the observed traces only; one that
+  depends on the synthetic makes the misfit jump between models. The time shift is a
+  parabola through the correlation's peak: continuous, but its derivative jumps where the
+  peak changes lag, so check it at small steps ($h = 2 \times 10^{-3}$). The phase misfit is
+  regularised ($z/\sqrt{|z|^2 + \epsilon^2}$): taken literally, $\Delta\varphi^2$ has a branch
+  cut and blows up where the synthetic lacks an arrival. The forward–backward Butterworth
+  filter, started at rest without padding, is symmetric, so it is its own adjoint; padding
+  would break that. A stage rebuilds the misfits (balancing weights from the filtered data)
+  and clears L-BFGS, whose pairs describe the previous misfit.
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients
   would otherwise change with every model it tries) as well as $\Delta t$ and

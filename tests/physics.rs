@@ -970,7 +970,7 @@ fn an_inversion_finds_a_sphere() {
         "inversion: {} unknowns, misfit {first:.4e}",
         inversion.unknowns()
     );
-    for _ in 0..settings.iterations {
+    for _ in 0..settings.iterations.unwrap() {
         let it = inversion
             .iterate()
             .unwrap()
@@ -1010,6 +1010,44 @@ fn an_inversion_finds_a_sphere() {
 /// cancelled to 4e-4 of this one and round-off held the check at 1e-2.
 #[test]
 fn the_inversion_gradient_matches_finite_differences() {
+    let e = inversion_gradient_check("inversion gradient", "", 1e-2);
+    assert!(e < 3e-5, "{e}");
+}
+
+/// The other misfits' gradients, through the same inversion and check: the L2 misfit of
+/// low-pass filtered traces (a frequency-continuation stage), the cross-correlation time shifts
+/// of filtered traces, and the time–frequency phase misfit.
+///
+/// Measured (extrapolated, at the step given): filtered L2 1.5e-5 (h = 1e-2; 1.4e-5 at 2e-3);
+/// filtered time shifts 7.5e-6 (h = 2e-3); phase 4.2e-6 (h = 1e-2), and filtered 1.0e-5. The
+/// time shifts are checked at a smaller step because each trace's shift is only piecewise
+/// smooth: its derivative jumps where the correlation's peak moves to the next lag, and
+/// larger steps cross such jumps (2.2e-4 at h = 1e-2; unfiltered, 4.3e-5 at 2e-3 and 4.4e-4
+/// at 1e-2).
+#[test]
+fn the_misfits_gradients_match_finite_differences() {
+    for (label, settings, h) in [
+        (
+            "filtered l2",
+            "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 1",
+            1e-2,
+        ),
+        (
+            "filtered traveltime",
+            "misfit = \"traveltime\"\nmax_shift = 0.05\n\
+             [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1",
+            2e-3,
+        ),
+        ("phase", "misfit = \"phase\"", 1e-2),
+    ] {
+        let e = inversion_gradient_check(label, settings, h);
+        assert!(e < 3e-5, "{label}: {e}");
+    }
+}
+
+/// The relative error of the extrapolated central difference of the inversion's misfit down
+/// its gradient, at steps `h` and `h`/2, with `settings` added to its [inversion] section.
+fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {
     use vibe_rations::config::Config;
     use vibe_rations::inversion::{Inversion, Observed};
     use vibe_rations::model::Model;
@@ -1064,6 +1102,7 @@ fn the_inversion_gradient_matches_finite_differences() {
             [inversion]
             observed = "unused"
             parameters = ["vs", "rho", "vp"]
+            {settings}
             "#
         )
     };
@@ -1096,16 +1135,15 @@ fn the_inversion_gradient_matches_finite_differences() {
         let x: Vec<f64> = u.iter().map(|u| h * u).collect();
         inversion.misfit_of(&inversion.model_at(&x)).unwrap()
     };
-    let h = 1e-2;
     let [coarse, fine] = [h, h / 2.0].map(|h| (misfit(h) - misfit(-h)) / (2.0 * h));
     let extrapolated = (4.0 * fine - coarse) / 3.0;
     let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
     println!(
-        "inversion gradient: predicted {predicted:.6e}; finite differences off by {:.1e} and \
-         {:.1e}, extrapolated by {:.1e}",
+        "{label}: predicted {predicted:.6e}; finite differences off by {:.1e} and {:.1e} \
+         (h = {h:.0e}), extrapolated by {:.1e}",
         e(coarse),
         e(fine),
         e(extrapolated)
     );
-    assert!(e(extrapolated) < 3e-5, "{}", e(extrapolated));
+    e(extrapolated)
 }
