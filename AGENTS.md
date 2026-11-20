@@ -16,16 +16,17 @@ opens a shell there instead.
 | Command | Does | Time |
 |---|---|---|
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
-| `just physics` | Whole simulations against analytic answers, misfits printed | ~2.5 min |
-| `just test` | Everything | ~2.5 min |
+| `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
+| `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
-| `just memory <config>` | The memory a run needs, part by part, without building it (`--gradient`: a gradient run's) | instant |
+| `just memory <config>` | The memory a run needs, part by part, without building it (`--gradient`, `--invert`: those runs') | instant |
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
 | `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
+| `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
@@ -48,9 +49,10 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run [--remote] | check | memory | gradient | serve | remote
+  main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
+  inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
@@ -120,6 +122,34 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
+  pins `optimised_for` at the starting model's points per wavelength (the coefficients
+  would otherwise change with every model it tries) as well as $\Delta t$ and
+  `pml_vp_max`, and takes the vp bound from the stability limit of the stencil it runs,
+  not Taylor's. (2) The inversion's finite-difference check failed at
+  $3.1 \times 10^{-5}$: its surface line's end receivers, fine with the cubic, read the side
+  layers with eight-point interpolation. Clear of them, the check scatters between
+  $10^{-7}$ and $5 \times 10^{-5}$ for $h$ from $2 \times 10^{-3}$ to $1.6 \times 10^{-2}$:
+  round-off in single-precision traces below $h \approx 10^{-2}$, the extrapolation's $h^4$
+  above. It now runs at $h = 10^{-2}$ ($4.0 \times 10^{-6}$) and refuses receivers next to
+  the layers. A check that looks off by a few $10^{-5}$ at one $h$ may be noise: try
+  several before blaming the gradient. (3) The gradient's illumination array and the
+  inversion's own arrays are in the memory plan, exactly (`memory --invert`).
+- **Inversion** (`Inversion`, `invert`): L-BFGS on relative changes $m/m_0 - 1$, each source
+  a shot, with $\Delta t$, the layers' damping (`pml_vp_max`) and the optimised
+  coefficients' band (`optimised_for`) fixed at the starting model's so the misfit is smooth
+  and the gradient exact. Unpreconditioned, the updates pile
+  up around the sources and the surface receivers, and a sphere below hardly moves (55% of
+  the misfit left after 4 iterations, the sphere's $v_s$ error 99%). Dividing by the
+  illumination (source side) and holding the top fixed around the sources and receivers
+  (`fixed_above`) gave 6.6% and 78% after 6. The line search almost always takes the full
+  step at the first try. Forces recorded at the surface barely see $v_p$ in a sphere half
+  a P wavelength across. The bounds keep $\lambda \ge 0$ whichever parameters are inverted
+  ($v_p$ projected first; $v_p \ge \sqrt2\, v_s$ where $v_s$ is fixed): without that, an
+  inversion of $v_p$ alone reached an unphysical model and aborted. A trial the solver can't
+  run shortens the step; unknowns pinned at a bound drop out of the direction. Check an
+  inversion's gradient *down the gradient*: along a random direction the predicted change
+  cancels and round-off swamps it. Details: the log.
 - **The adjoint and gradients meet this branch's defaults** (merged 2026-11-20). (1) The
   time-dispersion transform: `gradient` un-warps the traces after the forward run, as `run`
   does, so the misfit is of the same traces as observed data from `run`, and
@@ -168,7 +198,12 @@ doesn't show.
   25 times the forward run for `examples/layered.toml`. `counts_what_a_gradient_run_allocates`
   compares it with `gradient::Run::memory_bytes`, which sums the arrays a real run holds at
   its peak; when `gradient` gains an array, add it to both. `gradient` frees the replay before
-  making the gradient, so the output never adds to the peak.
+  making the gradient, so the output never adds to the peak. An inversion
+  (`Plan::inversion_memory`, `memory --invert`, checked by `invert`) adds every shot's
+  observed traces, three models, the sums over the shots, and per unknown $8(2m + 5)$ bytes
+  for L-BFGS memory $m$; `counts_what_an_inversion_allocates` compares it with
+  `Inversion::memory_bytes`, measured the same way. Keep `Inversion::new` from holding a
+  solver while it evaluates (it drops its set-up run).
 - **Stencil coefficients are optimised by default** (`[scheme] coefficients`, opt out with
   `"taylor"`; `Stencil::optimised`). With the time error removed, the phase error per node,
   $\lvert \mathbf K \rvert - \lvert \mathbf k \rvert h$, is the whole error, so the
@@ -248,7 +283,9 @@ doesn't show.
   reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
   $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
   $\le 2.8 \times 10^{-4}$ (order 4's $v_p$, whose directional derivative is small; order 8
-  $\le 1.6 \times 10^{-5}$); the 9 s soft-sediment run drains to
+  $\le 1.6 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
+  anomaly after 3 iterations, and its gradient matches finite differences to
+  $4.0 \times 10^{-6}$ (at $h = 10^{-2}$); the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
   for these long waves), 0.001–0.008%, 2.53%, the same layers, $\le 7 \times 10^{-7}$. With
   the time error kept at $C = 0.3$ (the default before): 0.07–0.19%, 0.03–0.09%, 2.40%,

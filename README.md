@@ -37,10 +37,11 @@ Then, in the container:
 | `just lint` | rustfmt and clippy with `-D warnings` |
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
-| `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory"); `--gradient` for a gradient run |
+| `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory"); `--gradient` or `--invert` for those runs |
 | `just remote-up <host>`, `just tunnel <host>` | On the host: start the solver server on a remote machine, and reach it (see "Remote runs") |
-| `just run <config>` | Runs a simulation |
+| `just run <config>` | Runs a simulation; `--shots` fires the sources one at a time, into `shot-NNN/` |
 | `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
+| `just invert <config>` | Inverts observed traces for the model with L-BFGS, as `[inversion]` says |
 | `just web` | Builds the web app into `web/dist` |
 
 ```bash
@@ -103,6 +104,7 @@ a free surface $z = 0$ is the surface.
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
+| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, bounds `vp_range`, `vs_range`, `rho_range` |
 
 The wavelet is the moment rate of a moment-tensor source and the force of a force source. A
 Ricker wavelet peaks at 1, so its amplitude is a peak rate; a Gaussian has unit area, so its
@@ -151,6 +153,22 @@ just run truth.toml --out out/observed
 just gradient guess.toml out/observed --balance --out out/gradient
 ```
 
+`invert` runs the configuration's `[inversion]`: each source is a shot, whose observed
+traces are in `<observed>/shot-NNN/` as `run --shots` writes them (or `<observed>/` itself for
+one source). After every iteration it writes the model, `vp.npy`, `vs.npy` and `rho.npy`
+(shape (nz, ny, nx), ready for `[model.files]`), and `inversion.json`: the settings and each
+iteration's misfit, step and largest change, and the most memory it has held. The time step,
+the layers' damping and the optimised coefficients' band (`optimised_for`) are held at the
+starting model's, so give the observed run the same `[time] dt` (and `pml_vp_max`, and
+`optimised_for` too if the observed traces should come from the same operator); `invert`
+checks the shapes and, from `time.npy`, the sample times. `observed` is relative to
+the configuration's directory, `--out` (and `[output] dir`) to the working directory.
+
+```bash
+just run truth.toml --shots --out out/observed
+just invert guess.toml --out out/inverted   # guess.toml: [inversion] observed = "out/observed"
+```
+
 
 ## Memory
 
@@ -182,15 +200,23 @@ A gradient run holds much more, and `just memory <config> --gradient` counts it:
 forward run, a second solver for the adjoint, the observed traces and the residuals,
 $\lceil N/k \rceil$ checkpoints of the wavefield and the layers' memory (36 bytes per padded
 node each), $k + 1$ copies of the velocities for the segment being replayed (12 bytes per node
-each), and the correlation sums and the two strains (112 bytes per node). The default
-interval $k = \lceil\sqrt{3N}\rceil$ about minimises the checkpoints and the segment
-together, at about $24\sqrt{3N} \approx 42\sqrt N$ bytes per node, so for
-`examples/layered.toml` (1,611 steps) a gradient takes 3.63 GiB against the forward run's
-147 MiB, and on the grid above 795 GiB. Rebuilding the forward field backwards instead of
+each), the correlation sums and the two strains (112 bytes per node), and the illumination
+(8 bytes per interior node). The default interval $k = \lceil\sqrt{3N}\rceil$ about
+minimises the checkpoints and the segment together, at about $24\sqrt{3N} \approx 42\sqrt N$
+bytes per node, so for
+`examples/layered.toml` (1,611 steps) a gradient takes 3.64 GiB against the forward run's
+147 MiB, and on the grid above 798 GiB. Rebuilding the forward field backwards instead of
 storing it (the roadmap's step 3) is what would cut that. A second test checks this count
 against a real gradient run.
 
-`run`, `check` and `gradient` refuse a run that needs more than the machine has available
+`just memory <config> --invert` counts an inversion: one shot's gradient run at a time, every
+shot's observed traces, three models (as it stands, the start, and the one stepped to), the
+gradient and illumination summed over the shots, and per unknown the L-BFGS pairs ($16m$
+bytes for memory $m$) and five more numbers. Unknowns are counted at every free node, so a
+model with fluids (no $v_s$ unknown there) needs a little less. A third test checks it against
+a real inversion.
+
+`run`, `check`, `gradient` and `invert` refuse a run that needs more than the machine has available
 (Linux's `MemAvailable`, or a container's memory limit) before allocating anything. The web
 app shows the estimate under the configuration as it is edited, and refuses runs above the
 4 GiB a browser gives WebAssembly; the server below has no such limit.
@@ -512,8 +538,11 @@ Planned next, following Fichtner (2011), ch. 7–11:
    gradient as well. To be measured.
 5. **Misfits and adjoint sources.** L2 waveform first, then cross-correlation time shifts and
    time–frequency phase misfits (Fichtner 2011, ch. 11).
-6. **Optimisation.** L-BFGS with a line search, frequency continuation (Fichtner et al.
-   2013), and gradient checks against finite differences.
+6. **Optimisation** (L-BFGS done: `src/inversion.rs`). Preconditioned L-BFGS (Nocedal 1980;
+   Liu & Nocedal 1989) on relative model changes, with bounds and an Armijo line search; each
+   source a shot; the illumination (Shin et al. 2001) as preconditioner. Still to come:
+   frequency continuation (Fichtner et al. 2013), receiver-side preconditioning, and
+   parameter scaling for $\rho$.
 7. Later: Born modelling and Hessian-vector products for truncated-Newton FWI (Métivier et
    al. 2013), source estimation, viscoelasticity.
 

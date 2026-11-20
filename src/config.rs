@@ -28,6 +28,8 @@ pub struct Config {
     pub snapshots: Vec<SnapshotConfig>,
     #[serde(default)]
     pub output: OutputConfig,
+    /// What `invert` does; nothing else reads it.
+    pub inversion: Option<InversionConfig>,
 }
 
 impl Config {
@@ -40,6 +42,25 @@ impl Config {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::from_toml(&text).with_context(|| format!("in {}", path.display()))
     }
+
+    /// The same run with only source `s`: one shot of a survey whose sources fire one at a
+    /// time, as an inversion takes them.
+    pub fn shot(&self, s: usize) -> Result<Self> {
+        ensure!(
+            s < self.sources.len(),
+            "there is no source {s}; the configuration has {}",
+            self.sources.len()
+        );
+        Ok(Self {
+            sources: vec![self.sources[s].clone()],
+            ..self.clone()
+        })
+    }
+}
+
+/// The directory, under a run's output directory, of shot `s`'s results.
+pub fn shot_dir(s: usize) -> String {
+    format!("shot-{s:03}")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,6 +139,10 @@ pub struct BoundaryConfig {
     /// them stable for surface waves in soft, high-Poisson's-ratio media. 0 turns it off.
     #[serde(default = "default_pml_sponge")]
     pub pml_sponge: f64,
+    /// The P-wave speed that sets the layers' damping, in m/s; by default the model's
+    /// fastest. An inversion holds it at the starting model's, so the layers don't change
+    /// as the model does.
+    pub pml_vp_max: Option<f64>,
 }
 
 impl Default for BoundaryConfig {
@@ -130,6 +155,7 @@ impl Default for BoundaryConfig {
             pml_power: default_pml_power(),
             pml_alpha_frequency: None,
             pml_sponge: default_pml_sponge(),
+            pml_vp_max: None,
         }
     }
 }
@@ -434,6 +460,90 @@ fn default_formats() -> Vec<Format> {
     vec![Format::Png]
 }
 
+/// A model parameter an inversion can update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Parameter {
+    Vp,
+    Vs,
+    Rho,
+}
+
+impl Parameter {
+    pub fn name(self) -> &'static str {
+        match self {
+            Parameter::Vp => "vp",
+            Parameter::Vs => "vs",
+            Parameter::Rho => "rho",
+        }
+    }
+}
+
+/// An L-BFGS inversion of the observed traces for the model (`invert`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InversionConfig {
+    /// The observed traces, relative to the configuration: `<component>.npy` as `run` writes
+    /// them for one source; with several, each source is a shot, in `shot-NNN/` as
+    /// `run --shots` writes them. They must be sampled like the synthetics: same dt.
+    pub observed: PathBuf,
+    /// What to update; the rest stays as the configuration's model has it.
+    #[serde(default = "default_parameters")]
+    pub parameters: Vec<Parameter>,
+    #[serde(default = "default_iterations")]
+    pub iterations: usize,
+    /// Model changes and gradient changes L-BFGS remembers.
+    #[serde(default = "default_memory")]
+    pub memory: usize,
+    /// The largest change of any value in the first iteration (and after a restart), as a
+    /// fraction of its starting value: the scale L-BFGS starts from.
+    #[serde(default = "default_initial_step")]
+    pub initial_step: f64,
+    /// No value changes by more than this fraction of its starting value in one iteration.
+    #[serde(default = "default_max_step")]
+    pub max_step: f64,
+    /// Weigh each component of each shot by 1/(its observed energy), so pressure and
+    /// velocity, and loud and quiet shots, count alike.
+    #[serde(default = "default_true")]
+    pub balance: bool,
+    /// Hold the model fixed above this depth in metres, e.g. a known water layer.
+    pub fixed_above: Option<f64>,
+    /// Divide the gradient by the forward wavefield's energy at each node (a source-side
+    /// pseudo-Hessian), so that poorly lit nodes aren't starved and the sources' surroundings
+    /// don't take every update.
+    #[serde(default = "default_true")]
+    pub precondition: bool,
+    /// The fraction of the largest energy added to every node's before dividing by it.
+    #[serde(default = "default_water_level")]
+    pub water_level: f64,
+    /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice
+    /// the largest of the starting model's, and for vp no faster than the time step allows.
+    /// λ ≥ 0 too: vs stays below vp/√2, or vp above √2 vs where vs isn't inverted. The
+    /// starting model must lie within them.
+    pub vp_range: Option<[f64; 2]>,
+    pub vs_range: Option<[f64; 2]>,
+    pub rho_range: Option<[f64; 2]>,
+}
+
+fn default_parameters() -> Vec<Parameter> {
+    vec![Parameter::Vp, Parameter::Vs]
+}
+fn default_iterations() -> usize {
+    10
+}
+fn default_memory() -> usize {
+    5
+}
+fn default_initial_step() -> f64 {
+    0.02
+}
+fn default_max_step() -> f64 {
+    0.1
+}
+fn default_water_level() -> f64 {
+    1e-3
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
@@ -481,6 +591,24 @@ mod tests {
         explosion = 1.0
         wavelet = { kind = "ricker", frequency = 10.0 }
     "#;
+
+    #[test]
+    fn a_shot_keeps_one_source() {
+        let two = MINIMAL.to_string()
+            + r#"
+        [[source]]
+        position = [50.0, 100.0, 100.0]
+        force = [0.0, 0.0, 1.0]
+        wavelet = { kind = "ricker", frequency = 12.0 }
+        "#;
+        let c = Config::from_toml(&two).unwrap();
+        let shot = c.shot(1).unwrap();
+        assert_eq!(shot.sources.len(), 1);
+        assert_eq!(shot.sources[0].position, [50.0, 100.0, 100.0]);
+        assert_eq!(shot.grid.points, c.grid.points);
+        assert!(c.shot(2).is_err());
+        assert_eq!(shot_dir(7), "shot-007");
+    }
 
     #[test]
     fn fills_in_defaults() {

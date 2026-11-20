@@ -784,8 +784,9 @@ fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) 
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
-    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers.traces;
-    let weights = balancing_weights(&observed);
+    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers;
+    let weights = balancing_weights(&observed.traces, &observed.components);
+    let observed = observed.traces;
     let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
     let cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
     let base = std::path::Path::new(".");
@@ -870,4 +871,241 @@ fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) 
             e(extrapolated)
         );
     }
+}
+
+/// A small inversion: two shots of a vertical and a horizontal force, recorded on the free
+/// surface, of a model with a faster sphere, inverted for vp and vs from a homogeneous start,
+/// with the top 60 m (the sources and the receivers) held fixed and the gradient
+/// preconditioned by the illumination. L-BFGS must lower the misfit and bring the sphere's vs
+/// closer; vp, whose wavelength (200 m) is twice the sphere, the S-dominated data hardly see.
+#[test]
+fn an_inversion_finds_a_sphere() {
+    use vibe_rations::config::Config;
+    use vibe_rations::inversion::{Inversion, Observed};
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let model = |sphere: &str| {
+        format!(
+            r#"
+            [grid]
+            points = [36, 32, 26]
+            spacing = 10.0
+            [time]
+            duration = 0.3
+            dt = 4.5e-4
+            [boundary]
+            pml_width = 8
+            pml_vp_max = 3000.0
+            [[model.layer]]
+            top = 0.0
+            vp = 2400.0
+            vs = 1300.0
+            rho = 2100.0
+            {sphere}
+            [[source]]
+            position = [110.0, 155.0, 30.0]
+            force = [0.0, 0.0, 1e9]
+            wavelet = {{ kind = "ricker", frequency = 12.0 }}
+            [[source]]
+            position = [240.0, 150.0, 30.0]
+            force = [1e9, 0.0, 0.0]
+            wavelet = {{ kind = "ricker", frequency = 12.0 }}
+            [receivers]
+            components = ["vx", "vy", "vz"]
+            [[receivers.line]]
+            from = [90.0, 120.0, 0.0]
+            to = [260.0, 120.0, 0.0]
+            count = 18
+            [[receivers.line]]
+            from = [90.0, 190.0, 0.0]
+            to = [260.0, 190.0, 0.0]
+            count = 18
+            [[receivers.line]]
+            from = [175.0, 90.0, 0.0]
+            to = [175.0, 220.0, 0.0]
+            count = 14
+            [inversion]
+            observed = "unused"
+            iterations = 3
+            fixed_above = 60.0
+            "#
+        )
+    };
+    let sphere = "[[model.sphere]]\ncenter = [175.0, 155.0, 115.0]\nradius = 40.0\n\
+                  vp = 2700.0\nvs = 1500.0\nrho = 2100.0";
+    let base = std::path::Path::new(".");
+    let truth = Config::from_toml(&model(sphere)).unwrap();
+    let observed: Vec<Observed> = (0..truth.sources.len())
+        .map(|s| {
+            let mut sim = Simulation::new(&truth.shot(s).unwrap(), base).unwrap();
+            sim.run(None, false).unwrap();
+            sim.receivers.traces.into()
+        })
+        .collect();
+    let true_model =
+        Model::from_config(Simulation::grid(&truth).unwrap(), &truth.model, base).unwrap();
+
+    let cfg = Config::from_toml(&model("")).unwrap();
+    let settings = cfg.inversion.clone().unwrap();
+    let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let mut inversion = Inversion::new(&cfg, start.clone(), observed, &settings).unwrap();
+    // The model error inside the sphere, relative to the anomaly.
+    let inside: Vec<usize> = (0..true_model.vp.len())
+        .filter(|&n| true_model.vp[n] != start.vp[n])
+        .collect();
+    let error = |m: &Model, values: fn(&Model) -> &Vec<f32>| {
+        let num: f64 = inside
+            .iter()
+            .map(|&n| (values(m)[n] - values(&true_model)[n]).powi(2) as f64)
+            .sum();
+        let den: f64 = inside
+            .iter()
+            .map(|&n| (values(&start)[n] - values(&true_model)[n]).powi(2) as f64)
+            .sum();
+        (num / den).sqrt()
+    };
+    let first = inversion.misfit();
+    println!(
+        "inversion: {} unknowns, misfit {first:.4e}",
+        inversion.unknowns()
+    );
+    for _ in 0..settings.iterations {
+        let it = inversion
+            .iterate()
+            .unwrap()
+            .expect("a step that lowers the misfit");
+        println!(
+            "inversion, iteration {}: misfit {:.1}% of the start, step {:.2}, {} trial(s), \
+             largest change {:.1}%, sphere vp error {:.1}%, vs error {:.1}%",
+            it.iteration,
+            100.0 * it.misfit / first,
+            it.step,
+            it.trials,
+            100.0 * it.largest_change,
+            100.0 * error(&inversion.model, |m| &m.vp),
+            100.0 * error(&inversion.model, |m| &m.vs),
+        );
+    }
+    // Measured with the defaults: 17.9% of the misfit left, vs error 91.9%. Before the merge
+    // (cubic receivers, Taylor coefficients, the time error kept): 17.9% and 91.8%
+    // (5 iterations: 6.6%, 82.7%).
+    let last = inversion.misfit() / first;
+    let vs = error(&inversion.model, |m| &m.vs);
+    assert!(last < 0.2 && vs < 0.93, "misfit {last}, vs error {vs}");
+}
+
+/// The inversion's gradient, with respect to its own unknowns (relative changes of vs, ρ and
+/// vp, listed in that order, summed over two shots that record velocity and pressure), is the
+/// derivative of its misfit, checked down the gradient by extrapolated central differences.
+///
+/// Measured with the defaults (optimised coefficients, time error removed): 4.0e-6 at
+/// h = 1e-2, between round-off in the single-precision traces at smaller steps (1.4e-5 at
+/// 8e-3, 5.1e-5 at 4e-3, 2.7e-5 at 2e-3, scattering rather than shrinking) and the
+/// extrapolation's h⁴ error at larger ones (2.5e-5 at 1.6e-2). Before the merge with
+/// stencil-long receiver interpolation (cubic receivers, Taylor coefficients, time error
+/// kept): 1.1e-5 at 4e-3, with the surface line reaching x = 70 and 220 m; with eight-point
+/// interpolation its end receivers read the side layers' damped values and the check gave
+/// 3.1e-5, so the line now keeps clear of them. Along a random direction the predicted change
+/// cancelled to 4e-4 of this one and round-off held the check at 1e-2.
+#[test]
+fn the_inversion_gradient_matches_finite_differences() {
+    use vibe_rations::config::Config;
+    use vibe_rations::inversion::{Inversion, Observed};
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let model = |sphere_vs: f64| {
+        format!(
+            r#"
+            [grid]
+            points = [30, 28, 24]
+            spacing = 10.0
+            [time]
+            duration = 0.25
+            dt = 5e-4
+            [boundary]
+            pml_width = 6
+            pml_vp_max = 3000.0
+            [output]
+            record_every = 2
+            [[model.layer]]
+            top = 0.0
+            vp = 2200.0
+            vs = 1200.0
+            rho = 2000.0
+            [[model.layer]]
+            top = 120.0
+            vp = 2600.0
+            vs = 1450.0
+            rho = 2200.0
+            [[model.sphere]]
+            center = [150.0, 140.0, 80.0]
+            radius = 30.0
+            vp = 2300.0
+            vs = {sphere_vs}
+            rho = 2050.0
+            [[source]]
+            position = [90.0, 140.0, 40.0]
+            force = [0.0, 3e8, 1e9]
+            wavelet = {{ kind = "ricker", frequency = 14.0 }}
+            [[source]]
+            position = [210.0, 120.0, 50.0]
+            explosion = 1e12
+            wavelet = {{ kind = "ricker", frequency = 14.0 }}
+            [receivers]
+            components = ["vx", "vz", "p"]
+            [[receivers.line]]
+            from = [100.0, 140.0, 0.0]
+            to = [190.0, 140.0, 0.0]
+            count = 6
+            [[receivers.point]]
+            position = [150.0, 100.0, 120.0]
+            [inversion]
+            observed = "unused"
+            parameters = ["vs", "rho", "vp"]
+            "#
+        )
+    };
+    let base = std::path::Path::new(".");
+    let truth = Config::from_toml(&model(1050.0)).unwrap();
+    let observed: Vec<Observed> = (0..truth.sources.len())
+        .map(|s| {
+            let mut sim = Simulation::new(&truth.shot(s).unwrap(), base).unwrap();
+            sim.run(None, false).unwrap();
+            sim.receivers.traces.into()
+        })
+        .collect();
+    let cfg = Config::from_toml(&model(1200.0)).unwrap();
+    for s in 0..cfg.sources.len() {
+        let shot = Simulation::new(&cfg.shot(s).unwrap(), base).unwrap();
+        assert_eq!(shot.receivers_next_to_layers(), 0, "shot {s}");
+    }
+    let settings = cfg.inversion.clone().unwrap();
+    let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let inversion = Inversion::new(&cfg, start.clone(), observed, &settings).unwrap();
+    let g = inversion.evaluate(&start).unwrap().gradient;
+    // Down the gradient, scaled to a largest change of 1: the change it predicts can't cancel
+    // between unknowns, as along a random direction, where single-precision round-off in the
+    // misfit then swamps it; a gradient with wrong parts still disagrees with the finite
+    // difference, which measures g_true · g, not |g|².
+    let largest = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let u: Vec<f64> = g.iter().map(|v| -v / largest).collect();
+    let predicted: f64 = g.iter().zip(&u).map(|(g, u)| g * u).sum();
+    let misfit = |h: f64| {
+        let x: Vec<f64> = u.iter().map(|u| h * u).collect();
+        inversion.misfit_of(&inversion.model_at(&x)).unwrap()
+    };
+    let h = 1e-2;
+    let [coarse, fine] = [h, h / 2.0].map(|h| (misfit(h) - misfit(-h)) / (2.0 * h));
+    let extrapolated = (4.0 * fine - coarse) / 3.0;
+    let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
+    println!(
+        "inversion gradient: predicted {predicted:.6e}; finite differences off by {:.1e} and \
+         {:.1e}, extrapolated by {:.1e}",
+        e(coarse),
+        e(fine),
+        e(extrapolated)
+    );
+    assert!(e(extrapolated) < 3e-5, "{}", e(extrapolated));
 }

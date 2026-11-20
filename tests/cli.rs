@@ -157,6 +157,43 @@ fn run_writes_traces_gathers_snapshots_and_settings() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// With --shots each source fires on its own, into its own directory.
+#[test]
+fn run_fires_shots_one_at_a_time() {
+    let dir = scratch("shots");
+    let config = dir.join("two.toml");
+    let two = TINY.replace(
+        "[receivers]",
+        "[[source]]\nposition = [60.0, 120.0, 60.0]\nforce = [0.0, 0.0, 1e9]\n\
+         wavelet = { kind = \"ricker\", frequency = 10.0 }\n[receivers]",
+    );
+    fs::write(&config, two).unwrap();
+    let out_dir = dir.join("out");
+    let out = vibe(&[
+        "run",
+        config.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+        "--quiet",
+        "--shots",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for (shot, at) in [
+        ("shot-000", [120.0, 120.0, 60.0]),
+        ("shot-001", [60.0, 120.0, 60.0]),
+    ] {
+        assert!(out_dir.join(shot).join("vz.npy").is_file(), "{shot}");
+        let info: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out_dir.join(shot).join("run.json")).unwrap())
+                .unwrap();
+        let sources = info["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1, "{shot}");
+        assert_eq!(sources[0]["position"], serde_json::json!(at), "{shot}");
+    }
+    assert!(!out_dir.join("shot-002").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// The gradient of a model's misfit to traces another model recorded.
 #[test]
 fn gradient_writes_one_array_per_parameter() {
@@ -217,6 +254,86 @@ fn gradient_writes_one_array_per_parameter() {
     let out = args(&observed);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("p.npy"), "{}", stderr(&out));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// An inversion of two shots another model recorded, one iteration: the model and the
+/// history come out, and a configuration without [inversion] is refused.
+#[test]
+fn invert_writes_the_model_and_its_history() {
+    let dir = scratch("invert");
+    let survey = TINY
+        .replace("duration = 0.05", "duration = 0.05\ndt = 6e-4")
+        .replace("pml_width = 8", "pml_width = 8\npml_vp_max = 2500.0")
+        .replace(
+            "[receivers]",
+            "[[source]]\nposition = [150.0, 110.0, 60.0]\nforce = [0.0, 0.0, 1e9]\n\
+             wavelet = { kind = \"ricker\", frequency = 10.0 }\n[receivers]",
+        );
+    let truth = dir.join("truth.toml");
+    fs::write(&truth, &survey).unwrap();
+    let observed = dir.join("observed");
+    let out = vibe(&[
+        "run",
+        truth.to_str().unwrap(),
+        "--out",
+        observed.to_str().unwrap(),
+        "--quiet",
+        "--shots",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let guess = dir.join("guess.toml");
+    let model_out = dir.join("inverted");
+    fs::write(
+        &guess,
+        survey.replace("vp = 2000.0", "vp = 2080.0")
+            + "\n[inversion]\nobserved = \"observed\"\niterations = 1\n",
+    )
+    .unwrap();
+    let out = vibe(&[
+        "invert",
+        guess.to_str().unwrap(),
+        "--out",
+        model_out.to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("iteration   1"), "{err}");
+    assert!(err.contains("memory --invert"), "{err}");
+    let plan = vibe(&["memory", "--invert", guess.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&plan.stdout).into_owned();
+    assert!(plan.status.success(), "{}", stderr(&plan));
+    for part in [
+        "observed traces of 2 shot(s)",
+        "L-BFGS: 5 pairs",
+        "free nodes",
+    ] {
+        assert!(text.contains(part), "no {part} in\n{text}");
+    }
+    // Shaped like model files, (nz, ny, nx), and changed from the start somewhere.
+    let mut moved = false;
+    for (name, start) in [("vp", 2080.0), ("vs", 1000.0), ("rho", 2000.0)] {
+        let (shape, values) =
+            vibe_rations::npy::read(&model_out.join(format!("{name}.npy"))).unwrap();
+        assert_eq!(shape, vec![20, 24, 24], "{name}.npy");
+        moved |= values.iter().any(|&v| v != start);
+    }
+    assert!(moved, "the inverted model is the starting one");
+    let info: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(model_out.join("inversion.json")).unwrap())
+            .unwrap();
+    let iterations = info["iterations"].as_array().unwrap();
+    assert_eq!(iterations.len(), 1, "{info}");
+    let (start, now) = (
+        info["starting_misfit"].as_f64().unwrap(),
+        iterations[0]["misfit"].as_f64().unwrap(),
+    );
+    assert!(now < start, "{now} vs {start}");
+    assert!(info["memory_bytes"].as_u64().unwrap() > 0, "{info}");
+    // Without [inversion] there is nothing to do.
+    let out = vibe(&["invert", truth.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("[inversion]"), "{}", stderr(&out));
     fs::remove_dir_all(dir).unwrap();
 }
 

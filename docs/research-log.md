@@ -734,6 +734,137 @@ which is small next to them.
 `just memory examples/layered.toml --gradient`.
 
 
+## 2026-11-20 — L-BFGS inversion
+
+**Question.** Do the gradients drive an inversion that recovers the model, and what does it
+need besides the gradient?
+
+**Method** (`src/inversion.rs`). The unknowns are relative changes $x = m / m_0 - 1$ of the
+inverted parameters at the free nodes (outside the absorbing layers, below `fixed_above`; $v_s$
+stays zero in fluids), so the gradient is $m_0\,\partial\chi/\partial m$. Each source is a shot,
+and the balanced misfits and their gradients add up. $\Delta t$ and the layers' damping
+(`pml_vp_max`) stay at the starting model's, so the forward map is smooth and the gradient is
+its derivative. Each iteration takes the L-BFGS direction [@nocedal1980; @liu1989], the
+two-loop recursion with initial matrix $\gamma P$, $\gamma = s^T y / y^T P y$
+[@nocedal2006], where $P$ is optionally the source-side pseudo-Hessian, $1 / (I / I_{\max} +
+\epsilon)$ with $I = \sum_n |v^{n+\frac12}|^2$ the forward run's energy at the node
+[@shin2001]. It scales the direction so that no value changes by more than 2% when there is no
+memory and 10% ever, projects onto bounds ($v_p$ below the stability limit of the fixed
+$\Delta t$, $v_s \le v_p / \sqrt2$), and backtracks with misfit-only runs until the Armijo
+condition holds for the projected step. The pair $(s, y)$ is kept if $s^T y > 0$.
+
+**Experiment.** A homogeneous model ($v_p = 2400$, $v_s = 1300$ m/s, $\rho = 2100$ kg/m³) with
+a sphere of radius 45 m, $v_p = 2700$, $v_s = 1500$ m/s, 120 m deep;
+40 × 36 × 30 nodes of 10 m, a free surface, 8-node layers; three shots of forces at 30 m depth
+(12 Hz Ricker), 31 receivers on the surface recording $v_x$, $v_y$ and $v_z$ for 0.4 s;
+inverted for $v_p$ and $v_s$ from the homogeneous model. Errors are the L2 model error over
+the sphere's nodes, relative to the anomaly:
+
+| Preconditioner | Fixed | Iterations | Misfit left | $v_s$ error | $v_p$ error |
+|---|---|---|---|---|---|
+| none | nothing | 4 | 54.8% | 99.1% | 100.0% |
+| none | top 60 m | 6 | 13.1% | 84.6% | 100.1% |
+| illumination, $\epsilon = 10^{-2}$ | nothing | 6 | 23.8% | 92.5% | 100.1% |
+| illumination, $\epsilon = 10^{-3}$ | nothing | 6 | 13.5% | 87.9% | 100.2% |
+| illumination, $\epsilon = 10^{-2}$ | top 60 m | 6 | 6.8% | 77.8% | 100.0% |
+| illumination, $\epsilon = 10^{-3}$ | top 60 m | 6 | 6.6% | 77.7% | 100.1% |
+
+Without help the gradient is dominated by the sources' and receivers' surroundings, where it is
+largest, and L-BFGS spends its steps there. The illumination evens out the source side; the
+receivers at the surface still pull, and fixing the top 60 m, which holds both, does most.
+With the top fixed, $\epsilon$ hardly matters; without it, $10^{-3}$ is better. Every
+iteration here took the full step at the first try (in the smaller test below, one of five
+backtracked once), so an iteration costs about one gradient (five forward runs) and one
+forward run per shot. $v_p$ didn't move: at 12 Hz its
+wavelength (200 m) is twice the sphere's diameter, and the forces radiate mostly S waves
+(108 m), which the data are full of.
+
+**Decision.** Precondition by default with $\epsilon = 10^{-3}$; fix the region around the
+sources and receivers when they sit near the targets' depth. To come: receiver-side
+illumination, frequency continuation [@fichtner2013] to approach the larger anomalies, and
+scaling between parameters when $\rho$ is inverted too.
+
+**Review.** An adversarial review found the inversion's safeguards incomplete: with $v_p$
+inverted alone, $v_p$ could fall until $\lambda < 0$ and then the model failed validation and
+aborted the run; with `parameters = ["vs", "vp"]` $v_s$ was capped by the unprojected $v_p$; a
+trial that couldn't be set up ended the line search; at a bound the projected search could
+stop while the gradient along the bound's face still pointed downhill; and a nearly silent
+component could take over the balanced misfit. Now $v_p$ is projected first and held at or
+above $\sqrt2\, v_s$ where $v_s$ isn't inverted; failed trials shorten the step; unknowns
+pinned at a bound with the gradient pushing out are left out of the direction (projected
+gradient), with steepest descent as a fallback; and a velocity component's weight is floored
+at $10^{-4}$ of the loudest one's energy. The inversion's own gradient, with respect to its
+unknowns ($v_s$, $\rho$, $v_p$, two shots, velocity and pressure), agrees with extrapolated
+central differences down the gradient to $1.1 \times 10^{-5}$
+(`the_inversion_gradient_matches_finite_differences`); along a random direction the predicted
+change cancelled to $4 \times 10^{-4}$ of that, and round-off held the check at $10^{-2}$. The
+other tests' numbers didn't change.
+
+**Reproduce:** `an_inversion_finds_a_sphere` (a smaller version: two shots, 36 × 32 × 26
+nodes, 0.3 s, the top 60 m fixed, preconditioned; 3 iterations leave 17.9% of the misfit and a
+$v_s$ error of 91.8%, 5 iterations 6.6% and 82.7%). The table came from that test's earlier,
+larger setup, with the settings varied.
+
+## 2026-11-20 — The inversion with the new defaults
+
+**Question.** The L-BFGS inversion (previous entry) was built with Taylor coefficients, the
+time error kept and cubic receivers. Does it still hold with the defaults this branch
+adopted, and what memory does it need?
+
+**Method.** Merged it and reran its tests; varied the scheme, the receivers' positions and
+the finite-difference step in its gradient check
+(`the_inversion_gradient_matches_finite_differences`: two shots, $v_s$, $\rho$ and $v_p$,
+velocity and pressure, extrapolated central differences down the gradient).
+
+**Changes.** Optimised coefficients follow the model's slowest wave, so every trial model
+had its own operator; `Inversion::new` now pins `optimised_for` at the start's points per
+wavelength, beside $\Delta t$ and `pml_vp_max`. The bound on $v_p$ came from Taylor's
+stability limit; it now comes from the stencil the runs use.
+
+**Results.** The check failed at $3.1 \times 10^{-5}$ against its $3 \times 10^{-5}$. The
+cause was the geometry, not the defaults: with eight-point interpolation the surface line's
+end receivers (x = 70 and 220 m: nodes 7 and 22, whose eight-point reach, nodes 4–11 and
+19–26, enters the layers at 0–5 and 24–29) read damped values, which breaks the adjoint's exactness (2026-11-20, "The adjoint and gradients with the
+new defaults"); Taylor coefficients with the time error kept gave $7.4 \times 10^{-5}$ there.
+With the line at 100–190 m, clear of the layers:
+
+| Scheme | $h$ | Extrapolated error |
+|---|---|---|
+| optimised, time error kept | $4 \times 10^{-3}$ | $1.6 \times 10^{-7}$ |
+| Taylor, time error kept | $4 \times 10^{-3}$ | $1.9 \times 10^{-5}$ |
+| Taylor, transform | $4 \times 10^{-3}$ | $2.3 \times 10^{-5}$ |
+| defaults | $2 \times 10^{-3}$ | $2.7 \times 10^{-5}$ |
+| defaults | $4 \times 10^{-3}$ | $5.1 \times 10^{-5}$ |
+| defaults | $6 \times 10^{-3}$ | $1.5 \times 10^{-5}$ |
+| defaults | $8 \times 10^{-3}$ | $1.4 \times 10^{-5}$ |
+| defaults | $10^{-2}$ | $4.0 \times 10^{-6}$ |
+| defaults | $1.2 \times 10^{-2}$ | $1.3 \times 10^{-7}$ |
+| defaults | $1.6 \times 10^{-2}$ | $2.5 \times 10^{-5}$ |
+
+The plain differences fall as $h^2$ throughout (2.4% at $10^{-2}$, 0.10% at
+$2 \times 10^{-3}$), but the extrapolated ones scatter below $h \approx 10^{-2}$ instead of
+shrinking: round-off in the misfit of single-precision traces, which takes over as the
+difference shrinks; above it, the extrapolation's $h^4$ error grows. Receivers at 100 m depth
+in a larger grid gave $2.0 \times 10^{-5}$ (defaults) and $1.7 \times 10^{-5}$ (Taylor, kept)
+at $4 \times 10^{-3}$, the same scatter. The sphere inversion (`an_inversion_finds_a_sphere`)
+is unchanged: 17.9% of the misfit and 91.9% of the $v_s$ anomaly left after 3 iterations
+(91.8% before), every step taken in one trial.
+
+**Memory.** `memory --invert` counts an inversion exactly: one shot's gradient run, every
+shot's observed traces, three models (as it stands, the start, the one stepped to), the
+gradient and illumination summed over the shots, and per unknown $8(2m + 5)$ bytes for L-BFGS
+memory $m$; `counts_what_an_inversion_allocates` matches a real inversion byte for byte.
+`Inversion::new` held its set-up run, a whole solver, through the first gradient; it now
+drops it, and `iterate` no longer copies the unknowns and gradient for the line search. The
+gradient's illumination adds 8 bytes per interior node: `examples/layered.toml`'s gradient
+run needs 3.64 GiB (3.63 before).
+
+**Decision.** The check runs at $h = 10^{-2}$ and refuses receivers next to the layers; its
+tolerance stays. The inversion pins the operator. When a check like this is a few
+$10^{-5}$ off at one step, scan $h$ before suspecting the gradient.
+
+**Reproduce:** `just physics inversion`; `just unit counts_what_an_inversion_allocates`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

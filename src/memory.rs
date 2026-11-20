@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::config::{Config, PlaneKind};
@@ -40,6 +40,17 @@ pub struct Memory {
     pub resident: u64,
     /// The most at any one time: the resident memory and the largest transient part.
     pub peak: u64,
+}
+
+/// What sets an inversion's memory besides its gradient runs.
+#[derive(Clone, Copy, Debug)]
+pub struct InversionSize {
+    pub shots: usize,
+    /// The inverted parameters at their free nodes.
+    pub unknowns: usize,
+    /// Pairs L-BFGS keeps.
+    pub memory: usize,
+    pub precondition: bool,
 }
 
 /// What decides a run's memory.
@@ -107,38 +118,103 @@ impl Plan {
     /// `checkpoint_every` steps (by default the interval that about minimises it), and of the
     /// observed traces the `gradient` command reads. It peaks while the forward run is
     /// replayed: on top of the forward run (which writes no snapshots then), the adjoint's
-    /// solver and residuals, every checkpoint, one segment's velocities, the correlation sums
-    /// and the two strains. All but the sums are freed before the gradient is put together.
+    /// solver and residuals, every checkpoint, one segment's velocities, the correlation sums,
+    /// the illumination and the two strains. All but the sums and the illumination are freed
+    /// before the gradient is put together.
     pub fn gradient_memory(&self, checkpoint_every: Option<usize>) -> Memory {
+        let observed = part("observed traces", self.trace_bytes());
+        Memory::of(self.gradient_parts(checkpoint_every, observed))
+    }
+
+    /// The memory of an inversion ([`crate::inversion::Inversion`]) whose shots are each like
+    /// this plan's run (one source): one shot's gradient run at a time, every shot's observed
+    /// traces, and the inversion's own arrays, with L-BFGS's memory full. It peaks in a gradient
+    /// run after a step: the model as it stands, the start and the model stepped to, the
+    /// gradient and illumination summed over the shots, and per unknown the L-BFGS pairs, the
+    /// unknowns, their gradient, the step, the preconditioner and the node's index.
+    pub fn inversion_memory(&self, inversion: &InversionSize) -> Memory {
+        let interior = self.grid.interior_len() as u64;
+        let n = inversion.unknowns as u64;
+        let shots = inversion.shots;
+        let observed = part(
+            format!("observed traces of {shots} shot(s)"),
+            shots as u64 * self.trace_bytes(),
+        );
+        let mut parts = self.gradient_parts(None, observed);
+        parts.extend([
+            part(
+                "models: as it stands, the start, and the one stepped to",
+                3 * 4 * 3 * interior,
+            ),
+            part(
+                "the gradient and illumination summed over the shots",
+                8 * 4 * interior,
+            ),
+            part(
+                format!(
+                    "L-BFGS: {} pairs of changes of {n} unknowns",
+                    inversion.memory
+                ),
+                16 * inversion.memory as u64 * n,
+            ),
+            part(
+                "the unknowns, their gradient, the step and the preconditioner",
+                8 * n * (3 + u64::from(inversion.precondition)),
+            ),
+            part(
+                "the free nodes' indices",
+                std::mem::size_of::<usize>() as u64 * n,
+            ),
+        ]);
+        Memory::of(parts)
+    }
+
+    /// A gradient run's parts, with `observed` traces.
+    fn gradient_parts(&self, checkpoint_every: Option<usize>, observed: Part) -> Vec<Part> {
         let padded = self.grid.padded_len() as u64;
+        let interior = self.grid.interior_len() as u64;
         let every = checkpoint_interval(self.steps, checkpoint_every);
         let checkpoints = self.steps.div_ceil(every);
         // The segment holds the velocities before its first step and after each of the others.
         let segment = if self.steps == 0 { 0 } else { every + 1 };
         let mut parts = self.forward_parts();
         parts.extend([
-            part(
-                "the adjoint's solver, the same again",
-                self.solver_bytes(),
-            ),
-            part("observed traces", 4 * (self.traces * self.samples) as u64),
-            part("residuals", 4 * (self.traces * self.samples) as u64),
+            part("the adjoint's solver, the same again", self.solver_bytes()),
+            observed,
+            part("residuals", self.trace_bytes()),
             part(
                 "pressure residuals, as they enter the adjoint strain",
                 4 * (self.pressure_traces * self.samples) as u64,
             ),
             part(
-                format!("checkpoints: {checkpoints}, every {every} steps, of the wavefield and layers' memory"),
+                format!(
+                    "checkpoints: {checkpoints}, every {every} steps, of the wavefield and \
+                     layers' memory"
+                ),
                 checkpoints as u64 * 4 * (9 * padded + self.psi()),
             ),
             part(
                 format!("a replayed segment: {segment} copies of the velocities"),
                 segment as u64 * 4 * 3 * padded,
             ),
-            part("correlation sums: 8 per padded node, in double precision", 8 * 8 * padded),
-            part("forward and adjoint strains: 12 arrays on the padded grid", 4 * 12 * padded),
+            part(
+                "correlation sums: 8 per padded node, in double precision",
+                8 * 8 * padded,
+            ),
+            part(
+                "illumination: Σ|v|² per node, in double precision",
+                8 * interior,
+            ),
+            part(
+                "forward and adjoint strains: 12 arrays on the padded grid",
+                4 * 12 * padded,
+            ),
         ]);
-        Memory::of(parts)
+        parts
+    }
+
+    fn trace_bytes(&self) -> u64 {
+        4 * (self.traces * self.samples) as u64
     }
 
     /// The parts of a forward run held throughout: the solver's, the sources' and the traces.
@@ -158,7 +234,7 @@ impl Plan {
                 "sources' pre-warped time series",
                 8 * (self.warped_sources * self.steps) as u64,
             ),
-            part("traces", 4 * (self.traces * self.samples) as u64),
+            part("traces", self.trace_bytes()),
         ]
     }
 
@@ -209,12 +285,51 @@ pub fn estimate_gradient(
     Ok(plan(cfg, base)?.gradient_memory(checkpoint_every))
 }
 
+/// The memory an inversion of `cfg` (`invert`) would need ([`Plan::inversion_memory`]),
+/// worked out like [`estimate`]. Each source is a shot, run with the time step all of them
+/// set. Unknowns are counted at every node outside the layers and below `fixed_above`; vs isn't
+/// inverted where it starts at zero, so with fluids in the model this is a little more than
+/// the inversion needs.
+pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
+    let settings = cfg
+        .inversion
+        .as_ref()
+        .context("the configuration has no [inversion] section")?;
+    let (grid, steps) = timed(cfg, base)?;
+    let size = InversionSize {
+        shots: cfg.sources.len(),
+        unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
+        memory: settings.memory,
+        precondition: settings.precondition,
+    };
+    Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
+}
+
 fn plan(cfg: &Config, base: &Path) -> Result<Plan> {
+    let (grid, steps) = timed(cfg, base)?;
+    Plan::new(cfg, grid, steps)
+}
+
+/// The grid with its halo, and the steps of the run.
+fn timed(cfg: &Config, base: &Path) -> Result<(Grid, usize)> {
     let taylor = Stencil::taylor(cfg.scheme.order)?;
     let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
     let [vp_max, slowest] = Model::extremes(grid, &cfg.model, base)?;
-    let t = timing(cfg, &grid, vp_max, slowest)?;
-    Plan::new(cfg, grid, t.steps)
+    Ok((grid, timing(cfg, &grid, vp_max, slowest)?.steps))
+}
+
+/// Nodes an inversion may change (`Inversion::new`): outside the absorbing layers and not
+/// above `fixed_above`.
+fn free_nodes(cfg: &Config, grid: &Grid, fixed_above: Option<f64>) -> usize {
+    let b = &cfg.boundary;
+    let w = b.pml_width;
+    let [nx, ny, nz] = grid.n;
+    let top = if b.free_surface { 0 } else { w };
+    let fixed = fixed_above.unwrap_or(f64::NEG_INFINITY);
+    let depths = (top..nz.saturating_sub(w))
+        .filter(|&k| k as f64 * grid.h[2] >= fixed)
+        .count();
+    nx.saturating_sub(2 * w) * ny.saturating_sub(2 * w) * depths
 }
 
 /// Memory the system can still give this process (Linux): /proc/meminfo's MemAvailable, or
@@ -409,6 +524,85 @@ mod tests {
             let forward = estimate(&cfg, Path::new(".")).unwrap();
             assert!(m.peak > 3 * forward.peak);
         }
+    }
+
+    /// An inversion's plan counts what it holds at its peak, a gradient run after a step with
+    /// L-BFGS's memory full, from its configuration alone: two shots recording velocity and
+    /// pressure, the top held fixed, the gradient preconditioned.
+    #[test]
+    fn counts_what_an_inversion_allocates() {
+        use crate::inversion::{Inversion, Observed};
+        let model = |vs: f64| {
+            format!(
+                r#"
+                [grid]
+                points = [30, 28, 24]
+                spacing = 10.0
+                [time]
+                duration = 0.2
+                [boundary]
+                pml_width = 6
+                [output]
+                record_every = 2
+                [[model.layer]]
+                top = 0.0
+                vp = 2200.0
+                vs = 1200.0
+                rho = 2000.0
+                [[model.sphere]]
+                center = [150.0, 140.0, 120.0]
+                radius = 30.0
+                vp = 2200.0
+                vs = {vs}
+                rho = 2000.0
+                [[source]]
+                position = [90.0, 140.0, 70.0]
+                force = [0.0, 0.0, 1e9]
+                wavelet = {{ kind = "ricker", frequency = 14.0 }}
+                [[source]]
+                position = [210.0, 120.0, 70.0]
+                explosion = 1e12
+                wavelet = {{ kind = "ricker", frequency = 14.0 }}
+                [receivers]
+                components = ["vx", "vz", "p"]
+                [[receivers.line]]
+                from = [80.0, 140.0, 100.0]
+                to = [220.0, 140.0, 100.0]
+                count = 8
+                [inversion]
+                observed = "unused"
+                memory = 1
+                fixed_above = 85.0
+                "#
+            )
+        };
+        let truth = Config::from_toml(&model(1350.0)).unwrap();
+        let observed: Vec<Observed> = (0..2)
+            .map(|s| {
+                let mut sim = Simulation::new(&truth.shot(s).unwrap(), Path::new(".")).unwrap();
+                sim.run(None, false).unwrap();
+                sim.receivers.traces.into()
+            })
+            .collect();
+        let cfg = Config::from_toml(&model(1200.0)).unwrap();
+        let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
+        let settings = cfg.inversion.clone().unwrap();
+        let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, Path::new("."))
+            .unwrap();
+        let mut inversion = Inversion::new(&cfg, start, observed, &settings).unwrap();
+        assert_eq!(
+            m.parts.last().unwrap().bytes as usize,
+            8 * inversion.unknowns(),
+            "the free nodes"
+        );
+        let first = inversion.iterate().unwrap().unwrap();
+        let second = inversion.iterate().unwrap().unwrap();
+        // The second gradient run had L-BFGS's one pair to hold.
+        assert!(
+            first.memory == 1 && !second.restarted,
+            "{first:?} {second:?}"
+        );
+        assert_eq!(m.peak, inversion.memory_bytes as u64, "\n{}", m.table());
     }
 
     #[test]

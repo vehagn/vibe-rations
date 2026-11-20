@@ -35,6 +35,7 @@ use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
 
 use crate::adjoint::Adjoint;
+use crate::grid::Grid;
 use crate::model::Model;
 use crate::receiver::{Component, Receivers};
 use crate::simulation::Simulation;
@@ -76,16 +77,28 @@ pub fn l2_misfit(
     Ok((misfit, residuals))
 }
 
-/// Weights 1/‖d_obs,c‖² that make each component's misfit relative to its own energy, so
-/// that pressure and velocity count alike. A component that observed nothing gets 0; one that
-/// observed next to nothing (vy on a symmetry plane, say) gets a huge weight, and its noise
-/// as much say as the other components' signal, so leave such components out.
-pub fn balancing_weights(observed: &[Vec<f32>]) -> Vec<f64> {
-    observed
+/// Weights 1/‖d_obs,c‖² that make each recorded component's misfit relative to its own
+/// energy, so that pressure and velocity count alike. A velocity component that observed less
+/// than 10⁻⁴ of the loudest velocity component's energy (vy on a symmetry plane, say) is
+/// weighted as if it had that much, so its noise can't outweigh the others' signal; one that
+/// observed nothing at all gets 0. `components` names the traces, as the receivers do.
+pub fn balancing_weights(observed: &[Vec<f32>], components: &[Component]) -> Vec<f64> {
+    let energy: Vec<f64> = observed
         .iter()
-        .map(|o| {
-            let energy: f64 = o.iter().map(|&x| (x as f64).powi(2)).sum();
-            if energy > 0.0 { 1.0 / energy } else { 0.0 }
+        .map(|o| o.iter().map(|&x| (x as f64).powi(2)).sum())
+        .collect();
+    let velocity = |c: &Component| !matches!(c, Component::P);
+    let loudest = components
+        .iter()
+        .zip(&energy)
+        .filter(|(c, _)| velocity(c))
+        .fold(0.0f64, |m, (_, &e)| m.max(e));
+    components
+        .iter()
+        .zip(&energy)
+        .map(|(c, &e)| {
+            let floor = if velocity(c) { 1e-4 * loudest } else { 0.0 };
+            if e > 0.0 { 1.0 / e.max(floor) } else { 0.0 }
         })
         .collect()
 }
@@ -133,9 +146,14 @@ pub struct Run {
     pub checkpoint_every: usize,
     /// The most memory the run held at once, counted from its arrays: the forward run, the
     /// adjoint run with its residuals, the checkpoints, one replayed segment's velocities, the
-    /// correlation sums and the strains. [`crate::memory::Plan::gradient_memory`] works it out
+    /// correlation sums, the illumination and the strains.
+    /// [`crate::memory::Plan::gradient_memory`] works it out
     /// beforehand (with the observed traces, which are the caller's).
     pub memory_bytes: usize,
+    /// Σₙ |v⁽ⁿ⁺½⁾|² of the forward run at every interior node (x fastest): how much of the
+    /// source's wavefield reaches it, the diagonal of a source-side pseudo-Hessian (Shin et
+    /// al. 2001) to precondition an inversion with.
+    pub illumination: Vec<f64>,
 }
 
 /// Steps between checkpoints: `requested`, or by default ⌈√(3N)⌉, which about minimises the
@@ -202,6 +220,7 @@ pub fn gradient(
     let g = sim.solver.grid;
     let len = g.padded_len();
     let mut sums: Sums = vec![[0.0; 8]; len];
+    let mut illumination = vec![0.0f64; g.interior_len()];
     let mut strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
     let mut adjoint_strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
     pressure.add(&mut adjoint_strain, steps);
@@ -212,6 +231,7 @@ pub fn gradient(
         + adjoint.memory_bytes()
         + pressure.memory_bytes()
         + std::mem::size_of_val(sums.as_slice())
+        + std::mem::size_of_val(illumination.as_slice())
         + 4 * strain
             .iter()
             .chain(&adjoint_strain)
@@ -248,6 +268,7 @@ pub fn gradient(
                 "adjoint and replay out of step"
             );
             correlate_density(&adjoint.solver, &mut sums, before, after);
+            illuminate(&g, &mut illumination, after);
             // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
             let f = &adjoint.solver.fields;
             adjoint
@@ -278,6 +299,7 @@ pub fn gradient(
         misfit,
         checkpoint_every: every,
         memory_bytes: peak_bytes,
+        illumination,
     })
 }
 
@@ -441,6 +463,23 @@ fn correlate_density(
         });
 }
 
+/// Adds |v|² at every interior node, each component taken where it is stored.
+fn illuminate(g: &Grid, illumination: &mut [f64], v: &[Vec<f32>; 3]) {
+    let [nx, ny, _] = g.n;
+    illumination
+        .par_chunks_mut(nx * ny)
+        .enumerate()
+        .for_each(|(k, plane)| {
+            for j in 0..ny {
+                let row = g.idx(0, j, k);
+                for i in 0..nx {
+                    let p = row + i;
+                    plane[j * nx + i] += v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>();
+                }
+            }
+        });
+}
+
 /// Takes the sums from the staggered positions to ρ, λ and μ at the nodes.
 fn to_nodes(s: &Solver, sums: &Sums) -> Gradient {
     let g = s.grid;
@@ -532,8 +571,14 @@ mod tests {
 
     #[test]
     fn balancing_weights_divide_by_the_observed_energy() {
-        let w = balancing_weights(&[vec![3.0, 4.0], vec![0.0; 2]]);
+        use Component::{P, Vx, Vy, Vz};
+        let w = balancing_weights(&[vec![3.0, 4.0], vec![0.0; 2]], &[Vx, Vz]);
         assert_eq!(w, vec![1.0 / 25.0, 0.0]);
+        // A nearly silent velocity component is weighed as if it had 10⁻⁴ of the loudest's
+        // energy; pressure, in other units, isn't compared with velocity.
+        let w = balancing_weights(&[vec![100.0], vec![0.1], vec![0.5]], &[Vx, Vy, P]);
+        assert_eq!(w, vec![1e-4, 1.0, 4.0]);
+        let _ = Vz;
     }
 
     /// The replay is exact, so how often the run keeps checkpoints doesn't change the
