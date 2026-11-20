@@ -384,3 +384,180 @@ fn long_run(order: usize) {
     );
     assert!(end < 1e-4 * peak, "{end} left of a peak of {peak}");
 }
+
+/// The adjoint run is the transpose of the forward run. For a force history w at A, recorded
+/// as d = F w at receivers in every component, and residuals d̃ at those receivers,
+/// ⟨F w, d̃⟩ = ⟨w, Fᵀ d̃⟩, where Fᵀ d̃ is the adjoint velocity read at A after each adjoint step.
+/// The scheme is self-adjoint everywhere but in the absorbing layers, so this holds to
+/// round-off for receivers outside them, whatever the waves do inside.
+#[test]
+fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
+    for order in [4, 8] {
+        for (walls, free_surface, signal, every) in [
+            ("rigid", true, "white", 1),
+            ("cpml", true, "band-limited", 2),
+            ("cpml", false, "white", 1),
+        ] {
+            let e = dot_product(order, walls, free_surface, signal, every);
+            // Single precision over about 1300 steps.
+            assert!(e < 1e-5, "order {order}, {walls}, {signal}: {e}");
+        }
+    }
+}
+
+/// Uniform values in [0, 1) from a fixed seed (xorshift64*).
+fn noise(n: usize, seed: u64) -> Vec<f64> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+        })
+        .collect()
+}
+
+/// Zero-mean noise smoothed by a Ricker wavelet of `f0` Hz sampled every `dt`, scaled to a
+/// peak of 1.
+fn band_limited(n: usize, seed: u64, f0: f64, dt: f64) -> Vec<f64> {
+    let w = Wavelet::Ricker { f0, t0: 0.0 };
+    let half = (1.5 / f0 / dt).ceil() as isize;
+    let kernel: Vec<f64> = (-half..=half).map(|k| w.value(k as f64 * dt)).collect();
+    let x: Vec<f64> = noise(n, seed).iter().map(|v| 2.0 * v - 1.0).collect();
+    let y: Vec<f64> = (0..n as isize)
+        .map(|i| {
+            (-half..=half)
+                .filter(|k| (0..n as isize).contains(&(i - k)))
+                .map(|k| x[(i - k) as usize] * kernel[(k + half) as usize])
+                .sum()
+        })
+        .collect();
+    let peak = y.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    y.iter().map(|v| v / peak).collect()
+}
+
+/// |⟨F w, d̃⟩ - ⟨w, Fᵀ d̃⟩| / ⟨F w, d̃⟩ in the reciprocity test's model, with every component
+/// recorded at four receivers, one on the free surface if there is one. The residuals are the
+/// data times random positive weights, so that the terms of ⟨F w, d̃⟩ can't cancel.
+fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, every: usize) -> f64 {
+    let pml = if walls == "rigid" { 0 } else { 10 };
+    // Without a free surface the top 100 m are an absorbing layer.
+    let shallow = if free_surface { 0.0 } else { 110.0 };
+    let receivers: String = [
+        [180.0, 220.0, shallow],
+        [420.0, 260.0, 230.0],
+        [300.0, 150.0, shallow + 60.0],
+        [250.0, 300.0, 140.0],
+    ]
+    .iter()
+    .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
+    .collect();
+    let mut sim = setup(&format!(
+        r#"
+        [grid]
+        points = [60, 50, 40]
+        spacing = 10.0
+        [time]
+        duration = 0.5
+        [boundary]
+        pml_width = {pml}
+        free_surface = {free_surface}
+        [scheme]
+        order = {order}
+        [output]
+        record_every = {every}
+        [[model.layer]]
+        top = 0.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 105.0
+        vp = 3500.0
+        vs = 2000.0
+        rho = 2400.0
+        [[model.sphere]]
+        center = [300.0, 250.0, 150.0]
+        radius = 40.0
+        vp = 1800.0
+        vs = 900.0
+        rho = 1900.0
+        [[source]]
+        position = [330.0, 240.0, 200.0]
+        force = [0.6, 0.0, 0.8]
+        wavelet = {{ kind = "ricker", frequency = 12.0 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        {receivers}
+        "#
+    ));
+    let (steps, dt) = (sim.steps, sim.solver.dt);
+    let w: Vec<f64> = match signal {
+        "white" => noise(steps, 1).iter().map(|v| 2.0 * v - 1.0).collect(),
+        _ => band_limited(steps, 1, 12.0, dt),
+    };
+    // Forward: the force history w through the source's operator, recorded as configured.
+    let op = sim.sources[0].op.clone();
+    for (n, &value) in w.iter().enumerate() {
+        sim.solver
+            .step_with(|f, _| op.inject(f, value as f32), |_, _| {});
+        if n.is_multiple_of(every) {
+            sim.receivers.record(&sim.solver);
+        }
+    }
+    let len = sim.receivers.nodes.len() * sim.receivers.samples;
+    let residuals: Vec<Vec<f64>> = sim
+        .receivers
+        .traces
+        .iter()
+        .zip(10..)
+        .map(|(d, seed)| {
+            let weights = match signal {
+                "white" => noise(len, seed),
+                _ => band_limited(len, seed, 12.0 / every as f64, dt * every as f64)
+                    .iter()
+                    .map(|v| 1.0 + 0.5 * v)
+                    .collect(),
+            };
+            // Pressure is ~10⁶ times velocity: each component gets the same say.
+            let norm: f64 = d.iter().map(|&x| (x as f64).powi(2)).sum();
+            assert!(norm > 0.0, "every component sees the source");
+            d.iter()
+                .zip(weights)
+                .map(|(&d, u)| d as f64 * u / norm)
+                .collect()
+        })
+        .collect();
+    let forward: f64 = sim
+        .receivers
+        .traces
+        .iter()
+        .zip(&residuals)
+        .flat_map(|(d, r)| d.iter().zip(r).map(|(&a, &b)| a as f64 * b))
+        .sum();
+    // Adjoint: the residuals back from the receivers, read at A along the force.
+    let node = sim.sources[0].node;
+    let mut adjoint = vibe_rations::adjoint::Adjoint::new(
+        &sim,
+        residuals
+            .iter()
+            .map(|r| r.iter().map(|&x| x as f32).collect())
+            .collect(),
+    )
+    .expect("residuals that fit");
+    let mut back = vec![0.0f64; steps];
+    adjoint
+        .run(|n, s| {
+            back[n] = 0.6 * s.sample(Component::Vx, node) as f64
+                + 0.8 * s.sample(Component::Vz, node) as f64;
+        })
+        .expect("a stable adjoint run");
+    let backward: f64 = w.iter().zip(&back).map(|(a, b)| a * b).sum();
+    let e = (forward - backward).abs() / forward;
+    println!(
+        "dot product, order {order}, {walls} walls, free surface {free_surface}, {signal}, \
+         every {every}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, difference {e:.1e}"
+    );
+    e
+}
