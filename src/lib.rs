@@ -9,6 +9,7 @@ pub mod adjoint;
 pub mod config;
 pub mod cpml;
 pub mod fd;
+pub mod gradient;
 pub mod grid;
 pub mod image;
 pub mod model;
