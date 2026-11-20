@@ -159,6 +159,8 @@ fn gradient_writes_one_array_per_parameter() {
         serde_json::from_str(&fs::read_to_string(grad.join("gradient.json")).unwrap()).unwrap();
     assert!(info["misfit"].as_f64().unwrap() > 0.0, "{info}");
     assert_eq!(info["weights"].as_array().unwrap().len(), 2);
+    // TINY's receivers are clear of the layers.
+    assert_eq!(info["receivers_next_to_layers"], 0, "vz is read along z");
     // The observed traces must be there, sampled as the receivers record.
     fs::write(&guess, TINY.replace("vp = 2000.0", "vp = 2100.0")).unwrap();
     let out = args(&observed);

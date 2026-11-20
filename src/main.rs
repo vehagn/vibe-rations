@@ -101,6 +101,14 @@ fn run() -> Result<()> {
             let (cfg, mut sim) = load(&config)?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
+            let next_to_layers = sim.receivers_next_to_layers();
+            if next_to_layers > 0 {
+                eprintln!(
+                    "warning: {next_to_layers} receiver(s) next to the absorbing layers read \
+                     velocities inside them, which makes the gradient approximate; move them a \
+                     node further in"
+                );
+            }
             let r = &sim.receivers;
             let want = [r.nodes.len(), r.samples];
             let data = r
@@ -140,6 +148,7 @@ fn run() -> Result<()> {
                 "weights": weights,
                 "checkpoint_every": run.checkpoint_every,
                 "checkpoint_bytes": run.checkpoint_bytes,
+                "receivers_next_to_layers": next_to_layers,
             });
             std::fs::write(
                 out.join("gradient.json"),

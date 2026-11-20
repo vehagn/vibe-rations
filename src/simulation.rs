@@ -10,13 +10,13 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::config::{Config, Format, PlaneKind, default_courant};
-use crate::cpml::PmlSettings;
+use crate::cpml::{PmlSettings, Stagger};
 use crate::fd::Stencil;
 use crate::grid::Grid;
 use crate::image;
 use crate::model::Model;
 use crate::npy;
-use crate::receiver::Receivers;
+use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
 use crate::solver::Solver;
 use crate::source::{Mechanism, Source};
@@ -338,6 +338,40 @@ impl Simulation {
             record_every,
             info,
         })
+    }
+
+    /// Receivers outside the absorbing layers that still read a velocity the layers damp. A
+    /// velocity is interpolated from staggered values either side of its node, so on the first
+    /// node outside a layer it reads one inside. That hardly matters to the traces, but the
+    /// adjoint injects the residual there, where the scheme is not self-adjoint, so adjoints
+    /// and gradients are no longer exact: a node further in, they are.
+    pub fn receivers_next_to_layers(&self) -> usize {
+        let s = &self.solver;
+        let in_layers =
+            |node: &[usize; 3]| node.iter().zip(&s.cpml).any(|(&n, c)| c.slab(n).is_some());
+        let damped = |axis: usize, m: usize| {
+            let c = &s.cpml[axis];
+            c.slab(m)
+                .is_some_and(|i| c.profile(Stagger::Half).d[i] > 0.0)
+        };
+        let r = &self.receivers;
+        r.nodes
+            .iter()
+            .filter(|node| !in_layers(node))
+            .filter(|node| {
+                r.components.iter().any(|c| {
+                    let axis = match c {
+                        Component::Vx => 0,
+                        Component::Vy => 1,
+                        Component::Vz => 2,
+                        Component::P => return false,
+                    };
+                    s.stagger_weights(axis, node[axis], 1.0)
+                        .iter()
+                        .any(|&(m, _)| damped(axis, m))
+                })
+            })
+            .count()
     }
 
     /// Advances the wavefield one step, with the sources, without recording anything.
@@ -685,6 +719,28 @@ mod tests {
         assert!(w[0].contains("points per shortest wavelength"), "{w:?}");
         assert!(w[1].contains("5 nodes thick"), "{w:?}");
         assert!(w[2].contains("receiver(s) inside"), "{w:?}");
+    }
+
+    /// On the first node outside a layer (node 8 with 8-node layers) a horizontal velocity
+    /// reads a damped value; one node further in it doesn't, nor does pressure, nor vertical
+    /// velocity at the free surface.
+    #[test]
+    fn finds_velocity_receivers_next_to_the_layers() {
+        let next = |at: &str, components: &str| {
+            let text = BASE.replace("[150.0, 150.0, 0.0]", at).replace(
+                "[receivers]",
+                &format!("[receivers]\ncomponents = {components}"),
+            );
+            let sim = setup(&text).unwrap();
+            assert!(sim.info.warnings.is_empty(), "{:?}", sim.info.warnings);
+            sim.receivers_next_to_layers()
+        };
+        assert_eq!(next("[80.0, 150.0, 0.0]", r#"["vx"]"#), 1);
+        assert_eq!(next("[90.0, 150.0, 0.0]", r#"["vx"]"#), 0);
+        assert_eq!(next("[80.0, 150.0, 0.0]", r#"["vz", "p"]"#), 0);
+        // The bottom layer starts at node 22: node 21 is its first outside node.
+        assert_eq!(next("[150.0, 150.0, 210.0]", r#"["vz"]"#), 1);
+        assert_eq!(next("[150.0, 150.0, 200.0]", r#"["vz"]"#), 0);
     }
 
     #[test]

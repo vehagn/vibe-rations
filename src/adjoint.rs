@@ -33,9 +33,11 @@
 //!
 //! The absorbing layers are not self-adjoint in themselves: the CPML's memory variables and the
 //! sponge transpose into something else. Seen from outside them, they nearly are: with the
-//! source and receivers outside the layers, the dot-product test in `tests/physics.rs` holds to
-//! single-precision round-off (5e-8), as it does with rigid walls. A receiver inside a layer
-//! breaks it by up to 1e-3 (docs/research-log.md), as it breaks reciprocity.
+//! source and receivers clear of the layers, the dot-product test in `tests/physics.rs` holds
+//! to single-precision round-off (below 1e-7), as it does with rigid walls. A receiver inside
+//! a layer breaks it by up to 1.4e-3, and so does, less, a velocity receiver on the first node
+//! outside one, whose interpolation reaches into the layer
+//! ([`Simulation::receivers_next_to_layers`]; docs/research-log.md).
 
 use anyhow::{Result, bail, ensure};
 
