@@ -200,6 +200,32 @@ fn harmonic_mean(v: [f64; 4]) -> f64 {
     }
 }
 
+/// Everything that changes as the solver steps: the fields, the CPML memory and the step
+/// count. Restoring one replays the run from there bit for bit, since the updates don't
+/// depend on how the work is split between threads.
+#[derive(Clone, Debug)]
+pub struct State {
+    fields: Fields,
+    psi_v: [Vec<f32>; 3],
+    psi_s: [Vec<f32>; 3],
+    step: usize,
+}
+
+impl State {
+    /// Bytes it holds.
+    pub fn memory_bytes(&self) -> usize {
+        let f = &self.fields;
+        let fields: usize = [
+            &f.vx, &f.vy, &f.vz, &f.sxx, &f.syy, &f.szz, &f.sxy, &f.sxz, &f.syz,
+        ]
+        .iter()
+        .map(|v| v.len())
+        .sum();
+        let psi: usize = self.psi_v.iter().chain(&self.psi_s).map(Vec::len).sum();
+        4 * (fields + psi)
+    }
+}
+
 /// The wavefield and everything needed to advance it.
 pub struct Solver {
     pub grid: Grid,
@@ -298,6 +324,25 @@ impl Solver {
             sponge: self.sponge.clone(),
             step: 0,
         }
+    }
+
+    /// What it would take to resume from here.
+    pub fn state(&self) -> State {
+        State {
+            fields: self.fields.clone(),
+            psi_v: self.psi_v.clone(),
+            psi_s: self.psi_s.clone(),
+            step: self.step,
+        }
+    }
+
+    /// Goes back (or forward) to a state this solver, or one [`Solver::at_rest`] from it,
+    /// was in.
+    pub fn restore(&mut self, state: &State) {
+        self.fields.clone_from(&state.fields);
+        self.psi_v.clone_from(&state.psi_v);
+        self.psi_s.clone_from(&state.psi_s);
+        self.step = state.step;
     }
 
     /// Bytes the solver holds.
@@ -527,6 +572,61 @@ impl Solver {
                 }
             },
         );
+    }
+
+    /// The strain rates the stress update applies the stiffness to, from the velocities
+    /// `v` (vx, vy, vz, padded and mirrored as the solver leaves them), into `out` (padded,
+    /// interior only): ∂x vx, ∂y vy, ∂z vz, ∂y vx + ∂x vy, ∂z vx + ∂x vz and ∂z vy + ∂y vz,
+    /// each at the position of the stress it changes. On the free surface ∂z vz is left at
+    /// zero, since the update replaces it there. Without the CPML: inside the absorbing
+    /// layers these are not what the update uses.
+    pub fn strain_rate(&self, v: [&[f32]; 3], out: &mut [Vec<f32>; 6]) {
+        let g = self.grid;
+        let [nx, ny, _] = g.n;
+        let [_, sy, sz] = g.strides();
+        let nxt = g.padded()[0];
+        let ih = g.h.map(|h| (1.0 / h) as f32);
+        let [vx, vy, vz] = v;
+        let st = &self.stencil;
+        let halo = g.halo;
+        let free_surface = self.free_surface;
+        let [exx, eyy, ezz, exy, exz, eyz] = out;
+        let mut none = [Vec::new(), Vec::new(), Vec::new()];
+        planes(&g, [exx, eyy, ezz, exy, exz, eyz], &mut none, &self.cpml)
+            .into_par_iter()
+            .for_each_init(
+                || Rows::new(nx),
+                |rows, plane| {
+                    let kz = plane.kz;
+                    let [exx, eyy, ezz, exy, exz, eyz] = plane.out;
+                    let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
+                    for j in 0..ny {
+                        let r = g.idx(0, j, kz);
+                        let o = (j + halo) * nxt + halo;
+                        st.backward(d0, vx, r, 1, ih[0]);
+                        st.backward(d1, vy, r, sy, ih[1]);
+                        if free_surface && kz == 0 {
+                            d2.fill(0.0);
+                        } else {
+                            st.backward(d2, vz, r, sz, ih[2]);
+                        }
+                        st.forward(d3, vx, r, sy, ih[1]);
+                        st.forward(d4, vy, r, 1, ih[0]);
+                        st.forward(d5, vx, r, sz, ih[2]);
+                        st.forward(d6, vz, r, 1, ih[0]);
+                        st.forward(d7, vy, r, sz, ih[2]);
+                        st.forward(d8, vz, r, sy, ih[1]);
+                        exx[o..o + nx].copy_from_slice(d0);
+                        eyy[o..o + nx].copy_from_slice(d1);
+                        ezz[o..o + nx].copy_from_slice(d2);
+                        for i in 0..nx {
+                            exy[o + i] = d3[i] + d4[i];
+                            exz[o + i] = d5[i] + d6[i];
+                            eyz[o + i] = d7[i] + d8[i];
+                        }
+                    }
+                },
+            );
     }
 
     /// Damps every field inside the side layers by the sponge factors.
@@ -1108,6 +1208,81 @@ mod tests {
         for f in [Field::Vz, Field::Sxz, Field::Syz] {
             assert_eq!(free.cell_share(f, 0), 1.0, "{f:?}");
         }
+    }
+
+    /// Restoring a state replays the run from there bit for bit, threads and all.
+    #[test]
+    fn restoring_a_state_replays_the_run_exactly() {
+        let g = Grid::new([20, 18, 16], [10.0; 3]).with_halo(4);
+        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+        let pml = PmlSettings {
+            sponge: 0.2,
+            ..pml()
+        };
+        let mut s =
+            Solver::new(model, 5e-4, 4, true, &pml).with_stencil(Stencil::taylor(8).unwrap());
+        let kick = |f: &mut Fields, t: f64| f.vz[g.idx(10, 9, 3)] += (t * 400.0).sin() as f32;
+        for _ in 0..30 {
+            s.step_with(kick, |_, _| {});
+        }
+        let saved = s.state();
+        for _ in 0..25 {
+            s.step_with(kick, |_, _| {});
+        }
+        let first = s.state();
+        s.restore(&saved);
+        assert_eq!(s.step, 30);
+        for _ in 0..25 {
+            s.step_with(kick, |_, _| {});
+        }
+        assert_eq!(s.fields.vz, first.fields.vz);
+        assert_eq!(s.fields.sxy, first.fields.sxy);
+        assert_eq!(s.psi_s, first.psi_s);
+        assert!(s.peak_velocity() > 0.0);
+        assert_eq!(s.at_rest().peak_velocity(), 0.0);
+    }
+
+    /// A linear velocity field has the same strain rate everywhere the stencil stays inside
+    /// the grid; on the free surface ∂z vz is left out.
+    #[test]
+    fn strain_rates_of_a_linear_field() {
+        let g = Grid::new([16, 14, 12], [10.0, 5.0, 4.0]).with_halo(4);
+        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+        let s = Solver::new(model, 1e-4, 0, true, &pml()).with_stencil(Stencil::taylor(8).unwrap());
+        let [px, py, pz] = g.padded();
+        // Gradient of each component along x, y, z (per metre), on the staggered positions.
+        let grad = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let shift = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]];
+        let mut v: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
+        for (c, field) in v.iter_mut().enumerate() {
+            for kk in 0..pz {
+                for jj in 0..py {
+                    for ii in 0..px {
+                        let pos = [ii, jj, kk].map(|p| p as f64 - g.halo as f64);
+                        let x: f64 = (0..3)
+                            .map(|a| grad[c][a] * (pos[a] + shift[c][a]) * g.h[a])
+                            .sum();
+                        field[(kk * py + jj) * px + ii] = x as f32;
+                    }
+                }
+            }
+        }
+        let mut out: [Vec<f32>; 6] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
+        s.strain_rate([&v[0], &v[1], &v[2]], &mut out);
+        let want = [1.0, 5.0, 9.0, 2.0 + 4.0, 3.0 + 7.0, 6.0 + 8.0];
+        for k in [0, 5] {
+            let p = g.idx(8, 7, k);
+            for (c, &w) in want.iter().enumerate() {
+                let w = if c == 2 && k == 0 { 0.0 } else { w };
+                assert!(
+                    (out[c][p] - w).abs() < 1e-3,
+                    "component {c} at k = {k}: {}",
+                    out[c][p]
+                );
+            }
+        }
+        // The halo stays untouched.
+        assert_eq!(out[0][0], 0.0);
     }
 
     #[test]
