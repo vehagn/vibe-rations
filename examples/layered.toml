@@ -1,0 +1,63 @@
+# A strike-slip earthquake 1 km deep under 200 m of soft sediment over two crustal layers.
+# The surface snapshots show the four-lobed S radiation pattern, then surface waves trapped
+# in the sediments; the vertical section shows the waves converting at the interfaces.
+#
+#   just run examples/layered.toml
+
+[grid]
+points = [161, 161, 101]
+spacing = 20.0
+
+[time]
+duration = 2.5
+
+[boundary]
+pml_width = 20
+
+[[model.layer]]  # sediments
+top = 0.0
+vp = 2000.0
+vs = 800.0
+rho = 2000.0
+
+[[model.layer]]  # upper crust
+top = 200.0
+vp = 4500.0
+vs = 2600.0
+rho = 2500.0
+
+[[model.layer]]  # lower crust
+top = 1200.0
+vp = 6000.0
+vs = 3460.0
+rho = 2800.0
+
+[[source]]
+position = [1600.0, 1600.0, 1000.0]
+# Strike, dip and rake in degrees (x north, y east, z down); m0 is the final moment, N·m,
+# because a Gaussian moment rate has unit area.
+double_couple = { strike = 30.0, dip = 90.0, rake = 0.0, m0 = 1e14 }
+wavelet = { kind = "gaussian", frequency = 3.0 }
+
+[receivers]
+components = ["vx", "vy", "vz"]
+
+[[receivers.line]]
+from = [400.0, 1600.0, 0.0]
+to = [2800.0, 1600.0, 0.0]
+count = 121
+
+[[snapshot]]
+field = "vz"
+plane = "xy"
+at = 0.0
+interval = 0.25
+
+[[snapshot]]
+field = "vz"
+plane = "xz"
+at = 1600.0
+interval = 0.25
+
+[output]
+dir = "out/layered"

@@ -1,0 +1,47 @@
+# An explosion 300 m under a free surface in a homogeneous half-space, recorded by a line of
+# receivers along the surface. Runs in under a minute.
+#
+#   just run examples/explosion.toml
+#
+# Positions are in metres from the first grid node; z points down and the free surface is
+# at z = 0.
+
+[grid]
+points = [121, 121, 81]  # nodes along x, y and z
+spacing = 10.0           # metres; or one per axis, [dx, dy, dz]
+
+[time]
+duration = 0.8  # seconds; dt follows from the stability limit (see `just check`)
+
+[boundary]
+pml_width = 15       # nodes of absorbing layer on the sides and bottom
+free_surface = true
+
+[[model.layer]]
+top = 0.0
+vp = 3000.0
+vs = 1730.0
+rho = 2400.0
+
+[[source]]
+position = [600.0, 600.0, 300.0]
+explosion = 1e13  # peak moment rate, N·m/s (the Ricker wavelet peaks at 1)
+wavelet = { kind = "ricker", frequency = 12.0 }
+
+[receivers]
+components = ["vx", "vz"]
+
+[[receivers.line]]
+from = [150.0, 600.0, 0.0]
+to = [1050.0, 600.0, 0.0]
+count = 91
+
+# The vertical section through the source, every 50 ms. Red is down (positive z).
+[[snapshot]]
+field = "vz"
+plane = "xz"
+at = 600.0
+interval = 0.05
+
+[output]
+dir = "out/explosion"

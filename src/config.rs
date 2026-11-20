@@ -1,0 +1,484 @@
+//! The TOML run configuration. `examples/` has annotated configurations.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde::Deserialize;
+
+use crate::grid::Grid;
+use crate::receiver::Component;
+use crate::source::{Mechanism, Wavelet, double_couple};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    pub grid: GridConfig,
+    pub time: TimeConfig,
+    #[serde(default)]
+    pub boundary: BoundaryConfig,
+    pub model: ModelConfig,
+    #[serde(default, rename = "source")]
+    pub sources: Vec<SourceConfig>,
+    #[serde(default)]
+    pub receivers: ReceiversConfig,
+    #[serde(default, rename = "snapshot")]
+    pub snapshots: Vec<SnapshotConfig>,
+    #[serde(default)]
+    pub output: OutputConfig,
+}
+
+impl Config {
+    pub fn from_toml(text: &str) -> Result<Self> {
+        Ok(toml::from_str(text)?)
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let text =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Self::from_toml(&text).with_context(|| format!("in {}", path.display()))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridConfig {
+    /// Nodes along x, y and z.
+    pub points: [usize; 3],
+    /// Node spacing in metres: one number, or one per axis.
+    pub spacing: Spacing,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(untagged)]
+pub enum Spacing {
+    Uniform(f64),
+    PerAxis([f64; 3]),
+}
+
+impl GridConfig {
+    pub fn grid(&self) -> Result<Grid> {
+        let h = match self.spacing {
+            Spacing::Uniform(h) => [h; 3],
+            Spacing::PerAxis(h) => h,
+        };
+        ensure!(h.iter().all(|&h| h > 0.0), "grid spacing must be positive");
+        ensure!(
+            self.points.iter().all(|&n| n >= 8),
+            "the grid needs at least 8 nodes along each axis"
+        );
+        Ok(Grid::new(self.points, h))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimeConfig {
+    /// Simulated time, in seconds.
+    pub duration: f64,
+    /// Time step, in seconds. By default `courant` times the stability limit.
+    pub dt: Option<f64>,
+    /// Fraction of the stability limit to step at when `dt` is not given.
+    #[serde(default = "default_courant")]
+    pub courant: f64,
+}
+
+fn default_courant() -> f64 {
+    0.85
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryConfig {
+    /// Thickness of the absorbing layers, in nodes.
+    #[serde(default = "default_pml_width")]
+    pub pml_width: usize,
+    /// A free surface at z = 0 instead of an absorbing layer.
+    #[serde(default = "default_true")]
+    pub free_surface: bool,
+    /// Theoretical reflection coefficient of the layers; by default from their width.
+    pub pml_reflection: Option<f64>,
+    #[serde(default = "default_kappa_max")]
+    pub pml_kappa_max: f64,
+    #[serde(default = "default_pml_power")]
+    pub pml_power: f64,
+    /// Frequency, in Hz, that sets α_max = π f; by default the sources' dominant frequency.
+    pub pml_alpha_frequency: Option<f64>,
+    /// Plain damping in the side layers, with a free surface, as a fraction of theirs: it keeps
+    /// them stable for surface waves in soft, high-Poisson's-ratio media. 0 turns it off.
+    #[serde(default = "default_pml_sponge")]
+    pub pml_sponge: f64,
+}
+
+impl Default for BoundaryConfig {
+    fn default() -> Self {
+        Self {
+            pml_width: default_pml_width(),
+            free_surface: true,
+            pml_reflection: None,
+            pml_kappa_max: default_kappa_max(),
+            pml_power: default_pml_power(),
+            pml_alpha_frequency: None,
+            pml_sponge: default_pml_sponge(),
+        }
+    }
+}
+
+fn default_pml_width() -> usize {
+    20
+}
+fn default_true() -> bool {
+    true
+}
+fn default_kappa_max() -> f64 {
+    1.0
+}
+fn default_pml_power() -> f64 {
+    2.0
+}
+fn default_pml_sponge() -> f64 {
+    0.2
+}
+
+/// The elastic model: horizontal layers or `.npy` files, then optional spheres on top.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConfig {
+    #[serde(default, rename = "layer")]
+    pub layers: Vec<LayerConfig>,
+    pub files: Option<ModelFiles>,
+    #[serde(default, rename = "sphere")]
+    pub spheres: Vec<SphereConfig>,
+}
+
+/// A layer from depth `top` down to the next layer's top. Speeds in m/s, density in kg/m³.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerConfig {
+    pub top: f64,
+    pub vp: f64,
+    pub vs: f64,
+    pub rho: f64,
+}
+
+/// `.npy` arrays of shape (nz, ny, nx), float32 or float64, relative to the configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFiles {
+    pub vp: PathBuf,
+    pub vs: PathBuf,
+    pub rho: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SphereConfig {
+    pub center: [f64; 3],
+    pub radius: f64,
+    pub vp: f64,
+    pub vs: f64,
+    pub rho: f64,
+}
+
+/// A point source: exactly one of `explosion`, `moment`, `double_couple` and `force`.
+///
+/// The wavelet is the moment rate of a moment-tensor source and the force of a force
+/// source. A Ricker wavelet peaks at 1, so its amplitude is the peak moment rate (N·m/s) or
+/// force (N); a Gaussian has unit area, so its amplitude is the final moment (N·m) or impulse.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceConfig {
+    /// Position in metres; snapped to the nearest node.
+    pub position: [f64; 3],
+    pub wavelet: WaveletConfig,
+    /// An isotropic moment tensor with this amplitude on the diagonal.
+    pub explosion: Option<f64>,
+    pub moment: Option<MomentConfig>,
+    pub double_couple: Option<DoubleCoupleConfig>,
+    /// Force along x, y and z.
+    pub force: Option<[f64; 3]>,
+}
+
+impl SourceConfig {
+    pub fn mechanism(&self) -> Result<Mechanism> {
+        let given = [
+            self.explosion.is_some(),
+            self.moment.is_some(),
+            self.double_couple.is_some(),
+            self.force.is_some(),
+        ];
+        match given.iter().filter(|&&g| g).count() {
+            1 => {}
+            0 => bail!("a source needs one of explosion, moment, double_couple and force"),
+            _ => bail!("a source takes only one of explosion, moment, double_couple and force"),
+        }
+        Ok(if let Some(m0) = self.explosion {
+            Mechanism::Moment([m0, m0, m0, 0.0, 0.0, 0.0])
+        } else if let Some(m) = &self.moment {
+            Mechanism::Moment([m.xx, m.yy, m.zz, m.xy, m.xz, m.yz])
+        } else if let Some(dc) = &self.double_couple {
+            Mechanism::Moment(double_couple(dc.strike, dc.dip, dc.rake, dc.m0))
+        } else {
+            Mechanism::Force(self.force.expect("checked above"))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WaveletConfig {
+    /// Peak frequency `frequency`; centred at `delay` seconds, by default 1.2 / frequency.
+    Ricker { frequency: f64, delay: Option<f64> },
+    /// exp(-(π f (t - delay))²), scaled to unit area.
+    Gaussian { frequency: f64, delay: Option<f64> },
+}
+
+impl WaveletConfig {
+    pub fn wavelet(&self) -> Result<Wavelet> {
+        let (WaveletConfig::Ricker { frequency, delay }
+        | WaveletConfig::Gaussian { frequency, delay }) = *self;
+        ensure!(frequency > 0.0, "wavelet frequency must be positive");
+        let t0 = delay.unwrap_or(1.2 / frequency);
+        Ok(match self {
+            WaveletConfig::Ricker { .. } => Wavelet::Ricker { f0: frequency, t0 },
+            WaveletConfig::Gaussian { .. } => Wavelet::Gaussian { f0: frequency, t0 },
+        })
+    }
+}
+
+/// Moment-tensor components in N·m (or N·m/s with a Ricker wavelet).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MomentConfig {
+    pub xx: f64,
+    pub yy: f64,
+    pub zz: f64,
+    pub xy: f64,
+    pub xz: f64,
+    pub yz: f64,
+}
+
+/// A shear dislocation, angles in degrees (Aki & Richards; x north, y east, z down).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoubleCoupleConfig {
+    pub strike: f64,
+    pub dip: f64,
+    pub rake: f64,
+    pub m0: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiversConfig {
+    #[serde(default = "default_components")]
+    pub components: Vec<Component>,
+    #[serde(default, rename = "line")]
+    pub lines: Vec<LineConfig>,
+    #[serde(default, rename = "point")]
+    pub points: Vec<PointConfig>,
+}
+
+impl Default for ReceiversConfig {
+    fn default() -> Self {
+        Self {
+            components: default_components(),
+            lines: Vec::new(),
+            points: Vec::new(),
+        }
+    }
+}
+
+fn default_components() -> Vec<Component> {
+    vec![Component::Vx, Component::Vy, Component::Vz]
+}
+
+/// `count` receivers evenly spaced from `from` to `to`, both included.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineConfig {
+    pub from: [f64; 3],
+    pub to: [f64; 3],
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointConfig {
+    pub position: [f64; 3],
+}
+
+impl ReceiversConfig {
+    /// Every receiver position, lines first.
+    pub fn positions(&self) -> Result<Vec<[f64; 3]>> {
+        let mut out = Vec::new();
+        for line in &self.lines {
+            ensure!(
+                line.count >= 1,
+                "a receiver line needs a count of at least 1"
+            );
+            for r in 0..line.count {
+                let f = if line.count == 1 {
+                    0.0
+                } else {
+                    r as f64 / (line.count - 1) as f64
+                };
+                out.push(std::array::from_fn(|a| {
+                    line.from[a] + f * (line.to[a] - line.from[a])
+                }));
+            }
+        }
+        out.extend(self.points.iter().map(|p| p.position));
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotConfig {
+    pub field: Component,
+    pub plane: PlaneKind,
+    /// Coordinate of the plane along its normal, in metres; unused for a volume.
+    #[serde(default)]
+    pub at: f64,
+    /// Time between snapshots, in seconds.
+    pub interval: f64,
+    #[serde(default = "default_formats")]
+    pub formats: Vec<Format>,
+    /// Colour scale limit for PNGs; by default the 99.5th percentile of the snapshot's
+    /// magnitudes.
+    pub clip: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaneKind {
+    Xy,
+    Xz,
+    Yz,
+    Volume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    Png,
+    Npy,
+}
+
+fn default_formats() -> Vec<Format> {
+    vec![Format::Png]
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputConfig {
+    /// Where results go, relative to the working directory.
+    #[serde(default = "default_out")]
+    pub dir: PathBuf,
+    /// Record the receivers every this many steps.
+    #[serde(default = "default_record_every")]
+    pub record_every: usize,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_out(),
+            record_every: default_record_every(),
+        }
+    }
+}
+
+fn default_out() -> PathBuf {
+    PathBuf::from("out")
+}
+fn default_record_every() -> usize {
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = r#"
+        [grid]
+        points = [20, 20, 20]
+        spacing = 10.0
+        [time]
+        duration = 0.1
+        [[model.layer]]
+        top = 0.0
+        vp = 2000.0
+        vs = 1000.0
+        rho = 2000.0
+        [[source]]
+        position = [100.0, 100.0, 100.0]
+        explosion = 1.0
+        wavelet = { kind = "ricker", frequency = 10.0 }
+    "#;
+
+    #[test]
+    fn fills_in_defaults() {
+        let c = Config::from_toml(MINIMAL).unwrap();
+        assert_eq!(c.boundary.pml_width, 20);
+        assert!(c.boundary.free_surface);
+        assert_eq!(c.time.courant, 0.85);
+        assert_eq!(c.receivers.components.len(), 3);
+        assert_eq!(c.output.dir, PathBuf::from("out"));
+        let w = c.sources[0].wavelet.wavelet().unwrap();
+        assert!(matches!(w, Wavelet::Ricker { f0, t0 } if f0 == 10.0 && (t0 - 0.12).abs() < 1e-12));
+        assert!(matches!(c.sources[0].mechanism().unwrap(), Mechanism::Moment(m) if m[0] == 1.0));
+    }
+
+    #[test]
+    fn rejects_typos() {
+        let text = MINIMAL.replace("duration", "durration");
+        assert!(Config::from_toml(&text).is_err());
+    }
+
+    #[test]
+    fn a_source_needs_exactly_one_mechanism() {
+        let both = MINIMAL.replace(
+            "explosion = 1.0",
+            "explosion = 1.0\nforce = [0.0, 0.0, 1.0]",
+        );
+        let c = Config::from_toml(&both).unwrap();
+        assert!(c.sources[0].mechanism().is_err());
+        let none = MINIMAL.replace("explosion = 1.0", "");
+        let c = Config::from_toml(&none).unwrap();
+        assert!(c.sources[0].mechanism().is_err());
+    }
+
+    #[test]
+    fn spacing_can_differ_per_axis() {
+        let text = MINIMAL.replace("spacing = 10.0", "spacing = [10.0, 20.0, 5.0]");
+        let g = Config::from_toml(&text).unwrap().grid.grid().unwrap();
+        assert_eq!(g.h, [10.0, 20.0, 5.0]);
+    }
+
+    #[test]
+    fn spreads_receivers_along_lines() {
+        let r = ReceiversConfig {
+            lines: vec![LineConfig {
+                from: [0.0, 0.0, 0.0],
+                to: [100.0, 50.0, 0.0],
+                count: 3,
+            }],
+            points: vec![PointConfig {
+                position: [1.0, 2.0, 3.0],
+            }],
+            ..Default::default()
+        };
+        let p = r.positions().unwrap();
+        assert_eq!(
+            p,
+            vec![
+                [0.0, 0.0, 0.0],
+                [50.0, 25.0, 0.0],
+                [100.0, 50.0, 0.0],
+                [1.0, 2.0, 3.0]
+            ]
+        );
+    }
+}

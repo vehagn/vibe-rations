@@ -1,0 +1,242 @@
+//! Point sources: source time functions and how sources enter the staggered grid.
+
+use std::f64::consts::PI;
+
+use crate::solver::{Field, Fields, PointOp, Solver};
+
+/// A source time function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wavelet {
+    /// (1 - 2a) e^-a with a = (π f0 (t - t0))²: zero mean, peak 1 at t0, peak frequency f0.
+    Ricker { f0: f64, t0: f64 },
+    /// √π f0 e^-a with a = (π f0 (t - t0))²: unit area, centred on t0.
+    Gaussian { f0: f64, t0: f64 },
+}
+
+impl Wavelet {
+    pub fn value(&self, t: f64) -> f64 {
+        match *self {
+            Wavelet::Ricker { f0, t0 } => {
+                let a = (PI * f0 * (t - t0)).powi(2);
+                (1.0 - 2.0 * a) * (-a).exp()
+            }
+            Wavelet::Gaussian { f0, t0 } => {
+                let a = (PI * f0 * (t - t0)).powi(2);
+                PI.sqrt() * f0 * (-a).exp()
+            }
+        }
+    }
+
+    /// The time derivative.
+    pub fn derivative(&self, t: f64) -> f64 {
+        match *self {
+            Wavelet::Ricker { f0, t0 } => {
+                let c = (PI * f0).powi(2);
+                let tau = t - t0;
+                let a = c * tau * tau;
+                2.0 * c * tau * (-a).exp() * (2.0 * a - 3.0)
+            }
+            Wavelet::Gaussian { f0, t0 } => {
+                let c = (PI * f0).powi(2);
+                let tau = t - t0;
+                -2.0 * c * tau * PI.sqrt() * f0 * (-c * tau * tau).exp()
+            }
+        }
+    }
+
+    pub fn dominant_frequency(&self) -> f64 {
+        match *self {
+            Wavelet::Ricker { f0, .. } | Wavelet::Gaussian { f0, .. } => f0,
+        }
+    }
+
+    /// The frequency above which the spectrum is negligible (a few percent of its peak or less),
+    /// which sets the shortest wavelength the grid must resolve.
+    pub fn max_frequency(&self) -> f64 {
+        2.5 * self.dominant_frequency()
+    }
+}
+
+/// The moment tensor (xx, yy, zz, xy, xz, yz) of a shear dislocation with the given strike,
+/// dip and rake in degrees and scalar moment `m0`, in Aki & Richards' convention: x north,
+/// y east, z down.
+pub fn double_couple(strike: f64, dip: f64, rake: f64, m0: f64) -> [f64; 6] {
+    let (phi, delta, lambda) = (strike.to_radians(), dip.to_radians(), rake.to_radians());
+    let (sd, cd) = delta.sin_cos();
+    let (s2d, c2d) = (2.0 * delta).sin_cos();
+    let (sl, cl) = lambda.sin_cos();
+    let (sp, cp) = phi.sin_cos();
+    let (s2p, c2p) = (2.0 * phi).sin_cos();
+    [
+        -m0 * (sd * cl * s2p + s2d * sl * sp * sp),
+        m0 * (sd * cl * s2p - s2d * sl * cp * cp),
+        m0 * s2d * sl,
+        m0 * (sd * cl * c2p + 0.5 * s2d * sl * s2p),
+        -m0 * (cd * cl * cp + c2d * sl * sp),
+        -m0 * (cd * cl * sp - c2d * sl * cp),
+    ]
+}
+
+/// What a source does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mechanism {
+    /// A moment tensor (xx, yy, zz, xy, xz, yz), scaling the wavelet as moment rate.
+    Moment([f64; 6]),
+    /// A force (x, y, z) in N, scaling the wavelet.
+    Force([f64; 3]),
+}
+
+/// A point source on a node, ready to add to the wavefield.
+#[derive(Clone, Debug)]
+pub struct Source {
+    pub node: [usize; 3],
+    pub mechanism: Mechanism,
+    pub wavelet: Wavelet,
+    /// How it enters the wavefield, per unit of the wavelet.
+    pub op: PointOp,
+}
+
+impl Source {
+    /// A moment tensor enters as σij -= dt·Ṁij/V and a force as vi += dt·Fi/(ρV), spread onto
+    /// the staggered positions around the node with the receivers' interpolation weights
+    /// ([`Solver::stagger_weights`]), so that a source is the transpose of a receiver at the
+    /// same node. Shear components spread along both of their axes.
+    pub fn new(solver: &Solver, node: [usize; 3], mechanism: Mechanism, wavelet: Wavelet) -> Self {
+        let g = solver.grid;
+        let volume = g.cell_volume();
+        let idx = |n: [usize; 3]| g.idx(n[0], n[1], n[2]);
+        // The positions around the node along each (axis, mirror parity), with their weights.
+        let spread = |axes: &[(usize, f32)]| {
+            let mut out = vec![(node, 1.0f32)];
+            for &(axis, parity) in axes {
+                out = out
+                    .into_iter()
+                    .flat_map(|(n, w)| {
+                        solver
+                            .stagger_weights(axis, n[axis], parity)
+                            .into_iter()
+                            .map(move |(m, v)| {
+                                let mut n = n;
+                                n[axis] = m;
+                                (n, w * v)
+                            })
+                    })
+                    .collect();
+            }
+            out
+        };
+        let mut terms = Vec::new();
+        match mechanism {
+            Mechanism::Moment(m) => {
+                let scale = |v: f64| (-solver.dt * v / volume) as f32;
+                for (field, v) in [(Field::Sxx, m[0]), (Field::Syy, m[1]), (Field::Szz, m[2])] {
+                    if v != 0.0 {
+                        terms.push((field, idx(node), scale(v)));
+                    }
+                }
+                // σxz and σyz are odd about the free surface.
+                for (field, v, axes) in [
+                    (Field::Sxy, m[3], [(0, 1.0), (1, 1.0)]),
+                    (Field::Sxz, m[4], [(0, 1.0), (2, -1.0)]),
+                    (Field::Syz, m[5], [(1, 1.0), (2, -1.0)]),
+                ] {
+                    if v != 0.0 {
+                        let s = scale(v);
+                        terms.extend(
+                            spread(&axes)
+                                .into_iter()
+                                .map(|(n, w)| (field, idx(n), s * w)),
+                        );
+                    }
+                }
+            }
+            Mechanism::Force(f) => {
+                for (axis, field) in [(0, Field::Vx), (1, Field::Vy), (2, Field::Vz)] {
+                    if f[axis] != 0.0 {
+                        let s = (f[axis] / volume) as f32;
+                        let b = solver.material.buoyancy(axis);
+                        terms.extend(
+                            spread(&[(axis, 1.0)])
+                                .into_iter()
+                                .map(|(n, w)| (field, idx(n), s * w * b[idx(n)])),
+                        );
+                    }
+                }
+            }
+        }
+        // On the free surface a value stands for half a cell, so the same source moves it twice
+        // as much.
+        let plane = g.plane_len();
+        for (field, index, w) in &mut terms {
+            *w /= solver.cell_share(*field, *index / plane - crate::grid::HALO);
+        }
+        Self {
+            node,
+            mechanism,
+            wavelet,
+            op: PointOp { terms },
+        }
+    }
+
+    /// Whether the source acts on velocity (a force) rather than stress (a moment tensor).
+    pub fn is_force(&self) -> bool {
+        matches!(self.mechanism, Mechanism::Force(_))
+    }
+
+    pub fn inject(&self, fields: &mut Fields, t: f64) {
+        self.op.inject(fields, self.wavelet.value(t) as f32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn integrate(w: &Wavelet, f: impl Fn(&Wavelet, f64) -> f64) -> f64 {
+        let dt = 1e-5;
+        (0..100_000).map(|n| f(w, n as f64 * dt) * dt).sum()
+    }
+
+    #[test]
+    fn ricker_peaks_at_one_and_has_zero_mean() {
+        let w = Wavelet::Ricker { f0: 10.0, t0: 0.12 };
+        assert!((w.value(0.12) - 1.0).abs() < 1e-12);
+        assert!(integrate(&w, Wavelet::value).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gaussian_has_unit_area() {
+        let w = Wavelet::Gaussian { f0: 10.0, t0: 0.12 };
+        assert!((integrate(&w, Wavelet::value) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn derivatives_match_finite_differences() {
+        for w in [
+            Wavelet::Ricker { f0: 7.0, t0: 0.2 },
+            Wavelet::Gaussian { f0: 7.0, t0: 0.2 },
+        ] {
+            for t in [0.1, 0.17, 0.2, 0.26] {
+                let e = 1e-6;
+                let fd = (w.value(t + e) - w.value(t - e)) / (2.0 * e);
+                assert!(
+                    (fd - w.derivative(t)).abs() < 1e-5 * (1.0 + fd.abs()),
+                    "{w:?} at {t}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn double_couples_are_traceless() {
+        let m = double_couple(30.0, 60.0, 90.0, 1.0);
+        assert!((m[0] + m[1] + m[2]).abs() < 1e-12);
+        // A vertical strike-slip fault striking north is pure xy.
+        let m = double_couple(0.0, 90.0, 0.0, 2.0);
+        let expect = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        assert!(
+            m.iter().zip(expect).all(|(a, b)| (a - b).abs() < 1e-12),
+            "{m:?}"
+        );
+    }
+}
