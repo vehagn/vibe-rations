@@ -1,0 +1,48 @@
+# Development container for vibe-rations: the Rust toolchain, just, and a zsh. Bump the
+# pinned Rust version here and in rust-toolchain.toml together, then rebuild.
+FROM docker.io/library/rust:1.99.1-trixie
+
+ARG USERNAME=dev
+ARG USER_UID=1000
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+RUN apt-get update; \
+    apt-get install -y --no-install-recommends \
+      bash-completion file htop jq just less locales procps sudo tree vim zsh; \
+    rm -rf /var/lib/apt/lists/*; \
+    sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen; \
+    locale-gen
+
+RUN rustup component add clippy rustfmt rust-src rust-analyzer
+
+# Non-root user with passwordless sudo. Directories that compose mounts volumes onto
+# are created here so the volumes inherit the user's ownership.
+RUN useradd --create-home --shell /bin/zsh --uid "${USER_UID}" "${USERNAME}"; \
+    echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}"; \
+    chmod 0440 "/etc/sudoers.d/${USERNAME}"; \
+    install -d -o "${USERNAME}" -g "${USERNAME}" \
+      "/home/${USERNAME}/.cache/target" \
+      "/home/${USERNAME}/.local/state/shell" \
+      "${CARGO_HOME}/registry"; \
+    chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}" "${CARGO_HOME}" "${RUSTUP_HOME}"; \
+    # The workspace is mounted from the host, owned by another UID.
+    git config --system --add safe.directory /workspaces/vibe-rations
+
+USER ${USERNAME}
+
+# A plain zsh with its history in a volume, so it outlives rebuilds.
+RUN printf '%s\n' \
+      'HISTFILE=~/.local/state/shell/zsh_history' \
+      'HISTSIZE=50000' \
+      'SAVEHIST=50000' \
+      'setopt inc_append_history hist_ignore_dups' \
+      'autoload -Uz compinit && compinit' \
+      "PROMPT='%F{cyan}vibe-rations%f %F{blue}%~%f %# '" \
+      > ~/.zshrc
+
+ENV CARGO_TARGET_DIR=/home/${USERNAME}/.cache/target \
+    EDITOR=vim \
+    LANG=en_US.UTF-8
+
+WORKDIR /workspaces/vibe-rations

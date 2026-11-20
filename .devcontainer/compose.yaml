@@ -1,0 +1,20 @@
+# `name` keeps the IDE and `just dev` on the same containers and volumes.
+name: vibe-rations-dev
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Containerfile
+    command: sleep infinity
+    init: true
+    volumes:
+      - ..:/workspaces/vibe-rations:cached
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/home/dev/.cache/target
+      - shell-history:/home/dev/.local/state/shell
+
+volumes:
+  cargo-registry:
+  cargo-target:
+  shell-history:

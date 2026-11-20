@@ -1,0 +1,22 @@
+// Open the repo in VS Code or RustRover and reopen it in the container, or run `just dev`
+// on the host for a shell in the same container.
+{
+  "name": "vibe-rations",
+  "dockerComposeFile": "compose.yaml",
+  "service": "dev",
+  "workspaceFolder": "/workspaces/vibe-rations",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "dev",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "nefrob.vscode-just-syntax"
+      ]
+    },
+    "jetbrains": {
+      "backend": "RustRover"
+    }
+  }
+}
