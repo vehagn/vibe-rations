@@ -15,7 +15,8 @@ opens a shell there instead.
 |---|---|---|
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~20 s |
-| `just test` | Everything | ~25 s |
+| `just test` | Everything | ~35 s |
+| `just accuracy` | The stencil order and time step study (prints a table) | ~1.5 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
@@ -46,7 +47,7 @@ src/
   grid.rs        the grid and its two-node halo, indexing
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
   solver.rs      fields, staggered material, the update kernels, free surface, PointOp
-  fd.rs          fourth-order staggered derivatives along one axis, a row at a time
+  fd.rs          the staggered Stencil (Taylor, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid
   receiver.rs    recording traces through PointOps
@@ -63,6 +64,8 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 .github/workflows/  ci.yaml (`just ci`), web.yaml (builds and pushes the image)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
+  accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  common/        closed-form solutions and setup helpers the two share
   cli.rs         the binary, run as a process
   examples.rs    every example sets up without warnings
 examples/        annotated configurations
@@ -88,6 +91,14 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Stencil order and the time step go together** (`just accuracy`, README "Accuracy").
+  Order 4 at courant 0.85 benefits from cancelling time and space errors; orders ≥ 8 at
+  0.85 are *worse* than order 4, and only beat it at courant ≈ 0.3–0.5. Order 8 at 0.3 needs
+  ~4.5 points per S wavelength for ~1% after ten wavelengths, where order 4 needs ~8–9:
+  about 3.4× less compute and 5.5× less memory. The halo widens to the stencil's
+  half-length; free-surface mirroring stays self-adjoint at every order (reciprocity checked
+  at orders 4 and 8). Time–space-optimised coefficients looked good for one speed in a
+  von Neumann analysis and failed for other speeds, so they were not adopted.
 - **Threads in the browser** need four things, each of which failed once: (1) a std built
   with atomics: nightly `-Z build-std=panic_abort,std`, pinned in `web/build.sh` and both
   Containerfiles; (2) explicit linker flags for an imported, shared memory and the TLS

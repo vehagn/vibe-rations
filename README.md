@@ -149,6 +149,50 @@ weights, divided by the cell's share of mass (half on the free surface). A sourc
 is therefore exactly the transpose of a receiver there: what FWI needs to back-propagate
 residuals.
 
+## Accuracy
+
+The scheme is a staggered grid, which is the right family for elastic waves: unlike
+conventional (collocated) grids it stays accurate when vp/vs is large, as in sediments
+(Moczo et al. 2010). Within it, accuracy is mostly a matter of numerical dispersion, and
+the choice that matters is the **stencil order together with the time step**.
+
+`[scheme] order` sets the spatial order: 2, 4 (the default), ..., 16. The leapfrog time
+stepping is second order, and its error has the opposite sign to the fourth-order spatial
+error, so at `courant = 0.85` the two partly cancel. That cancellation is what makes order 4
+work well at a large time step, and why longer stencils only pay off with a smaller one
+(Liu & Sen show 2M-th order in space with second order in time is second order overall).
+
+Misfit against the exact solution after about ten dominant wavelengths of travel (1800 m),
+measured with `just accuracy`:
+
+| Waves | Points per shortest wavelength | Order 4, courant 0.85 | Order 8, courant 0.3 | Order 16, courant 0.3 |
+|---|---|---|---|---|
+| P (explosion) | 4.0 | 19% | 5.2% | 5.8% |
+| S (point force) | 3.5 | 47% | 7.1% | 2.4% |
+| S (point force) | 4.6 | 15% | 1.3% | 1.4% |
+
+Higher orders at `courant = 0.85` are *worse* than order 4 (order 8 there: 40% for P). For
+the same 1.3% S misfit, order 4 needs about 8–9 points per wavelength (at `courant = 0.5`),
+which costs about 3.4 times the compute and 5.5 times the memory of order 8 at 4.6. Speeds on 4 cores:
+order 4 about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105.
+
+Rules of thumb:
+
+| Purpose | Settings | Points per shortest wavelength |
+|---|---|---|
+| Quick looks, the web app | order 4, courant 0.85 | 6–8 |
+| Waveform fits (FWI) | order 8, courant 0.3–0.4 | ≥ 4.5 |
+| Coarsest grids | order 12–16, courant 0.3 | ≥ 3.5 |
+
+What higher orders don't fix, from the literature: sharp interfaces sampled on the grid
+are only about second-order accurate and want a band-limited model (Mittet 2017); the
+stress-imaging free surface is second order, so surface waves need finer grids (Kristek et
+al. 2002; Mittet 2002 gives a free surface suited to long stencils); and sources and
+receivers are snapped to nodes rather than placed exactly (Hicks 2002). Optimised rather
+than Taylor coefficients (Holberg 1987) gain little at these error levels, and coefficients
+optimised for time and space together (Liu & Sen) only hold for one wave speed, which breaks
+down in heterogeneous models.
+
 ## Verification
 
 `tests/physics.rs` checks whole simulations against independent answers:

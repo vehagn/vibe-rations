@@ -30,6 +30,11 @@ A number that got worse is a regression even if the test passes. Find out why be
 going on. Never loosen a tolerance to get a change through. If a change makes a number
 better, tighten the tolerance and update the baseline in `AGENTS.md`.
 
+Changes to the stencils or the time stepping also need `just in accuracy`: compare its table
+with the README's "Accuracy" section. Physics tests that exercise the free surface and
+stability (`swapping_source_and_receiver_gives_the_same_trace`,
+`a_long_run_stays_stable_and_drains`) run at orders 4 and 8; keep both.
+
 ## 2. Reading misfits
 
 - A misfit that **grows with distance** is phase error: dispersion (too few points per
