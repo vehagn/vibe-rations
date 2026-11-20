@@ -577,8 +577,77 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
 #[test]
 fn the_gradient_matches_finite_differences() {
     for order in [4, 8] {
-        gradient_check(order);
+        gradient_check(&format!("order {order}"), 8, &|sphere| {
+            gradient_model(order, sphere)
+        });
     }
+}
+
+/// The same where the first check doesn't reach: rigid walls, so every node is perturbed,
+/// the last ones (whose missing neighbours the material averaging clamps) included; uneven
+/// spacing; a water layer under the free surface, with fluid nodes on it and against the
+/// solid; a double couple; and every third step recorded.
+///
+/// Measured, extrapolated: vp 4.6e-5, vs 8.9e-7, ρ 2.2e-4. The plain differences for ρ are
+/// 44% off at h = 1.6e-2: what's left after extrapolating is the misfit's nonlinearity and
+/// round-off (perturbing the water layer alone, ρ agrees to 2.7e-5).
+#[test]
+fn the_gradient_matches_finite_differences_with_walls_and_water() {
+    gradient_check("walls and water", 0, &walls_and_water);
+}
+
+fn walls_and_water(sphere: [f64; 3]) -> String {
+    let [vp, vs, rho] = sphere;
+    format!(
+        r#"
+        [grid]
+        points = [34, 30, 26]
+        spacing = [11.0, 12.0, 10.5]
+        [time]
+        duration = 0.3
+        [boundary]
+        pml_width = 0
+        [output]
+        record_every = 3
+        [[model.layer]]
+        top = 0.0
+        vp = 1500.0
+        vs = 0.0
+        rho = 1000.0
+        [[model.layer]]
+        top = 21.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 150.0
+        vp = 3000.0
+        vs = 1700.0
+        rho = 2300.0
+        [[model.sphere]]
+        center = [180.0, 170.0, 100.0]
+        radius = 30.0
+        vp = {vp}
+        vs = {vs}
+        rho = {rho}
+        [[source]]
+        position = [120.0, 200.0, 160.0]
+        double_couple = {{ strike = 30.0, dip = 60.0, rake = 90.0, m0 = 1e12 }}
+        wavelet = {{ kind = "ricker", frequency = 10.0 }}
+        [[source]]
+        position = [250.0, 120.0, 80.0]
+        force = [0.0, 5e8, 1e9]
+        wavelet = {{ kind = "ricker", frequency = 10.0, delay = 0.15 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        [[receivers.line]]
+        from = [44.0, 180.0, 0.0]
+        to = [330.0, 180.0, 0.0]
+        count = 9
+        [[receivers.point]]
+        position = [200.0, 100.0, 220.0]
+        "#
+    )
 }
 
 fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
@@ -634,18 +703,19 @@ fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
     )
 }
 
-fn gradient_check(order: usize) {
+/// Checks the gradient of the balanced L2 misfit against finite differences for the model
+/// `config` makes with a guessed sphere, against data from another sphere. Every node outside
+/// layers `pml` nodes thick is perturbed.
+fn gradient_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
     use vibe_rations::config::Config;
     use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
-    let observed = simulate(&gradient_model(order, [1900.0, 950.0, 1950.0]))
-        .receivers
-        .traces;
+    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers.traces;
     let weights = balancing_weights(&observed);
     let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
-    let cfg = Config::from_toml(&gradient_model(order, [2050.0, 1000.0, 2000.0])).unwrap();
+    let cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
     let base = std::path::Path::new(".");
     let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
     let misfit_of = |model: Model| {
@@ -661,7 +731,6 @@ fn gradient_check(order: usize) {
     // Every node outside the layers; vp only below the fastest, which sets dt and the layers.
     let g = model.grid;
     let [nx, ny, nz] = g.n;
-    let pml = 8;
     let vp_max = model.vp_range()[1] as f32;
     let inside = |i: usize, j: usize, k: usize| {
         (pml..nx - pml).contains(&i) && (pml..ny - pml).contains(&j) && k < nz - pml
@@ -712,7 +781,7 @@ fn gradient_check(order: usize) {
         let extrapolated = (4.0 * fine - coarse) / 3.0;
         let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
         println!(
-            "gradient, order {order}, {name}: predicted {predicted:.6e}; finite differences \
+            "gradient, {label}, {name}: predicted {predicted:.6e}; finite differences \
              off by {:.1e} (h {h:.1e}) and {:.1e} (h/2), extrapolated by {:.1e}",
             e(coarse),
             e(fine),
@@ -720,7 +789,7 @@ fn gradient_check(order: usize) {
         );
         assert!(
             e(extrapolated) < 3e-4,
-            "{name}, order {order}: {}",
+            "{name}, {label}: {}",
             e(extrapolated)
         );
     }
