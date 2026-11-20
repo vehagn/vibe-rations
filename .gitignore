@@ -3,3 +3,5 @@
 /.claude/settings.local.json
 /web/dist
 __pycache__/
+# Downloaded models (`just marmousi2`) and the model files made from them
+/data
