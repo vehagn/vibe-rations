@@ -273,8 +273,8 @@ wave speed, which breaks down in heterogeneous models.
 | A P wave doubling at the free surface above a buried explosion | 2.4% |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.039% / 0.21% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 1.5 \times 10^{-6}$ of peak |
-| Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 6 \times 10^{-8}$ |
-| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed (orders 4 and 8) | $\le 1.7 \times 10^{-4}$ |
+| Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 8.3 \times 10^{-8}$ |
+| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 2.2 \times 10^{-4}$ |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI
@@ -286,8 +286,8 @@ Planned next, following Fichtner (2011), ch. 7–11:
    residual as a unit force, a pressure residual as an isotropic stress source (Tarantola
    1984; Tromp et al. 2005; Fichtner et al. 2006). Because the scheme is self-adjoint, this
    is the exact transpose of the discrete forward run, not just of the wave equation: the
-   dot-product test holds to $6 \times 10^{-8}$ with the source and receivers outside the
-   absorbing layers.
+   dot-product test holds to $10^{-7}$ with the source and receivers clear of the absorbing
+   layers.
 2. **Gradients** (done: `src/gradient.rs`). Zero-lag correlations of the forward and
    adjoint wavefields for $\lambda$, $\mu$ and $\rho$, reparametrised to $v_p$, $v_s$ and
    $\rho$ (Köhn et al. 2012 on the trade-offs), taken through the solver's own material

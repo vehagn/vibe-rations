@@ -26,7 +26,10 @@
 //! values instead (Dussaud et al. 2008) is cheaper and adds an error of its own.
 //!
 //! Inside the absorbing layers the strain rates leave out the CPML, and neither the layers
-//! nor the sponge are self-adjoint, so the gradient there is only approximate.
+//! nor the sponge are self-adjoint, so the gradient there is only approximate. Just outside
+//! them it is off by about 1e-6 with a free surface, whose sponge damps the velocities after
+//! the stress update has used them, and by more if a velocity receiver sits on the first node
+//! outside a layer ([`Simulation::receivers_next_to_layers`]).
 
 use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
