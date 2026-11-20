@@ -207,11 +207,20 @@ impl Source {
 
     /// Adds the source during step `n`, at time `t` (see [`Source::offset`]).
     pub fn inject(&self, fields: &mut Fields, n: usize, t: f64) {
+        self.op.inject(fields, self.value(n, t));
+    }
+
+    /// Takes back what [`Source::inject`] added during step `n`: the same terms, negated.
+    pub fn withdraw(&self, fields: &mut Fields, n: usize, t: f64) {
+        self.op.inject(fields, -self.value(n, t));
+    }
+
+    fn value(&self, n: usize, t: f64) -> f32 {
         let value = match &self.series {
             Some(series) => series.get(n).copied().unwrap_or(0.0),
             None => self.wavelet.value(t),
         };
-        self.op.inject(fields, value as f32);
+        value as f32
     }
 }
 

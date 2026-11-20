@@ -336,6 +336,12 @@ impl Solver {
         }
     }
 
+    /// Bytes a [`State`] of it holds, without making one.
+    pub fn state_bytes(&self) -> usize {
+        let psi: usize = self.psi_v.iter().chain(&self.psi_s).map(Vec::len).sum();
+        4 * (9 * self.grid.padded_len() + psi)
+    }
+
     /// Goes back (or forward) to a state this solver, or one [`Solver::at_rest`] from it,
     /// was in.
     pub fn restore(&mut self, state: &State) {
@@ -377,12 +383,12 @@ impl Solver {
         moment: impl FnOnce(&mut Fields, f64),
     ) {
         let t = self.step as f64 * self.dt;
-        self.update_velocity();
+        self.update_velocity(1.0, true);
         force(&mut self.fields, t);
         if self.free_surface {
             self.mirror_velocity();
         }
-        self.update_stress();
+        self.update_stress(1.0, true);
         moment(&mut self.fields, t + 0.5 * self.dt);
         self.damp_layers();
         if self.free_surface {
@@ -396,7 +402,51 @@ impl Solver {
         self.step_with(|_, _| {}, |_, _| {});
     }
 
-    fn update_velocity(&mut self) {
+    /// Takes back the last step inside the layers' [`Band`], from `before`, the band's values
+    /// before that step ([`Band::save`]): the reverse of [`Solver::step_with`], whose `force`
+    /// and `moment` must withdraw what the step's sources added. Outside the band the result
+    /// means nothing; inside the region it encloses, it is the state before the step up to
+    /// single-precision round-off, so the forward wavefield can be rebuilt backwards from the
+    /// final state (Dussaud et al. 2008). The CPML memory is left as it was, so restore a
+    /// [`State`] before stepping forward again.
+    ///
+    /// Every operation of the step is undone in reverse order with the same arithmetic: the
+    /// increments are computed from the same values as forward and subtracted, the sponge and
+    /// the CPML act only in the layers, σzz on the free surface was zero before the step as
+    /// after it, and the mirrors are recomputed.
+    pub fn step_back_with(
+        &mut self,
+        band: &Band,
+        before: &[f32],
+        force: impl FnOnce(&mut Fields, f64),
+        moment: impl FnOnce(&mut Fields, f64),
+    ) {
+        assert!(self.step > 0, "no step to take back");
+        let n = self.step - 1;
+        let t = n as f64 * self.dt;
+        moment(&mut self.fields, t + 0.5 * self.dt);
+        self.update_stress(-1.0, false);
+        band.restore_stress(&mut self.fields, before);
+        if self.free_surface {
+            self.mirror_stress();
+        }
+        force(&mut self.fields, t);
+        self.update_velocity(-1.0, false);
+        band.restore_velocity(&mut self.fields, before);
+        if self.free_surface {
+            self.mirror_velocity();
+        }
+        self.step = n;
+    }
+
+    /// The nodes outside the absorbing layers along x, y and z, where the update is the same
+    /// at every node and can be taken back.
+    pub fn interior(&self) -> [std::ops::Range<usize>; 3] {
+        self.cpml.each_ref().map(CpmlAxis::interior)
+    }
+
+    /// Adds `sign` times the velocity increment; with `layers` false, without the CPML.
+    fn update_velocity(&mut self, sign: f32, layers: bool) {
         let g = self.grid;
         let [nx, ny, _] = g.n;
         let [_, sy, sz] = g.strides();
@@ -420,7 +470,9 @@ impl Solver {
         let halo = g.halo;
         let [cx, cy, cz] = &self.cpml;
         let wx = cx.width();
-        planes(&g, [vx, vy, vz], &mut self.psi_v, &self.cpml)
+        let mut none = [Vec::new(), Vec::new(), Vec::new()];
+        let psi = if layers { &mut self.psi_v } else { &mut none };
+        planes(&g, [vx, vy, vz], psi, &self.cpml)
             .into_par_iter()
             .for_each_init(
                 || Rows::new(nx),
@@ -465,15 +517,16 @@ impl Solver {
                         }
 
                         let o = (j + halo) * nxt + halo;
-                        add_sum(&mut vx[o..o + nx], &m.bx[r..r + nx], d0, d1, d2);
-                        add_sum(&mut vy[o..o + nx], &m.by[r..r + nx], d3, d4, d5);
-                        add_sum(&mut vz[o..o + nx], &m.bz[r..r + nx], d6, d7, d8);
+                        add_sum(&mut vx[o..o + nx], sign, &m.bx[r..r + nx], d0, d1, d2);
+                        add_sum(&mut vy[o..o + nx], sign, &m.by[r..r + nx], d3, d4, d5);
+                        add_sum(&mut vz[o..o + nx], sign, &m.bz[r..r + nx], d6, d7, d8);
                     }
                 },
             );
     }
 
-    fn update_stress(&mut self) {
+    /// Adds `sign` times the stress increment; with `layers` false, without the CPML.
+    fn update_stress(&mut self, sign: f32, layers: bool) {
         let g = self.grid;
         let [nx, ny, _] = g.n;
         let [_, sy, sz] = g.strides();
@@ -497,92 +550,89 @@ impl Solver {
         let halo = g.halo;
         let [cx, cy, cz] = &self.cpml;
         let wx = cx.width();
-        planes(
-            &g,
-            [sxx, syy, szz, sxy, sxz, syz],
-            &mut self.psi_s,
-            &self.cpml,
-        )
-        .into_par_iter()
-        .for_each_init(
-            || Rows::new(nx),
-            |rows, plane| {
-                let Plane {
-                    kz,
-                    out: [sxx, syy, szz, sxy, sxz, syz],
-                    mut psi_x,
-                    mut psi_y,
-                    mut psi_z,
-                } = plane;
-                let surface = free_surface && kz == 0;
-                let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-                for j in 0..ny {
-                    let r = g.idx(0, j, kz);
-                    st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
-                    st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
-                    if surface {
-                        d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
-                    } else {
-                        st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
-                    }
-                    st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
-                    st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
-                    st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
-                    st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
-                    st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
-                    st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
-
-                    if let Some(p) = psi_x.as_deref_mut() {
-                        let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
-                        cx.apply_along(d0, p0, Stagger::Node);
-                        cx.apply_along(d4, p1, Stagger::Half);
-                        cx.apply_along(d6, p2, Stagger::Half);
-                    }
-                    if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
-                        let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
-                        cy.apply_across(s, d1, p0, Stagger::Node);
-                        cy.apply_across(s, d3, p1, Stagger::Half);
-                        cy.apply_across(s, d8, p2, Stagger::Half);
-                    }
-                    if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
-                        let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
-                        cz.apply_across(s, d2, p0, Stagger::Node);
-                        cz.apply_across(s, d5, p1, Stagger::Half);
-                        cz.apply_across(s, d7, p2, Stagger::Half);
-                    }
-
-                    let o = (j + halo) * nxt + halo;
-                    let lam = &m.lam[r..r + nx];
-                    let l2m = &m.l2m[r..r + nx];
-                    let (sxx, syy, szz) = (
-                        &mut sxx[o..o + nx],
-                        &mut syy[o..o + nx],
-                        &mut szz[o..o + nx],
-                    );
-                    if surface {
-                        for i in 0..nx {
-                            // With σzz = 0, ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy).
-                            let (l, l2) = (lam[i], l2m[i]);
-                            let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
-                            let (a, b) = (l2 - q, l - q);
-                            sxx[i] += a * d0[i] + b * d1[i];
-                            syy[i] += b * d0[i] + a * d1[i];
-                            szz[i] = 0.0;
+        let mut none = [Vec::new(), Vec::new(), Vec::new()];
+        let psi = if layers { &mut self.psi_s } else { &mut none };
+        planes(&g, [sxx, syy, szz, sxy, sxz, syz], psi, &self.cpml)
+            .into_par_iter()
+            .for_each_init(
+                || Rows::new(nx),
+                |rows, plane| {
+                    let Plane {
+                        kz,
+                        out: [sxx, syy, szz, sxy, sxz, syz],
+                        mut psi_x,
+                        mut psi_y,
+                        mut psi_z,
+                    } = plane;
+                    let surface = free_surface && kz == 0;
+                    let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
+                    for j in 0..ny {
+                        let r = g.idx(0, j, kz);
+                        st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
+                        st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
+                        if surface {
+                            d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
+                        } else {
+                            st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
                         }
-                    } else {
-                        for i in 0..nx {
-                            let (l, l2) = (lam[i], l2m[i]);
-                            sxx[i] += l2 * d0[i] + l * (d1[i] + d2[i]);
-                            syy[i] += l2 * d1[i] + l * (d0[i] + d2[i]);
-                            szz[i] += l2 * d2[i] + l * (d0[i] + d1[i]);
+                        st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
+                        st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
+                        st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
+                        st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
+                        st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
+                        st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+
+                        if let Some(p) = psi_x.as_deref_mut() {
+                            let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
+                            cx.apply_along(d0, p0, Stagger::Node);
+                            cx.apply_along(d4, p1, Stagger::Half);
+                            cx.apply_along(d6, p2, Stagger::Half);
                         }
+                        if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
+                            let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
+                            cy.apply_across(s, d1, p0, Stagger::Node);
+                            cy.apply_across(s, d3, p1, Stagger::Half);
+                            cy.apply_across(s, d8, p2, Stagger::Half);
+                        }
+                        if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
+                            let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
+                            cz.apply_across(s, d2, p0, Stagger::Node);
+                            cz.apply_across(s, d5, p1, Stagger::Half);
+                            cz.apply_across(s, d7, p2, Stagger::Half);
+                        }
+
+                        let o = (j + halo) * nxt + halo;
+                        let lam = &m.lam[r..r + nx];
+                        let l2m = &m.l2m[r..r + nx];
+                        let (sxx, syy, szz) = (
+                            &mut sxx[o..o + nx],
+                            &mut syy[o..o + nx],
+                            &mut szz[o..o + nx],
+                        );
+                        if surface {
+                            for i in 0..nx {
+                                // With σzz = 0, ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy).
+                                let (l, l2) = (lam[i], l2m[i]);
+                                let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
+                                let (a, b) = (l2 - q, l - q);
+                                sxx[i] += sign * (a * d0[i] + b * d1[i]);
+                                syy[i] += sign * (b * d0[i] + a * d1[i]);
+                                szz[i] = 0.0;
+                            }
+                        } else {
+                            for i in 0..nx {
+                                let (l, l2) = (lam[i], l2m[i]);
+                                sxx[i] += sign * (l2 * d0[i] + l * (d1[i] + d2[i]));
+                                syy[i] += sign * (l2 * d1[i] + l * (d0[i] + d2[i]));
+                                szz[i] += sign * (l2 * d2[i] + l * (d0[i] + d1[i]));
+                            }
+                        }
+                        add_sum2(&mut sxy[o..o + nx], sign, &m.mxy[r..r + nx], d3, d4);
+                        add_sum2(&mut sxz[o..o + nx], sign, &m.mxz[r..r + nx], d5, d6);
+                        add_sum2(&mut syz[o..o + nx], sign, &m.myz[r..r + nx], d7, d8);
                     }
-                    add_sum2(&mut sxy[o..o + nx], &m.mxy[r..r + nx], d3, d4);
-                    add_sum2(&mut sxz[o..o + nx], &m.mxz[r..r + nx], d5, d6);
-                    add_sum2(&mut syz[o..o + nx], &m.myz[r..r + nx], d7, d8);
-                }
-            },
-        );
+                },
+            );
     }
 
     /// The strain rates the stress update applies the stiffness to, from the velocities
@@ -896,6 +946,216 @@ impl PointOp {
     }
 }
 
+/// What a step back ([`Solver::step_back_with`]) reads from outside the region it rebuilds,
+/// the nodes outside the absorbing layers ([`Solver::interior`]): every value within the
+/// stencil's reach, its half-length L, of that region along an axis. Velocities are kept on
+/// the whole shell, edges included, since the gradient's strain rates just outside the region
+/// read them along its faces; each stress only on the faces across which the velocity update
+/// differentiates it (σxx on the x faces, σxy on the x and y faces, and so on). Above a free
+/// surface there is nothing to keep: the mirrors rebuild it.
+#[derive(Clone, Debug)]
+pub struct Band {
+    /// Runs of padded indices, (start, length): the velocities' shell, shared by vx, vy and vz.
+    shell: Vec<(usize, usize)>,
+    /// The runs of σxx, σyy, σzz, σxy, σxz and σyz.
+    faces: [Vec<(usize, usize)>; 6],
+    /// Values of each array in a record: the shell, then each stress's faces.
+    shell_len: usize,
+    face_len: [usize; 6],
+}
+
+/// The values and runs of a [`Band`], counted without building it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BandSize {
+    /// Values in one record, one state's band.
+    pub values: usize,
+    /// Runs of contiguous indices it is read and written through.
+    pub runs: usize,
+}
+
+impl BandSize {
+    /// Bytes the runs take.
+    pub fn runs_bytes(&self) -> usize {
+        self.runs * std::mem::size_of::<(usize, usize)>()
+    }
+}
+
+/// Order of the stresses in a record and in [`Band::faces`].
+const STRESSES: [Field; 6] = [
+    Field::Sxx,
+    Field::Syy,
+    Field::Szz,
+    Field::Sxy,
+    Field::Sxz,
+    Field::Syz,
+];
+
+impl Band {
+    /// The band around `interior` on `grid`, `reach` nodes deep (the stencil's half-length).
+    pub fn new(
+        grid: &Grid,
+        interior: &[std::ops::Range<usize>; 3],
+        free_surface: bool,
+        reach: usize,
+    ) -> Self {
+        assert!(reach <= grid.halo, "the band reaches past the halo");
+        let [_, sy, sz] = grid.strides();
+        let h = grid.halo as isize;
+        let at = |i: isize, j: isize, k: isize| {
+            ((i + h) as usize) + ((j + h) as usize) * sy + ((k + h) as usize) * sz
+        };
+        let l = reach as isize;
+        let [x, y, z] = interior
+            .each_ref()
+            .map(|r| (r.start as isize, r.end as isize));
+        // Above a free surface the mirrors stand in for the band.
+        let up = if free_surface { 0 } else { l };
+        let runs = |out: &mut Vec<(usize, usize)>, j: isize, k: isize, from: isize, to: isize| {
+            if to > from {
+                out.push((at(from, j, k), (to - from) as usize));
+            }
+        };
+        let inside = |v: isize, r: (isize, isize)| v >= r.0 && v < r.1;
+        let mut shell = Vec::new();
+        for k in z.0 - up..z.1 + l {
+            for j in y.0 - l..y.1 + l {
+                if inside(j, y) && inside(k, z) {
+                    runs(&mut shell, j, k, x.0 - l, x.0);
+                    runs(&mut shell, j, k, x.1, x.1 + l);
+                } else {
+                    runs(&mut shell, j, k, x.0 - l, x.1 + l);
+                }
+            }
+        }
+        let (mut fx, mut fy, mut fz) = (Vec::new(), Vec::new(), Vec::new());
+        for k in z.0..z.1 {
+            for j in y.0..y.1 {
+                runs(&mut fx, j, k, x.0 - l, x.0);
+                runs(&mut fx, j, k, x.1, x.1 + l);
+            }
+            for j in (y.0 - l..y.0).chain(y.1..y.1 + l) {
+                runs(&mut fy, j, k, x.0, x.1);
+            }
+        }
+        for k in (z.0 - up..z.0).chain(z.1..z.1 + l) {
+            for j in y.0..y.1 {
+                runs(&mut fz, j, k, x.0, x.1);
+            }
+        }
+        let both = |a: &Vec<(usize, usize)>, b: &Vec<(usize, usize)>| [a.as_slice(), b].concat();
+        let faces = [
+            fx.clone(),
+            fy.clone(),
+            fz.clone(),
+            both(&fx, &fy),
+            both(&fx, &fz),
+            both(&fy, &fz),
+        ];
+        let total = |r: &[(usize, usize)]| r.iter().map(|&(_, n)| n).sum::<usize>();
+        Self {
+            shell_len: total(&shell),
+            face_len: faces.each_ref().map(|f| total(f)),
+            shell,
+            faces,
+        }
+    }
+
+    /// [`Band::new`]'s size, counted.
+    pub fn size(
+        interior: &[std::ops::Range<usize>; 3],
+        free_surface: bool,
+        reach: usize,
+    ) -> BandSize {
+        let [x, y, z] = interior.each_ref().map(|r| r.len());
+        let l = reach;
+        let up = if free_surface { 0 } else { l };
+        let some = |n: usize, runs: usize| if n > 0 { runs } else { 0 };
+        let shell = (x + 2 * l) * (y + 2 * l) * (z + up + l) - x * y * z;
+        let shell_runs = if l == 0 {
+            0
+        } else {
+            (y + 2 * l) * (z + up + l) - y * z + some(l, 2 * y * z)
+        };
+        let (fx, fy, fz) = (2 * l * y * z, x * 2 * l * z, x * y * (up + l));
+        let runs = some(l, 2 * y * z) + some(x, 2 * l * z) + some(x, y * (up + l));
+        BandSize {
+            values: 3 * shell + 3 * (fx + fy + fz),
+            runs: shell_runs + 3 * runs,
+        }
+    }
+
+    /// Values in one record.
+    pub fn len(&self) -> usize {
+        3 * self.shell_len + self.face_len.iter().sum::<usize>()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bytes its runs take.
+    pub fn memory_bytes(&self) -> usize {
+        let runs = self.shell.len() + self.faces.iter().map(Vec::len).sum::<usize>();
+        runs * std::mem::size_of::<(usize, usize)>()
+    }
+
+    /// Copies the band of `fields` into `out`, one record.
+    pub fn save(&self, fields: &Fields, out: &mut [f32]) {
+        assert_eq!(out.len(), self.len());
+        let mut o = 0;
+        for (f, runs) in self.arrays() {
+            let v = fields.get(f);
+            for &(start, n) in runs {
+                out[o..o + n].copy_from_slice(&v[start..start + n]);
+                o += n;
+            }
+        }
+    }
+
+    /// Writes the velocities of `record` back into `fields`.
+    pub fn restore_velocity(&self, fields: &mut Fields, record: &[f32]) {
+        self.restore(fields, record, |f| {
+            matches!(f, Field::Vx | Field::Vy | Field::Vz)
+        });
+    }
+
+    /// Writes the stresses of `record` back into `fields`.
+    pub fn restore_stress(&self, fields: &mut Fields, record: &[f32]) {
+        self.restore(fields, record, |f| {
+            !matches!(f, Field::Vx | Field::Vy | Field::Vz)
+        });
+    }
+
+    fn restore(&self, fields: &mut Fields, record: &[f32], which: impl Fn(Field) -> bool) {
+        assert_eq!(record.len(), self.len());
+        let mut o = 0;
+        for (f, runs) in self.arrays() {
+            let len: usize = runs.iter().map(|&(_, n)| n).sum();
+            if which(f) {
+                let v = fields.get_mut(f);
+                let mut p = o;
+                for &(start, n) in runs {
+                    v[start..start + n].copy_from_slice(&record[p..p + n]);
+                    p += n;
+                }
+            }
+            o += len;
+        }
+    }
+
+    /// Each array and its runs, in the order of a record.
+    fn arrays(&self) -> impl Iterator<Item = (Field, &[(usize, usize)])> {
+        [Field::Vx, Field::Vy, Field::Vz]
+            .into_iter()
+            .map(|f| (f, self.shell.as_slice()))
+            .chain(
+                STRESSES
+                    .into_iter()
+                    .zip(self.faces.iter().map(Vec::as_slice)),
+            )
+    }
+}
+
 /// Sets plane `dst` of a padded array to `sign` times plane `src`.
 fn mirror_plane(v: &mut [f32], len: usize, dst: usize, src: usize, sign: f32) {
     debug_assert!(dst < src);
@@ -908,23 +1168,24 @@ fn mirror_plane(v: &mut [f32], len: usize, dst: usize, src: usize, sign: f32) {
     }
 }
 
-/// out += b · (x + y + z)
+/// out += sign · b · (x + y + z). A sign of ±1 changes nothing but the sign, so taking a
+/// step back subtracts exactly what the step added.
 #[inline]
-fn add_sum(out: &mut [f32], b: &[f32], x: &[f32], y: &[f32], z: &[f32]) {
+fn add_sum(out: &mut [f32], sign: f32, b: &[f32], x: &[f32], y: &[f32], z: &[f32]) {
     let n = out.len();
     let (b, x, y, z) = (&b[..n], &x[..n], &y[..n], &z[..n]);
     for i in 0..n {
-        out[i] += b[i] * (x[i] + y[i] + z[i]);
+        out[i] += sign * (b[i] * (x[i] + y[i] + z[i]));
     }
 }
 
-/// out += m · (x + y)
+/// out += sign · m · (x + y)
 #[inline]
-fn add_sum2(out: &mut [f32], m: &[f32], x: &[f32], y: &[f32]) {
+fn add_sum2(out: &mut [f32], sign: f32, m: &[f32], x: &[f32], y: &[f32]) {
     let n = out.len();
     let (m, x, y) = (&m[..n], &x[..n], &y[..n]);
     for i in 0..n {
-        out[i] += m[i] * (x[i] + y[i]);
+        out[i] += sign * (m[i] * (x[i] + y[i]));
     }
 }
 

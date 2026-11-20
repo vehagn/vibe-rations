@@ -103,6 +103,11 @@ impl CpmlAxis {
         self.lo + self.hi
     }
 
+    /// The nodes along the axis that are not in a layer.
+    pub fn interior(&self) -> std::ops::Range<usize> {
+        self.lo..self.n - self.hi
+    }
+
     /// The nodes along the axis that are in the layers: those at the start, then the end.
     pub fn ranges(&self) -> [std::ops::Range<usize>; 2] {
         [0..self.lo, self.n - self.hi..self.n]
