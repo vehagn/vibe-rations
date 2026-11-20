@@ -3,6 +3,7 @@
 use std::f64::consts::PI;
 
 use crate::solver::{Field, Fields, PointOp, Solver};
+use crate::tdt::Warp;
 
 /// A source time function.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -94,6 +95,9 @@ pub struct Source {
     pub wavelet: Wavelet,
     /// How it enters the wavefield, per unit of the wavelet.
     pub op: PointOp,
+    /// The wavelet's values to inject at each step, pre-warped to remove leapfrog's time error
+    /// ([`Source::remove_time_dispersion`]); without them, the wavelet itself.
+    pub series: Option<Vec<f64>>,
 }
 
 impl Source {
@@ -175,7 +179,25 @@ impl Source {
             mechanism,
             wavelet,
             op: PointOp { terms },
+            series: None,
         }
+    }
+
+    /// When, in a step that starts at t, the source enters: a force with the velocities at t,
+    /// a moment tensor with the stresses at t + dt/2.
+    pub fn offset(&self, dt: f64) -> f64 {
+        if self.is_force() { 0.0 } else { 0.5 * dt }
+    }
+
+    /// Pre-warps the wavelet for a run of `steps` steps of `dt` (crate::tdt), keeping
+    /// frequencies up to `f_max`, so that un-warping the traces afterwards removes leapfrog's
+    /// time error.
+    pub fn remove_time_dispersion(&mut self, dt: f64, steps: usize, f_max: f64) {
+        let t0 = self.offset(dt);
+        let samples: Vec<f64> = (0..steps)
+            .map(|n| self.wavelet.value(t0 + n as f64 * dt))
+            .collect();
+        self.series = Some(Warp::to_leapfrog(dt, t0, dt, steps, f_max).apply(&samples));
     }
 
     /// Whether the source acts on velocity (a force) rather than stress (a moment tensor).
@@ -183,8 +205,13 @@ impl Source {
         matches!(self.mechanism, Mechanism::Force(_))
     }
 
-    pub fn inject(&self, fields: &mut Fields, t: f64) {
-        self.op.inject(fields, self.wavelet.value(t) as f32);
+    /// Adds the source during step `n`, at time `t` (see [`Source::offset`]).
+    pub fn inject(&self, fields: &mut Fields, n: usize, t: f64) {
+        let value = match &self.series {
+            Some(series) => series.get(n).copied().unwrap_or(0.0),
+            None => self.wavelet.value(t),
+        };
+        self.op.inject(fields, value as f32);
     }
 }
 

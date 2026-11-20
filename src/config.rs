@@ -87,9 +87,14 @@ pub struct TimeConfig {
 
 /// The time step that suits a stencil order, as a fraction of the stability limit. Up to
 /// fourth order a large step is best, because its time error partly cancels the spatial one;
-/// longer stencils only pay off with a small step (README, "Accuracy").
-pub fn default_courant(order: usize) -> f64 {
-    if order <= 4 { 0.85 } else { 0.3 }
+/// longer stencils only pay off with a small step (README, "Accuracy"), unless the time error
+/// is removed (`remove_time_dispersion`), and then a large step is best for every order.
+pub fn default_courant(order: usize, remove_time_dispersion: bool) -> f64 {
+    if order <= 4 || remove_time_dispersion {
+        0.85
+    } else {
+        0.3
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,12 +159,18 @@ pub struct SchemeConfig {
     /// order for the same accuracy (README, "Accuracy").
     #[serde(default = "default_order")]
     pub order: usize,
+    /// Remove leapfrog's time error with the time-dispersion transform: pre-warp the source
+    /// wavelets and un-warp the traces after the run (`tdt`). The traces are then as if time
+    /// were continuous, so a large time step costs no accuracy. Snapshots stay warped.
+    #[serde(default)]
+    pub remove_time_dispersion: bool,
 }
 
 impl Default for SchemeConfig {
     fn default() -> Self {
         Self {
             order: default_order(),
+            remove_time_dispersion: false,
         }
     }
 }
@@ -453,8 +464,10 @@ mod tests {
         assert!(c.boundary.free_surface);
         assert_eq!(c.scheme.order, 8);
         assert_eq!(c.time.courant, None);
-        assert_eq!(default_courant(8), 0.3);
-        assert_eq!(default_courant(4), 0.85);
+        assert!(!c.scheme.remove_time_dispersion);
+        assert_eq!(default_courant(8, false), 0.3);
+        assert_eq!(default_courant(4, false), 0.85);
+        assert_eq!(default_courant(8, true), 0.85);
         assert_eq!(c.receivers.components.len(), 3);
         assert_eq!(c.output.dir, PathBuf::from("out"));
         let w = c.sources[0].wavelet.wavelet().unwrap();

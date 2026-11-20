@@ -64,6 +64,24 @@ fn an_explosion_matches_the_full_space_solution() {
 
 #[test]
 fn a_point_force_matches_stokes_solution() {
+    for (what, e) in point_force_misfits("") {
+        assert!(e < 0.01, "misfit {e} in {what}");
+    }
+}
+
+/// Removing leapfrog's time error (`remove_time_dispersion`, which then steps at 0.85 of the
+/// stability limit instead of 0.3) costs no accuracy; on this grid (6.9 points per S
+/// wavelength) it gains some: 0.001–0.008% against 0.03–0.09% at C = 0.3 without it.
+#[test]
+fn removing_time_dispersion_allows_a_large_time_step() {
+    for (what, e) in point_force_misfits("[scheme]\nremove_time_dispersion = true") {
+        assert!(e < 2e-4, "misfit {e} in {what}");
+    }
+}
+
+/// The misfits of a point force against Stokes' solution along, across and diagonal to it,
+/// with `scheme` added to the configuration.
+fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
     let source = [400.0, 400.0, 400.0];
     // Along the force (P and near field), across it (S and near field), and in between.
     let receivers = [
@@ -89,12 +107,14 @@ fn a_point_force_matches_stokes_solution() {
             [receivers]
             components = ["vx", "vy", "vz"]
             {points}
+            {scheme}
             "#
         ),
     ));
     let w = Wavelet::Ricker { f0: 10.0, t0: 0.12 };
     // Forces enter with velocity, at whole steps; the velocity samples are half a step later.
     let times = sim.sample_times();
+    let mut out = Vec::new();
     for (r, &p) in receivers.iter().enumerate() {
         let d = sub(p, source);
         let exact: Vec<[f64; 3]> = times
@@ -107,14 +127,20 @@ fn a_point_force_matches_stokes_solution() {
                 continue;
             }
             let e = misfit(&trace(&sim, c, r), &want);
+            let what = format!("{} at offset {d:?}", c.name());
             println!(
-                "force, offset {d:?}, {}: misfit {:.2}%",
-                c.name(),
+                "force{}, {what}: misfit {:.3}%",
+                if scheme.is_empty() {
+                    ""
+                } else {
+                    ", transformed"
+                },
                 100.0 * e
             );
-            assert!(e < 0.01, "misfit {e} in {} at {p:?}", c.name());
+            out.push((what, e));
         }
     }
+    out
 }
 
 /// At the epicentre a P wave meets the free surface head-on, and the surface moves twice as

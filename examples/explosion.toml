@@ -18,6 +18,9 @@ duration = 0.8  # seconds; dt follows from the stability limit (see `just check`
 # Fourth order (`order = 4`) is faster per step but needs nearly twice the points.
 [scheme]
 order = 8
+# Removing leapfrog's time error from the traces allows 0.85 of the limit, as accurate in 2.8
+# times fewer steps; snapshots stay warped (README, "Accuracy").
+# remove_time_dispersion = true
 
 [boundary]
 pml_width = 15       # nodes of absorbing layer on the sides and bottom

@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::config::{Config, Format, PlaneKind, default_courant};
@@ -16,10 +17,11 @@ use crate::grid::Grid;
 use crate::image;
 use crate::model::Model;
 use crate::npy;
-use crate::receiver::Receivers;
+use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
 use crate::solver::Solver;
 use crate::source::{Mechanism, Source};
+use crate::tdt::Warp;
 
 /// Fewer grid points than this per shortest wavelength and numerical dispersion shows: a few
 /// percent of misfit after ten wavelengths at the default time step (README, "Accuracy").
@@ -49,7 +51,13 @@ pub struct Simulation {
     /// Record the receivers every this many steps.
     pub record_every: usize,
     pub info: RunInfo,
+    /// Whether the traces have been un-warped ([`Simulation::finish`]).
+    finished: bool,
 }
+
+/// The time-dispersion transforms keep frequencies up to this multiple of the sources' highest
+/// (2.5 f0): a Ricker wavelet's spectrum there is 1e-9 of its peak.
+const TRANSFORM_BAND: f64 = 2.0;
 
 /// What a run is set up to do; written to `run.json` alongside the results.
 #[derive(Clone, Debug, Serialize)]
@@ -71,6 +79,8 @@ pub struct RunInfo {
     pub free_surface: bool,
     /// Order of the spatial derivatives.
     pub order: usize,
+    /// Whether leapfrog's time error is removed from the traces (crate::tdt).
+    pub remove_time_dispersion: bool,
     pub memory_bytes: usize,
     pub sources: Vec<SourceInfo>,
     pub receivers: usize,
@@ -129,10 +139,9 @@ impl Simulation {
                 dt
             }
             None => {
-                let c = cfg
-                    .time
-                    .courant
-                    .unwrap_or_else(|| default_courant(cfg.scheme.order));
+                let c = cfg.time.courant.unwrap_or_else(|| {
+                    default_courant(cfg.scheme.order, cfg.scheme.remove_time_dispersion)
+                });
                 ensure!(c > 0.0 && c <= 1.0, "courant must be in (0, 1]");
                 c * dt_stable
             }
@@ -204,7 +213,11 @@ impl Simulation {
                 },
                 dominant_frequency: wavelet.dominant_frequency(),
             });
-            sources.push(Source::new(&solver, node, mechanism, wavelet));
+            let mut source = Source::new(&solver, node, mechanism, wavelet);
+            if cfg.scheme.remove_time_dispersion {
+                source.remove_time_dispersion(dt, steps, TRANSFORM_BAND * f_max);
+            }
+            sources.push(source);
         }
 
         let record_every = cfg.output.record_every;
@@ -282,6 +295,7 @@ impl Simulation {
             pml_width: w,
             free_surface: b.free_surface,
             order: cfg.scheme.order,
+            remove_time_dispersion: cfg.scheme.remove_time_dispersion,
             memory_bytes: solver.memory_bytes(),
             sources: source_info,
             receivers: receivers.nodes.len(),
@@ -304,24 +318,26 @@ impl Simulation {
             steps,
             record_every,
             info,
+            finished: false,
         })
     }
 
     /// Advances the wavefield one step, with the sources, without recording anything.
     pub fn step(&mut self) {
         let sources = &self.sources;
+        let n = self.solver.step;
         self.solver.step_with(
             |f, t| {
                 sources
                     .iter()
                     .filter(|s| s.is_force())
-                    .for_each(|s| s.inject(f, t))
+                    .for_each(|s| s.inject(f, n, t))
             },
             |f, t| {
                 sources
                     .iter()
                     .filter(|s| !s.is_force())
-                    .for_each(|s| s.inject(f, t))
+                    .for_each(|s| s.inject(f, n, t))
             },
         );
     }
@@ -338,6 +354,54 @@ impl Simulation {
     /// Steps still to take.
     pub fn remaining(&self) -> usize {
         self.steps.saturating_sub(self.solver.step)
+    }
+
+    /// The transform that un-warps the traces of `component` (crate::tdt), when the run
+    /// removes time dispersion. The misfit's derivative with respect to the recorded samples is
+    /// its transpose applied to the derivative with respect to the un-warped ones.
+    pub fn trace_warp(&self, component: Component) -> Option<Warp> {
+        if !self.info.remove_time_dispersion {
+            return None;
+        }
+        let dt = self.solver.dt;
+        // A sample follows its step: velocities from half a step before its end, stresses
+        // from its end.
+        let first = match component {
+            Component::P => dt,
+            _ => 0.5 * dt,
+        };
+        let f_max = TRANSFORM_BAND * self.info.max_frequency;
+        Some(Warp::from_leapfrog(
+            dt,
+            first,
+            self.record_every as f64 * dt,
+            self.receivers.samples,
+            f_max,
+        ))
+    }
+
+    /// After the last step, un-warps the traces if the run removes time dispersion. Only the
+    /// first call after the last step does anything; [`Simulation::run`] makes it.
+    pub fn finish(&mut self) {
+        if self.finished || self.remaining() > 0 {
+            return;
+        }
+        self.finished = true;
+        let samples = self.receivers.samples;
+        let components = self.receivers.components.clone();
+        for (c, data) in components.into_iter().zip(0..) {
+            let Some(warp) = self.trace_warp(c) else {
+                continue;
+            };
+            self.receivers.traces[data]
+                .par_chunks_mut(samples)
+                .for_each(|trace| {
+                    let x: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
+                    for (t, y) in trace.iter_mut().zip(warp.apply(&x)) {
+                        *t = y as f32;
+                    }
+                });
+        }
     }
 
     /// Runs every step, writing snapshots into `out` if given, and reporting progress on
@@ -386,6 +450,7 @@ impl Simulation {
                 }
             }
         }
+        self.finish();
         Ok(())
     }
 
@@ -467,8 +532,16 @@ impl RunInfo {
         );
         let _ = writeln!(
             s,
-            "accuracy  {:.1} points per shortest wavelength ({:.0} m/s at {:.1} Hz), order-{} stencils",
-            self.points_per_wavelength, self.slowest_wave, self.max_frequency, self.order
+            "accuracy  {:.1} points per shortest wavelength ({:.0} m/s at {:.1} Hz), order-{} stencils{}",
+            self.points_per_wavelength,
+            self.slowest_wave,
+            self.max_frequency,
+            self.order,
+            if self.remove_time_dispersion {
+                ", time dispersion removed from the traces"
+            } else {
+                ""
+            }
         );
         let top = if self.free_surface {
             "free surface on top"

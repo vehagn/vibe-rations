@@ -197,6 +197,8 @@ impl View {
         for _ in 0..n {
             self.sim.advance();
         }
+        // Un-warps the traces after the last step, if the run removes time dispersion.
+        self.sim.finish();
         ensure!(
             self.sim.solver.peak_velocity().is_finite(),
             "the wavefield blew up by step {}; check the model, or lower dt or courant",

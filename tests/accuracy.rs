@@ -19,6 +19,7 @@ use common::*;
 use vibe_rations::receiver::Component;
 use vibe_rations::simulation::Simulation;
 use vibe_rations::source::Wavelet;
+use vibe_rations::tdt::Warp;
 
 const DISTANCES: [f64; 4] = [300.0, 900.0, 1500.0, 1800.0];
 const ORDERS: [usize; 4] = [4, 8, 12, 16];
@@ -31,6 +32,10 @@ enum Wave {
 
 /// A line of receivers along x from a source, in a domain long in x and narrow across.
 fn config(wave: &Wave, h: f64, order: usize, courant: f64) -> String {
+    config_with(wave, h, order, courant, false)
+}
+
+fn config_with(wave: &Wave, h: f64, order: usize, courant: f64, transform: bool) -> String {
     let pml = 12;
     let pad = (pml + 4) as f64 * h;
     let x0 = pad;
@@ -59,6 +64,7 @@ fn config(wave: &Wave, h: f64, order: usize, courant: f64) -> String {
         free_surface = false
         [scheme]
         order = {order}
+        remove_time_dispersion = {transform}
         [[model.layer]]
         top = 0.0
         vp = {VP}
@@ -77,13 +83,26 @@ fn config(wave: &Wave, h: f64, order: usize, courant: f64) -> String {
 
 /// The misfit at each distance, and the speed in Mcell updates per second.
 fn measure(wave: &Wave, h: f64, order: usize, courant: f64) -> (Vec<f64>, f64) {
-    let mut sim: Simulation = setup(&config(wave, h, order, courant));
+    let (sim, speed) = simulate_timed(&config(wave, h, order, courant));
+    (misfits(wave, &sim, false), speed)
+}
+
+fn simulate_timed(toml: &str) -> (Simulation, f64) {
+    let mut sim: Simulation = setup(toml);
     let start = Instant::now();
     sim.run(None, false).expect("a stable run");
     let seconds = start.elapsed().as_secs_f64();
     let speed = sim.solver.grid.interior_len() as f64 * sim.steps as f64 / seconds / 1e6;
+    (sim, speed)
+}
+
+/// The misfit at each distance; `band_limit` first limits the traces to the band the
+/// time-dispersion transform keeps, to compare like with like.
+fn misfits(wave: &Wave, sim: &Simulation, band_limit: bool) -> Vec<f64> {
     let times = sim.sample_times();
-    let misfits = DISTANCES
+    let dt = sim.solver.dt;
+    let limit = Warp::band_limit(0.5 * dt, dt, times.len(), 2.0 * sim.info.max_frequency);
+    DISTANCES
         .iter()
         .enumerate()
         .map(|(r, &d)| {
@@ -111,10 +130,13 @@ fn measure(wave: &Wave, h: f64, order: usize, courant: f64) -> (Vec<f64>, f64) {
                 Wave::P => Component::Vx,
                 Wave::S => Component::Vy,
             };
-            misfit(&trace(&sim, c, r), &exact)
+            let mut got = trace(sim, c, r);
+            if band_limit {
+                got = limit.apply(&got);
+            }
+            misfit(&got, &exact)
         })
-        .collect();
-    (misfits, speed)
+        .collect()
 }
 
 #[test]
@@ -153,6 +175,49 @@ fn fourth_order_on_finer_grids() {
                 "{h:5} {ppw:4.1}  {courant:7}  {}  {speed:7.0}",
                 cells.join(" ")
             );
+        }
+    }
+}
+
+/// Removing leapfrog's time error (`remove_time_dispersion`): the transformed runs at large
+/// time steps against today's default, C = 0.3, with its traces as they are and limited to the
+/// band the transform keeps.
+#[test]
+#[ignore = "a study, not a check: run with `just accuracy`"]
+fn removing_time_dispersion() {
+    let row = |label: &str, m: &[f64], speed: f64| {
+        let cells: Vec<String> = m.iter().map(|x| format!("{:7.2}", 100.0 * x)).collect();
+        println!("{label:24} {}  {speed:7.0}", cells.join(" "));
+    };
+    for (wave, h, label) in [
+        (Wave::P, 20.0, "P, 4.0 points per wavelength"),
+        (Wave::S, 20.0, "S, 3.5 points per wavelength"),
+        // The spacing must divide the distances, or the receivers snap off them.
+        (Wave::S, 300.0 / 17.0, "S, 3.9 points per wavelength"),
+        (Wave::S, 15.0, "S, 4.6 points per wavelength"),
+    ] {
+        println!("\n{label}, time dispersion removed: L2 misfit (%) at {DISTANCES:?} m");
+        println!("{:24} {:>32}  Mcell/s", "order, courant", "");
+        for order in ORDERS {
+            let (plain, speed) = simulate_timed(&config(&wave, h, order, 0.3));
+            row(
+                &format!("{order:2}, 0.3"),
+                &misfits(&wave, &plain, false),
+                speed,
+            );
+            row(
+                &format!("{order:2}, 0.3, band-limited"),
+                &misfits(&wave, &plain, true),
+                speed,
+            );
+            for courant in [0.85, 0.95] {
+                let (sim, speed) = simulate_timed(&config_with(&wave, h, order, courant, true));
+                row(
+                    &format!("{order:2}, {courant}, transformed"),
+                    &misfits(&wave, &sim, false),
+                    speed,
+                );
+            }
         }
     }
 }
