@@ -256,15 +256,20 @@ wave speed, which breaks down in heterogeneous models.
 | A P wave doubling at the free surface above a buried explosion | 2.4% |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.039% / 0.21% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 1.5 \times 10^{-6}$ of peak |
+| Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 6 \times 10^{-8}$ |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI
 
 Planned next, following Fichtner (2011), ch. 7–11:
 
-1. **Adjoint wavefield.** Back-propagate the residuals by injecting them as forces at the
-   receivers (the transpose above) in reversed time (Tarantola 1984; Tromp et al. 2005;
-   Fichtner et al. 2006).
+1. **Adjoint wavefield** (done: `src/adjoint.rs`). The residuals go back into the forward
+   solver, stepped in reversed order, through the transpose of the receivers: a velocity
+   residual as a unit force, a pressure residual as an isotropic stress source (Tarantola
+   1984; Tromp et al. 2005; Fichtner et al. 2006). Because the scheme is self-adjoint, this
+   is the exact transpose of the discrete forward run, not just of the wave equation: the
+   dot-product test holds to $6 \times 10^{-8}$ with the source and receivers outside the
+   absorbing layers.
 2. **Gradients.** Zero-lag correlations of the forward and adjoint wavefields for $\lambda$,
    $\mu$ and $\rho$, reparametrised to $v_p$, $v_s$ and $\rho$ (Köhn et al. 2012 on the
    trade-offs).

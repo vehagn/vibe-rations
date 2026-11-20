@@ -135,6 +135,87 @@ force 0.07–0.18%. Two get worse:
   surface, and $1.8 \times 10^{-3}$ → $2.1 \times 10^{-3}$ with one, as the longer stencils
   reach further across the layers' inner edge.
 
+## 2026-11-20 — The adjoint wavefield by running the solver backwards
+
+**Question.** Can the forward solver, stepped in reversed order, be the exact transpose of the
+discrete forward run (the discretise-then-optimise adjoint), rather than only a discretisation
+of the continuous adjoint equations [@tarantola1984; @tromp2005; @fichtner2006]? And where does
+it stop being one?
+
+**Theory.** One forward step $n$ is
+
+$$
+v^{n+\frac12} = v^{n-\frac12} + B D \sigma^{n} + B f^{n}, \qquad
+\sigma^{n+1} = \sigma^{n} + M D' v^{n+\frac12} + g^{n},
+$$
+
+with $B = \Delta t/\rho$, $M = \Delta t\, C$ and $D' = -W_\sigma^{-1} D^{T} W_v$, where $W$ holds
+each value's cell volume (half a cell on the free surface): the staggered derivatives are
+negative adjoints, which is also what makes the scheme conserve energy (2026-11-20, the
+self-adjoint free surface). Scaling the rows by $W B^{-1}$ and $W M^{-1}$ makes the stepping
+symmetric except for the time differences, which transposing turns round. The adjoint
+variables obey
+
+$$
+\lambda_v^{n+\frac12} = \lambda_v^{n+\frac32} - B D \lambda_\sigma^{n+1} + B W_v^{-1} r_v^{n},
+\qquad
+\lambda_\sigma^{n} = \lambda_\sigma^{n+1} - M D' \lambda_v^{n+\frac12} + M W_\sigma^{-1} r_\sigma^{n},
+$$
+
+with $r = R^{T} \delta$ the residuals $\delta$ spread by the transposed receivers. With
+$\tilde v = \lambda_v$ and $\tilde \sigma = -\lambda_\sigma$ this is the forward step taken
+backwards: adjoint step $m = N - 1 - n$ reads $\tilde\sigma^{n+1}$ and writes
+$\tilde v^{n+\frac12}$, then $\tilde\sigma^{n}$. So
+
+- a velocity residual recorded after forward step $n$ enters during adjoint step $m$ as a
+  unit force, $B W_v^{-1} R^{T}$: exactly a force source's operator;
+- a pressure residual, which the forward run read from $\sigma^{n+1}$, enters one adjoint step
+  earlier as an isotropic stress source $-M W_\sigma^{-1} R^{T} = \Delta t\, K / V$ per unit
+  ($K = \lambda + \tfrac23 \mu$; on the free surface the plane-stress modulus loads
+  $\sigma_{xx}$ and $\sigma_{yy}$ over half a cell, and $\sigma_{zz}$ not at all). A pressure
+  sample from the last forward step is the adjoint run's initial state;
+- after adjoint step $m$ the adjoint velocities pair with the forward velocities at
+  $(n + \tfrac12)\Delta t$ and the adjoint stresses with the forward stresses at $n\,\Delta t$,
+  which is what the gradients will correlate.
+
+Receivers recording every $k$-th step transpose to injecting at those steps only.
+
+**Test** (`tests/physics.rs`). A dot-product test, $\langle F w, \tilde d \rangle = \langle w,
+F^{T} \tilde d \rangle$, in the reciprocity test's model (two layers, a sphere, a free surface):
+a force history $w$ at 200 m depth, recorded in $v_x$, $v_y$, $v_z$ and $p$ at four receivers
+(one on the free surface), 0.5 s (about 1300 steps). $F^{T}\tilde d$ is the adjoint velocity
+read at the source, along the force, after each adjoint step.
+
+Two lessons about the test itself. With residuals of random sign, the four receivers' pressure
+terms summed to a fiftieth of their size, so round-off in each (agreeing to $10^{-7}$ to
+$4 \times 10^{-6}$ per receiver) showed as $10^{-4}$ in the total. And pressure, in Pa,
+outweighs velocity by about $10^{6}$, so velocity hardly counted. The residuals are therefore
+the data times random positive weights, divided by each component's $\|d_c\|^2$: every term
+is positive and every component counts equally.
+
+**Results.** $|\langle F w, \tilde d\rangle - \langle w, F^T \tilde d\rangle| /
+\langle F w, \tilde d\rangle$:
+
+| Walls | Signals | Order 4 | Order 8 |
+|---|---|---|---|
+| Rigid, free surface | white noise, every step | $5.9 \times 10^{-8}$ | $4.2 \times 10^{-8}$ |
+| CPML and sponge, free surface | band-limited (12 Hz), every 2nd step | $4.8 \times 10^{-8}$ | $6.0 \times 10^{-8}$ |
+| CPML all round | white noise, every step | $3.8 \times 10^{-8}$ | $4.3 \times 10^{-8}$ |
+
+That is single-precision round-off: the time-reversed solver is the transpose of the forward
+run, in every component, at the free surface and with decimated recording. The CPML and the
+sponge are not self-adjoint in themselves, yet seen from outside the layers they are to this
+precision. Inside a layer they are not. With the receivers moved into the top layer (no free
+surface, order 4): $1.4 \times 10^{-3}$ at its outer edge, $4.1 \times 10^{-4}$ at 40 m,
+$2.3 \times 10^{-4}$ at 80 m, and $9.9 \times 10^{-7}$ at 100 m, the first node outside it
+($1.2 \times 10^{-6}$ at order 8; the stencil still reaches in).
+
+**Decision.** The adjoint is the forward solver run backwards (`src/adjoint.rs`), with no
+separate adjoint kernels to keep in step with the forward ones. Receivers belong outside the
+layers (`check` already warns).
+
+**Reproduce:** `the_adjoint_run_is_the_transpose_of_the_forward_run`, in `just physics`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
@@ -147,7 +228,7 @@ force 0.07–0.18%. Two get worse:
 - **Error propagation into adjoint fields and gradients.** Forward-field error (dispersion,
   interfaces, free surface, layers), reconstruction error (time-reversed propagation in single
   precision; the non-reversible layers [@dussaud2008; @aaker2020]), and their effect on
-  gradients and inversions [@tromp2005; @fichtner2006; @fichtner2011]. Planned measures:
-  dot-product and reciprocity tests of adjoint consistency, gradients against finite
+  gradients and inversions [@tromp2005; @fichtner2006; @fichtner2011]. Adjoint consistency
+  is settled (the dot-product entry above). Still to measure: gradients against finite
   differences, and the accuracy study repeated for gradients as a function of stencil order,
   $C$ and ppw.

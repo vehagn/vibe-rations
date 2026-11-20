@@ -45,6 +45,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 ```
 src/
   main.rs        the CLI: run | check
+  adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
@@ -97,7 +98,7 @@ examples/        annotated configurations
   loosen a physics tolerance to make a change pass. When a deliberate change trades one
   baseline for another, record both numbers in the test's doc comment, here and in the log.
 - **Sources are the transpose of receivers** (`Solver::stagger_weights`, `PointOp`).
-  Adjoint FWI depends on it; the reciprocity test checks it to $10^{-6}$.
+  Adjoint FWI depends on it; the reciprocity and dot-product tests check it.
 - SI units; $z$ points down; arrays are $x$-fastest, padded by `grid.halo` nodes.
 - Comments say why, not what. Doc comments on public items.
 
@@ -106,6 +107,17 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The adjoint is the forward solver run backwards** (`Adjoint`), not separate kernels.
+  Transposing the discrete step gives the same step in reversed order with $\tilde v =
+  \lambda_v$, $\tilde\sigma = -\lambda_\sigma$. Adjoint step $m$ pairs with forward step
+  $n = N - 1 - m$: a velocity residual from forward step $n$ enters during adjoint step $m$
+  as a unit force (`Solver::adjoint_op`); a pressure residual, read from $\sigma^{n+1}$, one
+  adjoint step earlier as an isotropic stress source $\Delta t\,K/V$, and the last one is the
+  initial state. The dot-product test holds to $6 \times 10^{-8}$ (single precision) with
+  rigid walls or CPML, orders 4 and 8. Receivers *inside* a layer break it by up to
+  $1.4 \times 10^{-3}$. For a dot-product test, give the residuals the data's signs and weight
+  the components equally: random signs cancelled 50-fold and made round-off look like
+  $10^{-4}$, and pressure outweighs velocity by $10^6$.
 - **Error propagation into adjoint fields** is a main research interest for what comes next:
   forward-field error (dispersion, interfaces, free surface, layers), reconstruction error,
   and their effect on gradients. Design the adjoint so each can be measured separately (see
@@ -114,7 +126,8 @@ doesn't show.
   update this list if they get better): explosion vs analytic 0.11–0.26%; point force vs
   Stokes 0.07–0.18%; free-surface P doubling 2.4%; CPML reflection $3.9 \times 10^{-4}$ of the
   peak without a free surface, $2.1 \times 10^{-3}$ along one; reciprocity
-  $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the 9 s soft-sediment run drains to
+  $\le 1.5 \times 10^{-6}$ (orders 4 and 8); the adjoint dot-product test
+  $\le 6 \times 10^{-8}$; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. At order 4 with $C = 0.85$ they were 0.7–1.6%,
   0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
 - **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at
