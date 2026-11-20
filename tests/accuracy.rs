@@ -1,12 +1,13 @@
 //! How accurate each stencil order and time step is over FWI-like distances: `just accuracy`.
 //!
-//! Not part of the regular suite (it takes a minute or two); it prints a table of misfits
-//! against the closed-form solutions for every combination of stencil order and Courant
-//! fraction, at coarse grids where numerical dispersion shows:
+//! Not part of the regular suite (it takes a few minutes); it prints tables of misfits
+//! against the closed-form solutions at coarse grids where numerical dispersion shows: for
+//! every combination of stencil order and Courant fraction with leapfrog's time error kept,
+//! then with it removed (the default), and the free-surface test on finer grids.
 //!
 //! - P: an explosion, 4 grid points per shortest P wavelength;
-//! - S: a point force seen broadside (S in the far field), 3.5 and 4.6 points per shortest S
-//!   wavelength.
+//! - S: a point force seen broadside (S in the far field), 3.5, 3.9 and 4.6 points per
+//!   shortest S wavelength.
 //!
 //! Receivers sit 300 to 1800 m from the source: 1.5–9 dominant P wavelengths, 1.7–10 S
 //! wavelengths. The README's "Accuracy" section summarises the results.
@@ -218,6 +219,67 @@ fn removing_time_dispersion() {
                     speed,
                 );
             }
+        }
+    }
+}
+
+/// The free-surface test (`the_free_surface_doubles_a_vertically_incident_p_wave`) on finer
+/// grids: whether its misfit is the scheme's, which shrinks with the spacing, or the
+/// reference's (doubling is exact only for plane waves), which doesn't.
+#[test]
+#[ignore = "a study, not a check: run with `just accuracy`"]
+fn free_surface_on_finer_grids() {
+    let depth = 300.0;
+    let w = Wavelet::Ricker {
+        f0: 15.0,
+        t0: 1.2 / 15.0,
+    };
+    println!("\nP doubling at the free surface, 300 m above an explosion: L2 misfit (%)");
+    println!("    h  order  transform  misfit  Mcell/s");
+    for h in [10.0, 7.5, 5.0] {
+        for (order, transform) in [(8, true), (8, false), (16, true)] {
+            let n = |metres: f64| (metres / h).round() as usize + 1;
+            let (sim, speed) = simulate_timed(&format!(
+                r#"
+                [grid]
+                points = [{}, {}, {}]
+                spacing = {h}
+                [time]
+                duration = 0.3
+                [boundary]
+                pml_width = {}
+                [scheme]
+                order = {order}
+                remove_time_dispersion = {transform}
+                [[model.layer]]
+                top = 0.0
+                vp = {VP}
+                vs = {VS}
+                rho = {RHO}
+                [[source]]
+                position = [400.0, 400.0, {depth}]
+                explosion = 1e13
+                wavelet = {{ kind = "ricker", frequency = 15.0 }}
+                [receivers]
+                components = ["vz"]
+                [[receivers.point]]
+                position = [400.0, 400.0, 0.0]
+                "#,
+                n(800.0),
+                n(800.0),
+                n(600.0),
+                (120.0 / h).round() as usize,
+            ));
+            let exact: Vec<f64> = sim
+                .sample_times()
+                .iter()
+                .map(|&t| -2.0 * explosion_velocity(&w, 1e13, depth, t))
+                .collect();
+            let e = misfit(&trace(&sim, Component::Vz, 0), &exact);
+            println!(
+                "{h:5}  {order:5}  {transform:9}  {:6.2}  {speed:7.0}",
+                100.0 * e
+            );
         }
     }
 }
