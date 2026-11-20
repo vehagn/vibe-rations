@@ -40,6 +40,25 @@ impl Config {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::from_toml(&text).with_context(|| format!("in {}", path.display()))
     }
+
+    /// The same run with only source `s`: one shot of a survey whose sources fire one at a
+    /// time, as an inversion takes them.
+    pub fn shot(&self, s: usize) -> Result<Self> {
+        ensure!(
+            s < self.sources.len(),
+            "there is no source {s}; the configuration has {}",
+            self.sources.len()
+        );
+        Ok(Self {
+            sources: vec![self.sources[s].clone()],
+            ..self.clone()
+        })
+    }
+}
+
+/// The directory, under a run's output directory, of shot `s`'s results.
+pub fn shot_dir(s: usize) -> String {
+    format!("shot-{s:03}")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -450,6 +469,24 @@ mod tests {
         explosion = 1.0
         wavelet = { kind = "ricker", frequency = 10.0 }
     "#;
+
+    #[test]
+    fn a_shot_keeps_one_source() {
+        let two = MINIMAL.to_string()
+            + r#"
+        [[source]]
+        position = [50.0, 100.0, 100.0]
+        force = [0.0, 0.0, 1.0]
+        wavelet = { kind = "ricker", frequency = 12.0 }
+        "#;
+        let c = Config::from_toml(&two).unwrap();
+        let shot = c.shot(1).unwrap();
+        assert_eq!(shot.sources.len(), 1);
+        assert_eq!(shot.sources[0].position, [50.0, 100.0, 100.0]);
+        assert_eq!(shot.grid.points, c.grid.points);
+        assert!(c.shot(2).is_err());
+        assert_eq!(shot_dir(7), "shot-007");
+    }
 
     #[test]
     fn fills_in_defaults() {

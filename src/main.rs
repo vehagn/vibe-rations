@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
-use vibe_rations::config::Config;
+use vibe_rations::config::{Config, shot_dir};
 use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
 use vibe_rations::npy;
 use vibe_rations::simulation::Simulation;
@@ -32,6 +32,10 @@ enum Command {
         /// Don't report progress.
         #[arg(long, short)]
         quiet: bool,
+        /// Fire the sources one at a time, each shot's results in its own shot-NNN
+        /// directory, as an inversion takes them.
+        #[arg(long)]
+        shots: bool,
     },
     /// Set up a simulation without running it: grid, time step, accuracy and memory.
     Check {
@@ -79,13 +83,31 @@ fn run() -> Result<()> {
             .build_global()?;
     }
     match cli.command {
-        Command::Run { config, out, quiet } => {
+        Command::Run {
+            config,
+            out,
+            quiet,
+            shots,
+        } => {
             let (cfg, sim) = load(&config)?;
-            let mut sim = sim;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
-            sim.run(Some(&out), !quiet)?;
-            sim.write_outputs(&out)?;
+            if shots {
+                let base = config.parent().unwrap_or(Path::new("."));
+                for s in 0..cfg.sources.len() {
+                    let mut shot = Simulation::new(&cfg.shot(s)?, base)?;
+                    let dir = out.join(shot_dir(s));
+                    if !quiet {
+                        eprintln!("shot {} of {}", s + 1, cfg.sources.len());
+                    }
+                    shot.run(Some(&dir), !quiet)?;
+                    shot.write_outputs(&dir)?;
+                }
+            } else {
+                let mut sim = sim;
+                sim.run(Some(&out), !quiet)?;
+                sim.write_outputs(&out)?;
+            }
             eprintln!("wrote {}", out.display());
         }
         Command::Check { config } => {

@@ -37,7 +37,7 @@ Then, in the container:
 | `just lint` | rustfmt and clippy with `-D warnings` |
 | `just ci` | Lint, then all tests: what must pass before a commit |
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
-| `just run <config>` | Runs a simulation |
+| `just run <config>` | Runs a simulation; `--shots` fires the sources one at a time, into `shot-NNN/` |
 | `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
 | `just web` | Builds the web app into `web/dist` |
 

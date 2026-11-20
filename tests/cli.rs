@@ -116,6 +116,38 @@ fn run_writes_traces_gathers_snapshots_and_settings() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// With --shots each source fires on its own, into its own directory.
+#[test]
+fn run_fires_shots_one_at_a_time() {
+    let dir = scratch("shots");
+    let config = dir.join("two.toml");
+    let two = TINY.replace(
+        "[receivers]",
+        "[[source]]\nposition = [60.0, 120.0, 60.0]\nforce = [0.0, 0.0, 1e9]\n\
+         wavelet = { kind = \"ricker\", frequency = 10.0 }\n[receivers]",
+    );
+    fs::write(&config, two).unwrap();
+    let out_dir = dir.join("out");
+    let out = vibe(&[
+        "run",
+        config.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+        "--quiet",
+        "--shots",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for shot in ["shot-000", "shot-001"] {
+        assert!(out_dir.join(shot).join("vz.npy").is_file(), "{shot}");
+        let info: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out_dir.join(shot).join("run.json")).unwrap())
+                .unwrap();
+        assert_eq!(info["sources"].as_array().unwrap().len(), 1, "{shot}");
+    }
+    assert!(!out_dir.join("shot-002").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// The gradient of a model's misfit to traces another model recorded.
 #[test]
 fn gradient_writes_one_array_per_parameter() {
