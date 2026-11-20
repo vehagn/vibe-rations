@@ -16,16 +16,18 @@ just in physics
 ```
 
 It prints a line per check. Compare with the baselines in the Notes of `AGENTS.md` (these
-are at the default: order 8, $C = 0.85$, the time error removed from the traces):
+are at the default: order 8, optimised coefficients, $C = 0.85$, the time error removed from
+the traces):
 
 | Test | Baseline | Breaks when |
 |---|---|---|
-| `an_explosion_matches_the_full_space_solution` | 0.002–0.006% | stencils, stress injection, timing, receiver interpolation, the time-dispersion transform |
-| `a_point_force_matches_stokes_solution` | 0.001–0.008% | velocity injection, buoyancy, S waves, shear averaging, the transform |
+| `an_explosion_matches_the_full_space_solution` | 0.005–0.007% | stencils, stress injection, timing, receiver interpolation, the time-dispersion transform |
+| `a_point_force_matches_stokes_solution` | 0.001–0.005% | velocity injection, buoyancy, S waves, shear averaging, the transform, the optimised coefficients |
+| `a_point_force_matches_stokes_solution_with_taylor_coefficients` | 0.001–0.008% | the same with Taylor coefficients |
 | `a_point_force_matches_stokes_solution_without_the_transform` | 0.03–0.09% | the same, with the time error kept (opt-out path, $C = 0.3$) |
-| `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.53% (about 2.2% is the reference's) | free-surface condition, mirroring, surface sampling |
+| `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.52% (about 2.2% is the reference's) | free-surface condition, mirroring, surface sampling |
 | `absorbing_layers_reflect_little` (± free surface) | $1.7 \times 10^{-4}$ / $1.9 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
-| `swapping_source_and_receiver_gives_the_same_trace` | $\le 7 \times 10^{-7}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
+| `swapping_source_and_receiver_gives_the_same_trace` | $\le 8 \times 10^{-7}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
 | `a_long_run_stays_stable_and_drains` | $\le 3 \times 10^{-6}$ | instabilities (see `debug-instability`) |
 
 A number that got worse is a regression even if the test passes. Find out why before

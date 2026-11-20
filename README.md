@@ -91,7 +91,7 @@ a free surface $z = 0$ is the surface.
 |---|---|
 | `[grid]` | `points = [nx, ny, nz]`, `spacing` (one value or `[dx, dy, dz]`) |
 | `[time]` | `duration`; `dt`, or `courant` (fraction of the stability limit; by default 0.85, or 0.3 at orders above 4 without `remove_time_dispersion`) |
-| `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces, see "Accuracy" |
+| `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
 | `[model.files]` | Or `.npy` arrays of shape (nz, ny, nx) for `vp`, `vs`, `rho` |
@@ -152,7 +152,20 @@ $$
 
 with Taylor coefficients in closed form,
 $c_n = \frac{1}{2n-1} \prod_{m \ne n} \frac{(2m-1)^2}{(2m-1)^2 - (2n-1)^2}$; order 4 gives
-Levander's $c_1 = \tfrac98$, $c_2 = -\tfrac1{24}$.
+Levander's $c_1 = \tfrac98$, $c_2 = -\tfrac1{24}$. Taylor coefficients are exact for the
+longest waves and least accurate for the shortest, which set the grid. By default the
+coefficients are instead *optimised* for the run, in the manner of Holberg (1987): for a
+plane wave the operator gives $K(\xi) = 2 \sum_n c_n \sin\big((2n - 1)\xi/2\big)$ instead of
+$\xi = k h$, and with leapfrog's time error removed (below) the phase error per node,
+$\lvert \mathbf K \rvert - \lvert \mathbf k \rvert h$, is the whole error. The coefficients
+minimise its largest value over every direction in 3D and every $\lvert \mathbf k \rvert h$ up
+to the band $\beta = 2\pi / \text{ppw}$ of the run's shortest wavelength, weighted by
+$(\lvert\mathbf k\rvert h/\beta)^{-2}$ so that longer waves keep Taylor-like accuracy, and
+capped at $10^{-4}$ per node: if the band can't be had within that, it shrinks. They stay
+exact for linear functions. Lawson's algorithm (Rice & Usow 1968) solves the minimax
+problem; Zhang & Yao (2013) and Liu (2014) optimise staggered operators in related ways.
+Receivers and sources interpolate with weights optimised the same way. The band depends on
+the model's slowest wave, so an inversion should fix it with `optimised_for`.
 
 **Stability.** The time step must satisfy
 
@@ -192,9 +205,10 @@ also damp every field by $\exp(-p\, d\, \xi^3 \Delta t)$ per step, with $\xi \in
 depth into the layer and $p = 0.2$ (`pml_sponge`), in the spirit of the multiaxial PML of
 Meza-Fajardo & Papageorgiou (2008).
 
-**Sources and receivers.** Receivers interpolate staggered velocities onto nodes by
-Lagrange interpolation from as many values as the stencil spans: the cubic
-$(-1, 9, 9, -1)/16$ at order 4, eight points at order 8, fewer near the edges of the grid.
+**Sources and receivers.** Receivers interpolate staggered velocities onto nodes from as
+many values as the stencil spans, fewer near the edges of the grid, with weights optimised
+like the coefficients; with Taylor coefficients they are Lagrange's (the cubic
+$(-1, 9, 9, -1)/16$ at order 4).
 Sources spread onto the staggered positions with the same weights, divided by the cell's
 share of mass (half on the free surface). A source at a point
 is therefore exactly the transpose of a receiver there, which is what back-propagating
@@ -237,8 +251,8 @@ which costs about 3.4 times the compute and 5.5 times the memory of order 8 at 4
 
 **Removing the time error**, the default (see "Numerics"; Wang & Xu 2015; Koene et al.
 2018). The traces carry the spatial error alone, so a large time step costs nothing, and the
-longer stencils, which the time error held back, come into their own. Misfit at 1800 m,
-Courant 0.85 with the transform unless marked:
+longer stencils, which the time error held back, come into their own. Misfit at 1800 m with
+Taylor coefficients, Courant 0.85 with the transform unless marked:
 
 | Waves | Points per shortest wavelength | Order 8, 0.3, time error kept | Order 8 (default) | Order 12 | Order 16 |
 |---|---|---|---|---|---|
@@ -254,14 +268,35 @@ compute and under half its memory (and about a fifth of the compute of order 8 a
 the time error kept). Snapshots stay warped, and FWI needs the transposed transform in its
 adjoint sources.
 
+**Optimised coefficients**, also the default (see "Numerics"). With the time error gone,
+the spatial error is all that is left, and coefficients chosen for the grid's shortest
+waves rather than its longest cut it severalfold. Misfit at 1800 m, Courant 0.85, time error
+removed (Taylor → optimised):
+
+| Waves | Points per shortest wavelength | Order 8 | Order 12 | Order 16 |
+|---|---|---|---|---|
+| S (point force) | 3.0 | 19% → 7.3% | 6.5% → 0.89% | 2.9% → 0.42% |
+| S (point force) | 3.5 | 8.8% → 2.1% | 2.0% → 0.28% | 0.69% → 0.15% |
+| S (point force) | 3.9 | 3.9% → 0.61% | 0.63% → 0.13% | 0.19% → 0.11% |
+| S (point force) | 4.6 | 1.2% → 0.19% | 0.17% → 0.12% | 0.12% → 0.12% |
+| P (explosion) | 3.5 | 7.8% → 2.8% | 2.8% → 2.2% | 2.2% → 2.2% |
+| P (explosion) | 4.0 | 4.0% → 3.0% | 2.9% → 3.0% | 2.9% → 2.9% |
+
+Below about 0.1% something other than dispersion sets the floor. The P waves here are
+coarser than an elastic grid would make them (they would have $v_p/v_s$ times the S wave's
+points per wavelength), and they come out as good as with Taylor's coefficients or better.
+Order 12 at 3.0 points per S wavelength is more accurate (0.89%) than order 8 with Taylor
+coefficients at 4.6 (1.2%), for about a quarter of the compute and 0.28 of the memory. The
+larger $\sum_n \lvert c_n\rvert$ of optimised coefficients costs 4–6% more time steps.
+
 Rules of thumb:
 
 | Purpose | Settings | Points per shortest wavelength |
 |---|---|---|
-| Waveform fits (FWI); the default | order 8, Courant 0.85, time error removed | $\ge 4.5$ (5 on the coarsest grids) |
-| Waveform fits, cheapest | order 12–16, Courant 0.85, time error removed | $\ge 3.5$ |
+| Waveform fits (FWI); the default | order 8, optimised, Courant 0.85, time error removed | $\ge 3.5$–$4$ |
+| Waveform fits, cheapest | order 12–16, optimised, Courant 0.85, time error removed | $\ge 3$ |
 | Quick looks | order 4, Courant 0.85 | 6–8 |
-| Time error kept (wavefields, not traces) | order 8, Courant 0.3 | $\ge 4.5$ |
+| Time error kept (wavefields, not traces) | order 8, Taylor, Courant 0.3 | $\ge 4.5$ |
 
 What higher orders don't fix, from the literature and our measurements:
 
@@ -280,25 +315,24 @@ What higher orders don't fix, from the literature and our measurements:
   (Hicks 2002). A receiver 0.4 of a node off its position cost 26% misfit at 3.9 points per
   wavelength.
 
-Optimised rather than Taylor coefficients (Holberg 1987) gain little while the time error
-remains; without it, a von Neumann analysis predicts they could cut the points per
-wavelength by about a third (not yet tried). Coefficients optimised for time and space
-together (Liu & Sen 2011) only hold for one wave speed, which breaks down in heterogeneous
-models.
+Optimised coefficients gain little while the time error remains, which is why they only
+became worthwhile with the transform. Coefficients optimised for time and space together
+(Liu & Sen 2011) only hold for one wave speed, which breaks down in heterogeneous models.
 
 ## Verification
 
 `tests/physics.rs` checks whole simulations against independent answers (Aki & Richards
-2002, §4.2–4.3), at the default (order 8, Courant 0.85, time error removed) unless stated:
+2002, §4.2–4.3), at the default (order 8, optimised coefficients, Courant 0.85, time error
+removed) unless stated:
 
 | Test | Result |
 |---|---|
-| Explosion in a full space against the analytic solution (near and far field), 100–250 m | 0.002–0.006% L2 misfit |
-| Point force against Stokes' solution: along, across and diagonal to the force | 0.001–0.008% |
+| Explosion in a full space against the analytic solution (near and far field), 100–250 m | 0.005–0.007% L2 misfit (Taylor coefficients 0.002–0.006%) |
+| Point force against Stokes' solution: along, across and diagonal to the force | 0.001–0.005% (Taylor 0.001–0.008%) |
 | The same with the time error kept, at Courant 0.3 | 0.03–0.09% |
 | A P wave doubling at the free surface above a buried explosion | 2.5%, mostly the reference's (see "Accuracy") |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
-| Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 7 \times 10^{-7}$ of peak |
+| Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 8 \times 10^{-7}$ of peak |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI

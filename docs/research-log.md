@@ -151,7 +151,7 @@ coefficients without time error.
 |---|---|
 | Remove leapfrog's time dispersion by transforms [@wang2015; @koene2018] | Confirmed on the 3D solver and adopted, opt-in (next entry). The largest gain. |
 | Receiver interpolation as long as the stencil | Adopted (the entry after next). |
-| Least-squares coefficients, once the time error is gone [@holberg1987] | Promising: about 0.1 of today's work by the analysis. Next to try, checked at every angle and with interpolation designed for the same band. |
+| Least-squares coefficients, once the time error is gone [@holberg1987] | Promising: about 0.1 of today's work by the analysis. Adopted as minimax coefficients (2026-11-20, optimised coefficients). |
 | Sources and receivers between nodes [@hicks2002; @petersson2016] | Needed for FWI with real acquisition geometry. Open. |
 | Volume-averaged material at interfaces | Needs the planar-interface test first. Open. |
 | A free surface of the stencil's order, by summation-by-parts closures [@oreilly2017] | Taken to be the largest error in its test (2.4%); most of that turned out to be the test's reference (three entries on). Open; the most work. |
@@ -337,6 +337,91 @@ surface is less urgent than thought. Measuring it needs an exact reference: Lamb
 
 **Reproduce:** `just physics`; `free_surface_on_finer_grids` in `just accuracy`.
 
+## 2026-11-20 — Optimised coefficients
+
+**Question.** Least-squares coefficients gained only 0.2–0.8 ppw while the time error
+remained (2026-11-20, stencil order and time step). With the time error removed, the brief's
+analysis predicted eight-point least-squares coefficients would need 3.4 ppw where Taylor's
+need 5.0. Do optimised coefficients pay off in 3D runs?
+
+**Criterion.** With the time error removed the trace's error is the spatial one, and for a
+plane wave it is a phase error: the operator gives
+$K(\xi) = 2 \sum_n c_n \sin\big((2n-1)\xi/2\big)$ for $\xi = kh$ along each axis, and over a
+distance $D$ a wave's phase is off by $(\lvert\mathbf K\rvert - \lvert\mathbf k\rvert h)\,D/h$.
+So the design minimises the largest phase error per node,
+$\max \big\lvert \lvert\mathbf K\rvert - \lvert\mathbf k\rvert h \big\rvert$, over every direction
+(91 sampled from axis to diagonal; the error is symmetric under permutations and sign
+changes) and every $\lvert\mathbf k\rvert h$ up to the band $\beta = 2\pi/\text{ppw}$ of the run's
+shortest wavelength, linearised as $\sum_i d_i\, \delta(\xi d_i)$ with
+$\delta(x) = K(x) - x$, which makes it a linear minimax problem. Consistency,
+$\sum_n (2n-1)\, c_n = 1$, is kept, so linear functions stay exact. Lawson's algorithm
+[@rice1968] solves it; [@holberg1987] bounded the group-velocity error the same way, and
+[@zhang2013; @liu2014] optimise staggered operators in related ways. The receivers'
+interpolation weights get the same treatment for their amplitude error.
+
+**First try: plain minimax over the run's band.** S misfits fell five- to tenfold, but P
+became far worse: on the P test's grids S has only 2.3 ppw, the band was nearly $\pi$, and
+the evenly spread error spoiled every wavenumber (order 8, P at 4.0 ppw: 78% against Taylor's
+4.0%).
+
+**Two fixes, measured** (`optimised_coefficients` in `just accuracy`, misfit at 1800 m;
+Taylor in brackets):
+
+- *Cap the error and shrink the band.* With at most $10^{-3}$ per node, P recovered (order
+  8, 4.0 ppw: 4.6%) but stayed worse near the source: at 4.0 ppw, 0.85–1.9% at 300 m against
+  Taylor's 0.03–0.46%. A uniform $10^{-3}$ per node is already 1.5% after 15 nodes. $3 \times 10^{-4}$ and
+  $10^{-4}$ helped further; $10^{-4}$ was chosen.
+- *Weight towards long waves.* An equiripple error reaches the dominant frequency and the P
+  waves, where Taylor's error is nearly zero. Weighting the error by $(\xi/\beta)^{-p}$, with
+  the cap at the band's edge:
+
+| | Taylor | $p = 0$ | $p = 1$ | $p = 2$ |
+|---|---|---|---|---|
+| S 3.0 ppw, order 8 / 12 / 16 | 19.5 / 6.5 / 2.9% | 5.4 / 0.72 / 0.38% | 5.8 / 0.75 / 0.39% | 7.3 / 0.89 / 0.42% |
+| S 3.5 ppw, order 8 / 12 / 16 | 8.8 / 2.0 / 0.69% | 1.4 / 0.25 / 0.14% | 1.6 / 0.26 / 0.15% | 2.1 / 0.28 / 0.15% |
+| P 4.0 ppw, order 8 / 12 / 16 | 4.0 / 2.9 / 2.9% | 3.0 / 3.1 / 3.1% | 3.0 / 3.1 / 3.0% | 3.0 / 3.0 / 2.9% |
+| P at 300 m, 4.0 ppw, order 8 / 12 / 16 | 0.46 / 0.07 / 0.03% | 0.11 / 0.14 / 0.20% | 0.09 / 0.08 / 0.09% | 0.08 / 0.04 / 0.04% |
+| Explosion physics test (fine grid) | 0.002–0.006% | 0.016–0.021% | 0.009–0.013% | 0.005–0.007% |
+
+$p = 2$ gives up a little at the band's edge (S at 3.0 ppw, order 8) for long waves that are
+as good as Taylor's; nothing measured is worse than Taylor's beyond noise. The common floor
+of about 3% for P at 1800 m, shared by Taylor's orders 12 and 16, is not dispersion; probably
+the narrow domain's side layers at grazing incidence.
+
+**The design** at $p = 2$ (`optimised_coefficients_beat_taylor_over_their_band`): largest
+phase error per node over all directions, Taylor → optimised, order 8 at $\beta = 1.8$ (3.5
+ppw): $1.3 \times 10^{-2}$ → $4.8 \times 10^{-4}$; order 12 at 2.0: $8.9 \times 10^{-3}$ →
+$6.4 \times 10^{-5}$; order 16 at 2.4: $3.0 \times 10^{-2}$ → $1.3 \times 10^{-4}$.
+Interpolation errors fall 10–60-fold. $\sum_n \lvert c_n\rvert$ rises 4–6%, and the time step
+falls as much.
+
+**Results** at $p = 2$, $10^{-4}$, misfit at 1800 m (Taylor → optimised):
+
+| Waves, ppw | Order 8 | Order 12 | Order 16 |
+|---|---|---|---|
+| S, 3.0 | 19% → 7.3% | 6.5% → 0.89% | 2.9% → 0.42% |
+| S, 3.5 | 8.8% → 2.1% | 2.0% → 0.28% | 0.69% → 0.15% |
+| S, 3.9 | 3.9% → 0.61% | 0.63% → 0.13% | 0.19% → 0.11% |
+| S, 4.6 | 1.2% → 0.19% | 0.17% → 0.12% | 0.12% → 0.12% |
+| P, 2.9 | 19% → 7.8% | 6.9% → 1.7% | 3.5% → 1.4% |
+| P, 3.5 | 7.8% → 2.8% | 2.8% → 2.2% | 2.2% → 2.2% |
+| P, 4.0 | 4.0% → 3.0% | 2.9% → 3.0% | 2.9% → 2.9% |
+
+Order 12 at 3.0 ppw (0.89%) beats order 8 with Taylor coefficients at 4.6 (1.2%), for about
+a quarter of the compute and 0.28 of the memory. Physics tests, Taylor → optimised: explosion
+0.002–0.006% → 0.005–0.007% (the one that got worse, on a grid where Taylor is nearly exact
+for these waves), point force 0.001–0.008% → 0.001–0.005%, free surface 2.53% → 2.52%, layers
+unchanged, reciprocity $\le 6.9$ → $7.9 \times 10^{-7}$; the 9 s run stays stable (any
+coefficients keep the scheme self-adjoint).
+
+**Decision.** Optimised coefficients are the default (`coefficients = "optimised"`,
+`"taylor"` to opt out), with $p = 2$ and a cap of $10^{-4}$ per node. The band follows the
+model's slowest wave, so an inversion must pin it (`optimised_for`) or the operator would
+change between iterations.
+
+**Reproduce:** `cargo test --release --lib fd::`; `optimised_coefficients` in
+`just accuracy`; `just physics`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
@@ -349,9 +434,10 @@ surface is less urgent than thought. Measuring it needs an exact reference: Lamb
 - **Source and receiver positions** off the nodes [@hicks2002; @petersson2016]: snapping
   a receiver 0.4 h off its position cost 26% misfit at 3.9 ppw (2026-11-20, removing time
   dispersion).
-- **Least-squares coefficients without time error** [@holberg1987]: about 0.1 of today's
-  work by the von Neumann analysis (the brief's entry). Check every propagation angle, and
-  design the interpolation for the same band.
+- **Optimised coefficients, further.** Weight the error by the wavelets' spectrum and the
+  model's range of speeds instead of $(\xi/\beta)^{-2}$; measure the observed order under grid
+  refinement (the band shrinks with $h$, so the operator tends to Taylor's); and check the
+  gradients' accuracy with them, since FWI pins the band.
 - **The adjoint with the transform.** Residuals of finished traces enter through the
   transposed transform. Since the transformed traces equal the time-continuous ones for every
   model, their gradient should too, taking the time error out of the gradient as well:

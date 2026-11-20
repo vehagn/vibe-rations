@@ -49,7 +49,7 @@ src/
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
   solver.rs      fields, staggered material, the update kernels, free surface, PointOp
-  fd.rs          the staggered Stencil (Taylor, order 2–16), a row at a time
+  fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid
   tdt.rs         the time-dispersion transform: pre-warped sources, un-warped traces
@@ -107,6 +107,19 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Stencil coefficients are optimised by default** (`[scheme] coefficients`, opt out with
+  `"taylor"`; `Stencil::optimised`). With the time error removed, the phase error per node,
+  $\lvert \mathbf K \rvert - \lvert \mathbf k \rvert h$, is the whole error, so the
+  coefficients minimise its largest value over all 3D directions and all wavenumbers up to the
+  run's shortest wavelength (Lawson's algorithm; Holberg 1987 did the same for group
+  velocity), weighted by $(k/k_{\text{band}})^{-2}$ and capped at $10^{-4}$ per node
+  (`PHASE_TOLERANCE`), shrinking the band if need be. Both choices were measured: an
+  unweighted minimax, or a cap of $10^{-3}$, spread the error onto long waves, and P waves
+  and the explosion test came out 2–4× worse than with Taylor; with them nothing measured
+  got worse beyond noise. Gains: S at 3.0 ppw, 19% → 7.3% (order 8), 6.5% → 0.89% (12),
+  2.9% → 0.42% (16); order 8 at 4.6 ppw, 1.2% → 0.19%. The band follows the model's slowest
+  wave, so an inversion must pin it (`optimised_for`) or the operator changes between
+  iterations. The interpolation weights are optimised over the same band.
 - **Leapfrog's time error is removed from the traces by default** (`[scheme]
   remove_time_dispersion`, opt out with `false`; `src/tdt.rs`; Wang & Xu 2015, Koene et al.
   2018). It is a warp of the frequency axis, the same for every medium and stencil, so
@@ -137,17 +150,19 @@ doesn't show.
   forward-field error (dispersion, interfaces, free surface, layers), reconstruction error,
   and their effect on gradients. Design the adjoint so each can be measured separately (see
   the log's open questions).
-- **Physics test baselines at the default, order 8 at $C = 0.85$ with the time error
-  removed** (fail if they get worse; update this list if they get better): explosion vs
-  analytic 0.002–0.006%; point force vs Stokes 0.001–0.008% (0.03–0.09% with the time error
-  kept, at $C = 0.3$); free-surface P doubling 2.53% (mostly the reference, above); CPML
-  reflection $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$
-  along one; reciprocity $\le 7 \times 10^{-7}$ (orders 4 and 8); the 9 s soft-sediment run
-  drains to $\le 3 \times 10^{-6}$ of its peak. With the time error kept at $C = 0.3$ (the
-  default before) they were 0.07–0.19%, 0.03–0.09%, 2.40%, $3.9 \times 10^{-4}$,
-  $2.1 \times 10^{-3}$ and $1.9 \times 10^{-6}$; with cubic receivers before that, the first
-  two were 0.11–0.26% and 0.07–0.18%. At order 4 with $C = 0.85$ and the time error kept:
-  0.7–1.6%, 0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
+- **Physics test baselines at the default, order 8 with optimised coefficients at
+  $C = 0.85$, the time error removed** (fail if they get worse; update this list if they get
+  better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
+  free-surface P doubling 2.52% (mostly the reference, above); CPML reflection
+  $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
+  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the 9 s soft-sediment run drains to
+  $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
+  for these long waves), 0.001–0.008%, 2.53%, the same layers, $\le 7 \times 10^{-7}$. With
+  the time error kept at $C = 0.3$ (the default before): 0.07–0.19%, 0.03–0.09%, 2.40%,
+  $3.9 \times 10^{-4}$, $2.1 \times 10^{-3}$ and $1.9 \times 10^{-6}$; with cubic receivers
+  before that, the first two were 0.11–0.26% and 0.07–0.18%. At order 4 with $C = 0.85$
+  and the time error kept: 0.7–1.6%, 0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and
+  $1.8 \times 10^{-3}$.
 - **Order 8 is the default** (`config::default_courant`). With the time error kept,
   order 4 at $C = 0.85$ benefits from cancelling time and space errors; orders $\ge 8$ at
   0.85 are *worse* than order 4, and only beat it at $C \approx 0.3$–$0.5$, so 0.3 was the

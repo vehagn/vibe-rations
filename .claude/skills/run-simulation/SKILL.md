@@ -19,10 +19,13 @@ Positions are metres from the first node; z points down; with `free_surface = tr
 
 Check these before running; `just in check <config>` prints all of them:
 
-- **Points per wavelength.** At the default eighth order, at least 4.5 for about 1% misfit
-  after ten wavelengths (it warns below 4): $h \le v_{\text{slow}} / (4.5 \cdot 2.5 f_0)$, with
-  $v_{\text{slow}}$ the slowest S speed (P in fluids) and $f_0$ the wavelet frequency. Fourth
-  order needs 8–9 for the same accuracy (README, "Accuracy").
+- **Points per wavelength.** At the default (eighth order, optimised coefficients, time
+  error removed), 3.5–4 for about 1% misfit after ten wavelengths (it warns below 3.5):
+  $h \le v_{\text{slow}} / (4 \cdot 2.5 f_0)$, with $v_{\text{slow}}$ the slowest S speed (P in
+  fluids) and $f_0$ the wavelet frequency. Orders 12–16 get there at 3 (it warns below 3);
+  with Taylor coefficients order 8 needs 4.5, and fourth order 8–9 (README, "Accuracy").
+  The coefficients are designed for the run's own points per wavelength, which depends on
+  the slowest wave; an inversion should pin it with `[scheme] optimised_for`.
 - **Absorbing layers** of `pml_width` nodes (default 20, at least 10) line the sides and
   bottom. They are inside the grid, so add 2 × `pml_width` nodes to the region of interest
   and keep sources and receivers out of them (it warns).
@@ -32,9 +35,9 @@ Check these before running; `just in check <config>` prints all of them:
   is taken out of the traces by default (`[scheme] remove_time_dispersion`; Wang & Xu 2015,
   Koene et al. 2018): traces are final only after the last step, and snapshots stay warped.
   With `remove_time_dispersion = false` the step drops to 0.3 at orders above 4; don't raise
-  it there, accuracy collapses. Orders 12–16 with the transform are the most accurate per
-  unit of compute: order 16 at 3.5 points per wavelength, or order 12 at 3.9, beats order 8
-  at 4.6 (README, "Accuracy").
+  it there, accuracy collapses. Orders 12–16 with the transform and optimised coefficients
+  are the most accurate per unit of compute: order 12 at 3.0 points per wavelength beats
+  order 8 with Taylor coefficients at 4.6, for a quarter of the compute (README, "Accuracy").
 - **Cost:** memory $\approx 4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
   layers' memory, with $L$ the stencil half-length (4 at order 8); time
   $\approx$ nodes $\times$ steps $/\, 1.6 \times 10^8$ seconds on the container's 4 cores at order 8.
