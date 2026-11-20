@@ -154,7 +154,7 @@ coefficients without time error.
 | Least-squares coefficients, once the time error is gone [@holberg1987] | Promising: about 0.1 of today's work by the analysis. Next to try, checked at every angle and with interpolation designed for the same band. |
 | Sources and receivers between nodes [@hicks2002; @petersson2016] | Needed for FWI with real acquisition geometry. Open. |
 | Volume-averaged material at interfaces | Needs the planar-interface test first. Open. |
-| A free surface of the stencil's order, by summation-by-parts closures [@oreilly2017] | Still the largest error in its test (2.4%). Open; the most work. |
+| A free surface of the stencil's order, by summation-by-parts closures [@oreilly2017] | Taken to be the largest error in its test (2.4%); most of that turned out to be the test's reference (three entries on). Open; the most work. |
 | Absorbing layers: tune at order 8; their transpose | The adjoint run's dot-product test (2026-11-20, the adjoint wavefield) measured the transpose: exact to round-off outside the layers, $1.4 \times 10^{-3}$ inside. Tuning is open. |
 | Flush subnormals to zero | Can't be measured here (Apple silicon handles subnormals at full speed). Open for x86. |
 | Verification: grid refinement, gradient Taylor tests | The dot-product test is done (the adjoint wavefield); Taylor tests belong with the gradients. |
@@ -287,11 +287,63 @@ interpolation).
 
 **Reproduce:** `just physics`; `just accuracy`; `interpolation_matches_the_stencil`.
 
+## 2026-11-20 — Time dispersion removed by default, and the free-surface test's floor
+
+**Decision.** The time-dispersion transform is the default (`remove_time_dispersion = true`,
+$C = 0.85$), with `false` to opt out. The adjoint run needs the transposed transform on
+residuals of finished traces; the dot-product test of the adjoint run steps the solver
+directly and is unaffected.
+
+**The paper.** Checked against [@koene2018]'s text (sections 2–5): our pair is its
+eqs. 13–17, the source warped with $\sin$ and the traces with $\arcsin$, no amplitude factors,
+zero-padded to twice the length. It doesn't discuss the time origin or staggered time stamps,
+absorbing layers, or adjoints; it criticises [@wang2015] for using the inverse transform's
+adjoint as the forward one. Here that adjoint serves only as the adjoint source, where it is
+the exact transpose of the data operator.
+
+**Physics tests**, order 8, before (time error kept, $C = 0.3$) and after (removed,
+$C = 0.85$):
+
+| Test | Before | After |
+|---|---|---|
+| Explosion against the analytic solution | 0.07–0.19% | 0.002–0.006% |
+| Point force against Stokes' solution | 0.03–0.09% | 0.001–0.008% |
+| Free-surface P doubling | 2.40% | 2.53% |
+| Layer reflection, without / with a free surface | $3.9 \times 10^{-4}$ / $2.1 \times 10^{-3}$ | $1.7 \times 10^{-4}$ / $1.9 \times 10^{-3}$ |
+| Reciprocity (orders 4 and 8) | $\le 1.9 \times 10^{-6}$ | $\le 6.9 \times 10^{-7}$ |
+| 9 s soft-sediment run, left of its peak | $\le 3.0 \times 10^{-6}$ | $\le 3.0 \times 10^{-6}$ |
+
+Everything improves except the free surface, and the 9 s run with CPML, the sponge and a
+free surface stays stable at $C = 0.85$ for order 8.
+
+**The free-surface test's floor.** Why did it get worse? Run on finer grids
+(`free_surface_on_finer_grids` in `just accuracy`), its misfit hardly moves:
+
+| $h$ | Order 8, removed | Order 8, kept ($C = 0.3$) | Order 16, removed |
+|---|---|---|---|
+| 10 m | 2.53% | 2.40% | 2.52% |
+| 7.5 m | 2.37% | 2.29% | 2.36% |
+| 5 m | 2.26% | 2.23% | 2.26% |
+
+A fit of $R + c\,h^2$ to either column gives $R = 2.17\%$, the same for both, and
+predicts the 7.5 m row to 0.01 points. That floor is the reference's: it doubles the incident
+P wave as if it were plane, and a spherical wave from 300 m below, 1.5 dominant wavelengths,
+is not. The scheme's own
+free-surface error is the rest, about 0.36% at $h = 10$ m (8 ppw for P) with the time error
+removed and 0.23% with it kept, where the leapfrog error partly cancels it. The test's
+tolerance moves from 2.5% to 2.6%, with both numbers in its doc comment. Earlier entries
+called stress imaging the largest error in its test; it isn't, and a higher-order free
+surface is less urgent than thought. Measuring it needs an exact reference: Lamb's problem.
+
+**Reproduce:** `just physics`; `free_surface_on_finer_grids` in `just accuracy`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
-  [@oreilly2017], which keep the exact discrete adjoint, and measure on Lamb's problem.
+  [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
+  for P (the free-surface test's floor), so measure it first on Lamb's problem with an
+  exact solution.
 - **Interfaces.** Band-limit the model to the grid [@mittet2017] and measure reflection and
   transmission at a planar interface against analytic coefficients.
 - **Source and receiver positions** off the nodes [@hicks2002; @petersson2016]: snapping
@@ -300,8 +352,10 @@ interpolation).
 - **Least-squares coefficients without time error** [@holberg1987]: about 0.1 of today's
   work by the von Neumann analysis (the brief's entry). Check every propagation angle, and
   design the interpolation for the same band.
-- **Time dispersion by default.** Once the adjoint applies the transposed transform to the
-  residuals, make it the default, with order 12 or 16.
+- **The adjoint with the transform.** Residuals of finished traces enter through the
+  transposed transform. Since the transformed traces equal the time-continuous ones for every
+  model, their gradient should too, taking the time error out of the gradient as well:
+  measure it against finite differences. And whether order 12 or 16 should be the default.
 - **Absorbing layers at high order.** Tune the profile or width so reflection returns to
   $-76$ dB.
 - **Error propagation into adjoint fields and gradients.** Forward-field error (dispersion,

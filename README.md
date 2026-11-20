@@ -90,8 +90,8 @@ a free surface $z = 0$ is the surface.
 | Section | What it sets |
 |---|---|
 | `[grid]` | `points = [nx, ny, nz]`, `spacing` (one value or `[dx, dy, dz]`) |
-| `[time]` | `duration`; `dt`, or `courant` (fraction of the stability limit; by default 0.3 at orders above 4, 0.85 at order 4 or with `remove_time_dispersion`) |
-| `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `remove_time_dispersion` (default false): take leapfrog's time error out of the traces, see "Accuracy" |
+| `[time]` | `duration`; `dt`, or `courant` (fraction of the stability limit; by default 0.85, or 0.3 at orders above 4 without `remove_time_dispersion`) |
+| `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces, see "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
 | `[model.files]` | Or `.npy` arrays of shape (nz, ny, nx) for `vp`, `vs`, `rho` |
@@ -112,7 +112,8 @@ In the output directory:
 
 - `vx.npy`, `vy.npy`, `vz.npy`, `p.npy`: traces, shape (receivers, samples), float32
 - `time.npy`: the sample times. Velocities lag stresses by half a step, so the first sample
-  is at $\Delta t/2$.
+  is at $\Delta t/2$. By default the traces are free of leapfrog's time error (see
+  "Numerics"); snapshots are not.
 - `receivers.csv`: the receivers' positions after snapping to nodes
 - `*_gather.png`: one column per receiver, each trace scaled to its own peak
 - `run.json`: the run's settings, time step, accuracy figures and warnings
@@ -174,11 +175,14 @@ conserves energy there.
 **Time dispersion.** Leapfrog's whole time error is a warp of the frequency axis: the
 stepped wavefield at frequency $\omega$ is the time-continuous one at
 $\omega' = \frac{2}{\Delta t} \sin\frac{\omega \Delta t}{2}$, for every medium and stencil,
-because nothing else in a step depends on time. With `remove_time_dispersion`, each source's
-samples are pre-warped before the run and each trace is un-warped after it
+because nothing else in a step depends on time. So by default (`remove_time_dispersion`),
+each source's samples are pre-warped before the run and each trace is un-warped after it
 ($\omega = \frac{2}{\Delta t} \arcsin\frac{\omega' \Delta t}{2}$), which leaves only the spatial
-error in the traces (Wang & Xu 2015; Koene et al. 2018). It is exact outside the absorbing
-layers; snapshots of the wavefield stay warped.
+error in the traces (Wang & Xu 2015; Koene et al. 2018). On the staggered grid each signal
+is warped about its own time stamps: forces enter at $n \Delta t$, moment tensors at
+$(n + \frac12)\Delta t$, velocities are read at $(n + \frac12)\Delta t$ and stresses at
+$(n + 1)\Delta t$. It is exact outside the absorbing layers; snapshots of the wavefield stay
+warped. `remove_time_dispersion = false` opts out.
 
 **Absorbing layers.** CPML (Komatitsch & Martin 2007) with $\kappa = 1$,
 $\alpha = \pi f_0$, a quadratic damping profile $d(x)$ and the reflection coefficient of
@@ -195,7 +199,7 @@ Sources spread onto the staggered positions with the same weights, divided by th
 share of mass (half on the free surface). A source at a point
 is therefore exactly the transpose of a receiver there, which is what back-propagating
 residuals in FWI needs; reciprocity, $G_{ij}(\mathbf{x}_B, \mathbf{x}_A) = G_{ji}(\mathbf{x}_A, \mathbf{x}_B)$,
-holds to $2 \times 10^{-6}$.
+holds to $10^{-6}$.
 
 ## Accuracy
 
@@ -213,11 +217,12 @@ $$
 and the time error has the opposite sign to the fourth-order spatial error, so at a Courant
 fraction of 0.85 the two partly cancel. That is what makes order 4 work well at a large time
 step, and why longer stencils only pay off with a smaller one: $2M$-th order in space with
-second order in time is second order overall (Liu & Sen 2011). Order 8 at 0.3 of the
-stability limit is therefore the default.
+second order in time is second order overall (Liu & Sen 2011). That is, as long as the time
+error stays in the traces; by default it doesn't (below).
 
 L2 misfit against the exact solution after about ten dominant wavelengths of travel
-(1800 m), measured with `just accuracy`:
+(1800 m), measured with `just accuracy`, with the time error kept
+(`remove_time_dispersion = false`):
 
 | Waves | Points per shortest wavelength | Order 4, Courant 0.85 | Order 8, 0.4 | Order 8, 0.3 | Order 16, 0.3 |
 |---|---|---|---|---|---|
@@ -230,43 +235,47 @@ for P). For the same 1.3% S misfit, order 4 needs about 8–9 points per wavelen
 which costs about 3.4 times the compute and 5.5 times the memory of order 8 at 4.6. Speeds on
 4 cores: order 4 about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105.
 
-**Removing the time error.** With `remove_time_dispersion` (see "Numerics") the traces
-carry the spatial error alone, so a large time step costs nothing, and the longer stencils,
-which the time error held back, come into their own. Misfit at 1800 m, Courant 0.85 with the
-transform unless marked:
+**Removing the time error**, the default (see "Numerics"; Wang & Xu 2015; Koene et al.
+2018). The traces carry the spatial error alone, so a large time step costs nothing, and the
+longer stencils, which the time error held back, come into their own. Misfit at 1800 m,
+Courant 0.85 with the transform unless marked:
 
-| Waves | Points per shortest wavelength | Order 8, 0.3 (default) | Order 8 | Order 12 | Order 16 |
+| Waves | Points per shortest wavelength | Order 8, 0.3, time error kept | Order 8 (default) | Order 12 | Order 16 |
 |---|---|---|---|---|---|
 | P (explosion) | 4.0 | 4.8% | 4.0% | 2.9% | 2.9% |
 | S (point force) | 3.5 | 7.1% | 8.8% | 2.0% | 0.69% |
 | S (point force) | 3.9 | 2.9% | 3.9% | 0.63% | 0.19% |
 | S (point force) | 4.6 | 1.3% | 1.2% | 0.17% | 0.12% |
 
-Order 8 is as accurate in 2.8 times fewer steps (a little less on the coarsest grids, where
-its time and space errors had partly cancelled). Order 16 at 3.5 points per wavelength
-halves the default's misfit for about a fifth of its compute and under half its memory.
-Snapshots stay warped, and FWI will need the adjoint of the transform, so it is not yet the
-default.
+Order 8 is as accurate as with the time error kept at 0.3, in 2.8 times fewer steps (a
+little less on the coarsest grids, where its time and space errors had partly cancelled).
+Order 16 at 3.5 points per wavelength halves order 8's misfit at 4.6 for about 0.55 of its
+compute and under half its memory (and about a fifth of the compute of order 8 at 0.3 with
+the time error kept). Snapshots stay warped, and FWI needs the transposed transform in its
+adjoint sources.
 
 Rules of thumb:
 
 | Purpose | Settings | Points per shortest wavelength |
 |---|---|---|
-| Waveform fits (FWI); the default | order 8, Courant 0.3 | $\ge 4.5$ |
-| Waveform fits, cheapest (traces only, for now) | order 12–16, `remove_time_dispersion` | $\ge 3.5$ |
+| Waveform fits (FWI); the default | order 8, Courant 0.85, time error removed | $\ge 4.5$ (5 on the coarsest grids) |
+| Waveform fits, cheapest | order 12–16, Courant 0.85, time error removed | $\ge 3.5$ |
 | Quick looks | order 4, Courant 0.85 | 6–8 |
-| Coarsest grids without the transform | order 12–16, Courant 0.3 | $\ge 3.5$ |
+| Time error kept (wavefields, not traces) | order 8, Courant 0.3 | $\ge 4.5$ |
 
 What higher orders don't fix, from the literature and our measurements:
 
 - **Interfaces.** Sharp interfaces sampled on the grid are only about second-order accurate
   and want a band-limited model (Mittet 2017).
 - **The free surface.** Stress imaging is second order, so surface waves need finer grids
-  (Kristek et al. 2002). It is now the largest error in our free-surface test (2.4% at
-  order 8, 1.9% at order 4); Mittet (2002) gives a free surface suited to long stencils.
+  (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils. Our
+  free-surface test's 2.5% is mostly its reference, which doubles the P wave as if it were
+  plane: on finer grids the misfit tends to about 2.2%, which leaves about 0.4% to the
+  scheme at 8 points per P wavelength.
 - **Absorbing layers.** Longer stencils reach further across the layers' inner edge:
-  reflection rises from $1.5 \times 10^{-4}$ to $3.9 \times 10^{-4}$ of the peak (about
-  $-68$ dB) at order 8.
+  with the time error kept, reflection rises from $1.5 \times 10^{-4}$ of the peak at
+  order 4 to $3.9 \times 10^{-4}$ (about $-68$ dB) at order 8. At the default it is
+  $1.7 \times 10^{-4}$.
 - **Source and receiver positions.** They snap to nodes rather than being placed exactly
   (Hicks 2002). A receiver 0.4 of a node off its position cost 26% misfit at 3.9 points per
   wavelength.
@@ -280,16 +289,16 @@ models.
 ## Verification
 
 `tests/physics.rs` checks whole simulations against independent answers (Aki & Richards
-2002, §4.2–4.3), at the default order 8 unless stated:
+2002, §4.2–4.3), at the default (order 8, Courant 0.85, time error removed) unless stated:
 
 | Test | Result |
 |---|---|
-| Explosion in a full space against the analytic solution (near and far field), 100–250 m | 0.07–0.19% L2 misfit |
-| Point force against Stokes' solution: along, across and diagonal to the force | 0.03–0.09% |
-| The same at Courant 0.85 with the time dispersion removed | 0.001–0.008% |
-| A P wave doubling at the free surface above a buried explosion | 2.4% |
-| Absorbing layers against a domain too large to reflect, without / with a free surface | 0.039% / 0.21% of peak |
-| Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 1.9 \times 10^{-6}$ of peak |
+| Explosion in a full space against the analytic solution (near and far field), 100–250 m | 0.002–0.006% L2 misfit |
+| Point force against Stokes' solution: along, across and diagonal to the force | 0.001–0.008% |
+| The same with the time error kept, at Courant 0.3 | 0.03–0.09% |
+| A P wave doubling at the free surface above a buried explosion | 2.5%, mostly the reference's (see "Accuracy") |
+| Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
+| Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 7 \times 10^{-7}$ of peak |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI

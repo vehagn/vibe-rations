@@ -107,16 +107,27 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
-- **Leapfrog's time error can be removed** (`[scheme] remove_time_dispersion`, `src/tdt.rs`;
-  Wang & Xu 2015, Koene et al. 2018). It is a warp of the frequency axis, the same for every
-  medium and stencil, so pre-warping the sources and un-warping the traces leaves only the
-  spatial error, and $C = 0.85$ costs no accuracy. Order 8 then matches $C = 0.3$ in 2.8 times
-  fewer steps; orders 12 and 16, time-limited at 0.3, become 8–12 times more accurate. It is
-  opt-in, not the default, until the adjoint run applies the transposed transform to the
-  residuals (`Simulation::trace_warp`, `Warp::apply_transpose`). Timing matters: forces enter
-  at $n\Delta t$, moments at $(n + \frac12)\Delta t$, velocities are read at
+- **Leapfrog's time error is removed from the traces by default** (`[scheme]
+  remove_time_dispersion`, opt out with `false`; `src/tdt.rs`; Wang & Xu 2015, Koene et al.
+  2018). It is a warp of the frequency axis, the same for every medium and stencil, so
+  pre-warping the sources and un-warping the traces leaves only the spatial error, and
+  $C = 0.85$ (the default with it) costs no accuracy. Order 8 then matches $C = 0.3$ in 2.8
+  times fewer steps; orders 12 and 16, time-limited at 0.3, become 8–12 times more accurate.
+  Our pair is Koene et al.'s eqs. 13–17 (checked against the article: no amplitude factors,
+  zero-padding to twice the length); they don't discuss the time origin. Timing matters here:
+  forces enter at $n\Delta t$, moments at $(n + \frac12)\Delta t$, velocities are read at
   $(n + \frac12)\Delta t$ and stresses at $(n + 1)\Delta t$; the warp is about $t = 0$.
-  Snapshots stay warped, and the layers are only approximately transformed.
+  Traces are final only after the last step (`Simulation::finish`, which `run` calls);
+  snapshots stay warped; the layers are only approximately transformed. **For the adjoint:**
+  residuals of finished traces must go through the transposed transform
+  (`Simulation::trace_warp(c)` → `Warp::apply_transpose`) before they are injected. Koene et
+  al. criticise Wang & Xu for using that adjoint as the forward transform; here it is used
+  only for adjoint sources, where it is the exact transpose of the data operator.
+- **The free-surface test's 2.5% is mostly its reference.** Doubling the P wave is exact
+  only for a plane wave; on finer grids (`free_surface_on_finer_grids`) the misfit tends to
+  about 2.2%, so stress imaging's own error is about 0.36% at 8 points per P wavelength
+  (0.23% with the time error kept, which partly cancels it). A higher-order free surface is
+  therefore less urgent than it looked; measure it on Lamb's problem with an exact solution.
 - **A research brief** (another agent's literature review and von Neumann analysis,
   2026-11-20) was checked: its numbers reproduce (`docs/analysis/time_dispersion.py`), the
   transform and the stencil-matched interpolation came from it, and the log's entry lists
@@ -126,23 +137,24 @@ doesn't show.
   forward-field error (dispersion, interfaces, free surface, layers), reconstruction error,
   and their effect on gradients. Design the adjoint so each can be measured separately (see
   the log's open questions).
-- **Physics test baselines at the default, order 8 with $C = 0.3$** (fail if they get worse;
-  update this list if they get better): explosion vs analytic 0.07–0.19%; point force vs
-  Stokes 0.03–0.09% (0.001–0.008% at $C = 0.85$ with `remove_time_dispersion`); free-surface
-  P doubling 2.4%; CPML reflection $3.9 \times 10^{-4}$ of the peak without a free surface,
-  $2.1 \times 10^{-3}$ along one; reciprocity $\le 1.9 \times 10^{-6}$ (orders 4 and 8); the
-  9 s soft-sediment run drains to $\le 3 \times 10^{-6}$ of its peak. With cubic receivers
-  (before the interpolation matched the stencil) the first two were 0.11–0.26% and
-  0.07–0.18%, and reciprocity $\le 1.5 \times 10^{-6}$. At order 4 with $C = 0.85$ they were
+- **Physics test baselines at the default, order 8 at $C = 0.85$ with the time error
+  removed** (fail if they get worse; update this list if they get better): explosion vs
+  analytic 0.002–0.006%; point force vs Stokes 0.001–0.008% (0.03–0.09% with the time error
+  kept, at $C = 0.3$); free-surface P doubling 2.53% (mostly the reference, above); CPML
+  reflection $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$
+  along one; reciprocity $\le 7 \times 10^{-7}$ (orders 4 and 8); the 9 s soft-sediment run
+  drains to $\le 3 \times 10^{-6}$ of its peak. With the time error kept at $C = 0.3$ (the
+  default before) they were 0.07–0.19%, 0.03–0.09%, 2.40%, $3.9 \times 10^{-4}$,
+  $2.1 \times 10^{-3}$ and $1.9 \times 10^{-6}$; with cubic receivers before that, the first
+  two were 0.11–0.26% and 0.07–0.18%. At order 4 with $C = 0.85$ and the time error kept:
   0.7–1.6%, 0.3–0.8%, 1.9%, $1.5 \times 10^{-4}$ and $1.8 \times 10^{-3}$.
-- **Order 8 is the default, with $C = 0.3$** (`config::default_courant`). Order 4 at
-  $C = 0.85$ benefits from cancelling time and space errors; orders $\ge 8$ at 0.85 are
-  *worse* than order 4, and only beat it at $C \approx 0.3$–$0.5$. Order 8 at 0.3 needs about
-  4.5 points per S wavelength for about 1% after ten wavelengths, where order 4 needs 8–9:
-  about 3.4× less compute and 5.5× less memory. The price: the stress-imaging free surface
-  (second order) is now the largest error in its test (2.4%), and layer reflection rose to
-  $-68$ dB. Time–space-optimised coefficients looked good for one speed in a von Neumann
-  analysis and failed for other speeds, so they were not adopted. Details: the log.
+- **Order 8 is the default** (`config::default_courant`). With the time error kept,
+  order 4 at $C = 0.85$ benefits from cancelling time and space errors; orders $\ge 8$ at
+  0.85 are *worse* than order 4, and only beat it at $C \approx 0.3$–$0.5$, so 0.3 was the
+  default until the time error was removed. Order 8 needs about 4.5 points per S wavelength
+  for about 1% after ten wavelengths, where order 4 needs 8–9: about 3.4× less compute and
+  5.5× less memory. Time–space-optimised coefficients looked good for one speed in a von
+  Neumann analysis and failed for other speeds, so they were not adopted. Details: the log.
 - **Threads in the browser** need four things, each of which failed once: (1) a std built
   with atomics: nightly `-Z build-std=panic_abort,std`, pinned in `web/build.sh` and both
   Containerfiles; (2) explicit linker flags for an imported, shared memory and the TLS

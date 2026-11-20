@@ -26,12 +26,15 @@ Check these before running; `just in check <config>` prints all of them:
 - **Absorbing layers** of `pml_width` nodes (default 20, at least 10) line the sides and
   bottom. They are inside the grid, so add 2 × `pml_width` nodes to the region of interest
   and keep sources and receivers out of them (it warns).
-- **Time step:** automatic at a fraction $C$ of the limit (0.3 at orders above 4, 0.85 at
-  4), $\Delta t \le 1 / \big(v_{p,\max} \sum_n |c_n| \sqrt{\Delta x^{-2} + \Delta y^{-2} + \Delta z^{-2}}\big)$.
-  The fastest $v_p$ sets it. Don't raise $C$ at order 8: accuracy collapses, unless
-  `[scheme] remove_time_dispersion = true`, which takes leapfrog's time error out of the
-  traces and steps at 0.85: as accurate in 2.8 times fewer steps, and orders 12–16 become
-  much more accurate. Snapshots stay warped; traces are only final after the last step.
+- **Time step:** automatic at a fraction $C = 0.85$ of the limit,
+  $\Delta t \le 1 / \big(v_{p,\max} \sum_n |c_n| \sqrt{\Delta x^{-2} + \Delta y^{-2} + \Delta z^{-2}}\big)$.
+  The fastest $v_p$ sets it. That large a step is only accurate because leapfrog's time error
+  is taken out of the traces by default (`[scheme] remove_time_dispersion`; Wang & Xu 2015,
+  Koene et al. 2018): traces are final only after the last step, and snapshots stay warped.
+  With `remove_time_dispersion = false` the step drops to 0.3 at orders above 4; don't raise
+  it there, accuracy collapses. Orders 12–16 with the transform are the most accurate per
+  unit of compute: order 16 at 3.5 points per wavelength, or order 12 at 3.9, beats order 8
+  at 4.6 (README, "Accuracy").
 - **Cost:** memory $\approx 4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
   layers' memory, with $L$ the stencil half-length (4 at order 8); time
   $\approx$ nodes $\times$ steps $/\, 1.6 \times 10^8$ seconds on the container's 4 cores at order 8.
