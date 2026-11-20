@@ -35,6 +35,7 @@ use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
 
 use crate::adjoint::Adjoint;
+use crate::grid::Grid;
 use crate::model::Model;
 use crate::receiver::{Component, Receivers};
 use crate::simulation::Simulation;
@@ -134,6 +135,10 @@ pub struct Run {
     /// The most memory the run held at once: both solvers, the checkpoints, one replayed
     /// segment's velocities and the correlations.
     pub memory_bytes: usize,
+    /// Σₙ |v⁽ⁿ⁺½⁾|² of the forward run at every interior node (x fastest): how much of the
+    /// source's wavefield reaches it, the diagonal of a source-side pseudo-Hessian (Shin et
+    /// al. 2001) to precondition an inversion with.
+    pub illumination: Vec<f64>,
 }
 
 /// The correlations summed over the run, on the padded grid, per position: the density
@@ -186,6 +191,7 @@ pub fn gradient(
     let g = sim.solver.grid;
     let len = g.padded_len();
     let mut sums: Sums = vec![[0.0; 8]; len];
+    let mut illumination = vec![0.0f64; g.interior_len()];
     let mut strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
     let mut adjoint_strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
     pressure.add(&mut adjoint_strain, steps);
@@ -227,6 +233,7 @@ pub fn gradient(
                 "adjoint and replay out of step"
             );
             correlate_density(&adjoint.solver, &mut sums, before, after);
+            illuminate(&g, &mut illumination, after);
             // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
             let f = &adjoint.solver.fields;
             adjoint
@@ -248,6 +255,7 @@ pub fn gradient(
         misfit,
         checkpoint_every: every,
         memory_bytes: peak_bytes,
+        illumination,
     })
 }
 
@@ -402,6 +410,23 @@ fn correlate_density(
                     for c in 0..3 {
                         sum[c] += back[c][p] as f64 * (after[c][p] - before[c][p]) as f64;
                     }
+                }
+            }
+        });
+}
+
+/// Adds |v|² at every interior node, each component taken where it is stored.
+fn illuminate(g: &Grid, illumination: &mut [f64], v: &[Vec<f32>; 3]) {
+    let [nx, ny, _] = g.n;
+    illumination
+        .par_chunks_mut(nx * ny)
+        .enumerate()
+        .for_each(|(k, plane)| {
+            for j in 0..ny {
+                let row = g.idx(0, j, k);
+                for i in 0..nx {
+                    let p = row + i;
+                    plane[j * nx + i] += v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>();
                 }
             }
         });
