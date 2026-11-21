@@ -62,8 +62,31 @@ if grep -q "import('../../..')" "${helper[@]}"; then
 fi
 
 cp "$root"/web/www/* "$out/"
-cp "$root"/examples/*.toml "$out/examples/"
-(cd "$out/examples" && printf '[%s]\n' "$(ls -- *.toml | sed 's/.*/"&"/' | paste -sd, -)" > index.json)
+# The examples, each with the model files it names, at the same paths relative to it, where
+# the page fetches them. One whose files aren't there (Marmousi2's, before `just marmousi2`)
+# is left out.
+listed=()
+for toml in "$root"/examples/*.toml; do
+  name=$(basename "$toml")
+  files=$(awk '/^\[/ { section = $1 }
+    section == "[model.files]" && /^ *(vp|vs|rho) *=/ {
+      match($0, /"[^"]*"/); print substr($0, RSTART + 1, RLENGTH - 2) }' "$toml")
+  missing=""
+  for f in $files; do
+    [[ $f != *..* && -f "$root/examples/$f" ]] || missing+=" $f"
+  done
+  if [[ -n $missing ]]; then
+    echo "leaving out examples/$name: no$missing" >&2
+    continue
+  fi
+  cp "$toml" "$out/examples/"
+  for f in $files; do
+    mkdir -p "$(dirname "$out/examples/$f")"
+    cp "$root/examples/$f" "$out/examples/$f"
+  done
+  listed+=("\"$name\"")
+done
+(IFS=,; printf '[%s]\n' "${listed[*]}") > "$out/examples/index.json"
 
 echo "built $out: $(du -h "$out/pkg/vibe_rations_web_bg.wasm" | cut -f1) single-threaded," \
   "$(du -h "$out/pkg-threads/vibe_rations_web_bg.wasm" | cut -f1) threaded"

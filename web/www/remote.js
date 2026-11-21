@@ -86,8 +86,14 @@ export class RemoteSolver {
       const created = await json("POST", `/api/runs?name=${encodeURIComponent(name ?? "page.toml")}`, toml);
       this.id = created.id;
       this.unstarted = true;
-      if (created.needs.length) {
-        throw new Error(`model files (${created.needs.join(", ")}) can only be sent from the command line`);
+      // The model files it names, from beside the examples, as the browser's solver takes them.
+      for (const name of created.needs) {
+        const response = await fetch(new URL(name, new URL("examples/", location)));
+        if (!response.ok) {
+          throw new Error(`fetching the model file ${name}: ${response.status} ${response.statusText}`);
+        }
+        const path = name.split("/").map(encodeURIComponent).join("/");
+        await call("PUT", run(created.id, `/files/${path}`), await response.blob());
       }
       const s = await json("POST", run(created.id, "/start?paused=true"));
       this.send({ type: "loaded", info: s.info, id: s.id });

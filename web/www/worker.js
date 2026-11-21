@@ -10,7 +10,7 @@ const HEADLESS_CHUNK_MS = 500;
 // page can ask for a number with ?threads=N.
 const asked = Number(new URL(self.location.href).searchParams.get("threads"));
 const threads = self.crossOriginIsolated ? Math.max(1, asked || navigator.hardwareConcurrency || 1) : 1;
-let Simulator;
+let Simulator, ModelFiles;
 
 let sim = null;
 let running = false;
@@ -22,6 +22,34 @@ let work = { steps: 0, ms: 0 };
 
 const send = (message, transfer = []) => postMessage(message, transfer);
 const fail = (during, e) => send({ type: "error", during, message: String(e?.message ?? e) });
+
+// The model files configurations name, relative to the examples as the page's are; fetched
+// once each, by URL.
+const examples = new URL("examples/", self.location);
+const fetched = new Map();
+
+/// The model files `toml` names, fetched, for setting it up; free it afterwards.
+async function modelFiles(toml) {
+  const files = new ModelFiles();
+  try {
+    for (const name of Simulator.modelFiles(toml)) {
+      const url = new URL(name, examples).href;
+      if (!fetched.has(url)) {
+        const bytes = fetch(url).then(async (r) => {
+          if (!r.ok) throw new Error(`fetching the model file ${name}: ${r.status} ${r.statusText}`);
+          return new Uint8Array(await r.arrayBuffer());
+        });
+        fetched.set(url, bytes);
+        bytes.catch(() => fetched.delete(url));
+      }
+      files.add(name, await fetched.get(url));
+    }
+    return files;
+  } catch (e) {
+    files.free();
+    throw e;
+  }
+}
 
 /// The run's progress, and its pictures if they are live.
 async function frame() {
@@ -81,17 +109,31 @@ async function loop() {
   }
 }
 
+// Loads so far: fetching model files lets a newer one start before an older one is done,
+// and only the newest may set up.
+let loads = 0;
+
 const handlers = {
   async load({ toml }) {
     running = false;
     sim?.free();
     sim = null;
+    const ticket = ++loads;
+    let made;
     try {
-      sim = new Simulator(toml);
+      const files = await modelFiles(toml);
+      try {
+        if (ticket === loads) made = new Simulator(toml, files);
+      } finally {
+        files.free();
+      }
     } catch (e) {
+      if (ticket !== loads) return;
       send({ type: "state", running });
       return fail("load", e);
     }
+    if (ticket !== loads) return made?.free();
+    sim = made;
     chunk = 1;
     work = { steps: 0, ms: 0 };
     send({ type: "loaded", info: JSON.parse(sim.info()) });
@@ -120,7 +162,12 @@ const handlers = {
   // The memory a configuration would need, worked out without setting it up.
   async estimate({ toml, id }) {
     try {
-      send({ type: "estimate", id, memory: JSON.parse(Simulator.estimateMemory(toml)) });
+      const files = await modelFiles(toml);
+      try {
+        send({ type: "estimate", id, memory: JSON.parse(Simulator.estimateMemory(toml, files)) });
+      } finally {
+        files.free();
+      }
     } catch (e) {
       send({ type: "estimate", id, error: String(e?.message ?? e) });
     }
@@ -151,7 +198,7 @@ try {
   const pkg = await import(threads > 1 ? "./pkg-threads/vibe_rations_web.js" : "./pkg/vibe_rations_web.js");
   await pkg.default();
   if (threads > 1) await pkg.initThreadPool(threads);
-  Simulator = pkg.Simulator;
+  ({ Simulator, ModelFiles } = pkg);
   send({ type: "ready", threads, isolated: self.crossOriginIsolated });
 } catch (e) {
   fail("init", e);
