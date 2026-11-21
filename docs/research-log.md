@@ -2079,6 +2079,46 @@ down-weighting instead of removing.
 
 **Reproduce:** `just in marmousi2-study muted_l2` (46 minutes on four cores).
 
+## 2026-11-21 — Marmousi2: the stages with the slow waves muted
+
+**Question.** Muting the slow seafloor waves kept L2 from turning $v_s$ away (previous entry),
+and the frequency stages were the variant that improved $v_s$ at 750–1000 m (2026-11-21,
+"Marmousi2: frequency stages against L2"). Together?
+
+**Method** (`tests/marmousi2_study.rs`, `muted_stages`). The stages (L2 below 0.6 Hz for two
+iterations, below 1 Hz for two, then all for one) with the previous entry's mute in every
+stage. The mute comes before each stage's filter (2026-11-21, "Mutes and windows").
+
+**Results.**
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| 0.6 Hz (2) | 94.0% | $v_p$ | 0.990, +0.23 | 0.999, +0.08 | 1.001, −0.15 | 1.000, +0.01 | 1.000, −0.12 |
+| | | $v_s$ | 0.981, +0.25 | 1.005, −0.08 | 1.002, −0.10 | 1.000, −0.01 | 1.000, +0.10 |
+| then 1.0 Hz (2) | 90.4% | $v_p$ | 0.980, +0.27 | 0.998, +0.12 | 1.003, −0.19 | 1.000, −0.01 | 1.000, −0.12 |
+| | | $v_s$ | 0.967, +0.28 | 1.008, −0.09 | 1.004, −0.10 | 1.000, −0.01 | 1.000, +0.08 |
+| then all (1) | 89.2% | $v_p$ | 0.972, +0.32 | 0.995, +0.19 | 1.003, −0.17 | 1.000, −0.02 | 1.000, −0.14 |
+| | | $v_s$ | 0.966, +0.28 | 1.009, −0.09 | 1.004, −0.10 | 1.000, −0.01 | 1.000, +0.09 |
+
+3,487 s in all, as the stages unmuted (3,467).
+
+- *Behind muted L2 everywhere but $v_s$'s top band* ($v_p$ 0.972, 0.995 and 1.003 against
+  0.916, 0.971 and 0.999; $v_s$ 0.966 against 0.970), for the same reasons as unmuted: four of
+  the five iterations on frequencies where the source has little energy, each stage starting
+  again at a 2% step.
+- *The stages lose what made them worth having.* Unmuted, the 0.6 Hz stage turned $v_s$ the
+  right way at 750–1000 m (0.988, +0.16); muted, it doesn't (1.005, −0.08). So it was the slow
+  waves themselves, at frequencies low enough to be within half a cycle of the truth, that
+  carried the right $v_s$ there, and the mute takes them out with the rest.
+
+**Decision.** Muting and the stages don't add up as configured. What this points to is a
+mute that depends on the stage: keep the slow waves at the lowest frequencies, where they are
+within half a cycle and see $v_s$, and mute them above (`[[inversion.stage.mute]]`). That is a
+follow-up variant, not run yet. Of the runs so far, muted L2 is the best for $v_p$ and leaves
+$v_s$ unharmed; the unmuted stages are the best for $v_s$ above 1 km.
+
+**Reproduce:** `just in marmousi2-study muted_stages` (58 minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
