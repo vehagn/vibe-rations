@@ -252,8 +252,9 @@ doesn't show.
   the central 6 km (4.3 GiB). **Inverting it** (`tests/marmousi2_study.rs`, `just
   marmousi2-study <name>`; the log's Marmousi2 entries of 2026-11-21): from the start smoothed
   over 250 m, the slow seafloor waves carry most of the misfit and turn $v_s$'s gradient the
-  wrong way below 750 m, and no tool on main gets round them in five iterations (stages best
-  for $v_s$, the phase misfit for $v_p$, the receivers' side worse). Judge a variant by the
+  wrong way below 750 m; of the tools on main, only muting them (`[[inversion.mute]]` keeping
+  what arrives before a 600 m/s line) stops that, and it also removes the low-frequency slow
+  waves through which the stages improved $v_s$ (try a mute per stage next). Judge a variant by the
   error ratio and the cosine with the true update by depth band, not by the misfit: L2 fits
   the most data and recovers the least. Each variant is 45–65 minutes and 4.4 GiB, so run
   them one at a time. Without the files, `tests/examples.rs` only parses the

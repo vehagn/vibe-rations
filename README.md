@@ -452,12 +452,16 @@ start, five iterations each:
 | time shifts, then L2 | 83.5% | 0.958 / 0.996 / 1.005 | 0.990 / 1.018 / 1.016 |
 | phase, then L2 | 80.0% | 0.908 / 0.951 / 1.005 | 0.992 / 1.026 / 1.022 |
 | stages with the receivers' side | 93.9% | 0.984 / 1.005 / 1.027 | 0.979 / 0.996 / 1.076 |
+| L2, the slow waves muted | 85.7% | 0.916 / 0.971 / 0.999 | 0.970 / 1.004 / 1.001 |
+| stages, the slow waves muted | 89.2% | 0.972 / 0.995 / 1.003 | 0.966 / 1.009 / 1.004 |
 
 Each cell is $\lVert m - m_\text{true} \rVert / \lVert m_0 - m_\text{true} \rVert$ over the
-depth band (below 1, nearer the truth). The stages keep $v_s$ right down to 1 km and the phase
-misfit does best for $v_p$, but nothing recovers the model below 1 km: the slow waves have to
-be muted or down-weighted first. The research log ("Marmousi2" and the entries after it) has
-the details.
+depth band (below 1, nearer the truth). Muting what arrives after a 600 m/s line
+(`[[inversion.mute]]`; down-weighting to 0.1 does the same) stops $v_s$ turning away below
+750 m and lets L2 improve $v_p$ down to 1 km, the only run nearer the truth over every free
+node; but it also removes the low-frequency slow waves that made the unmuted stages the best
+for $v_s$ above 1 km. A mute per stage, keeping them at 0.6 Hz, is the next thing to try. The
+research log ("Marmousi2" and the entries after it) has the details.
 
 ## Numerics
 

@@ -2119,6 +2119,41 @@ $v_s$ unharmed; the unmuted stages are the best for $v_s$ above 1 km.
 
 **Reproduce:** `just in marmousi2-study muted_stages` (58 minutes on four cores).
 
+## 2026-11-21 — Marmousi2: down-weighting the slow waves instead
+
+**Question.** Removing the slow seafloor waves helps L2 and takes the stages' low-frequency
+$v_s$ information with them (previous two entries). Does keeping a little of them, a floor of
+0.1 instead of 0, keep some of that information without the damage?
+
+**Method** (`tests/marmousi2_study.rs`, `down_weighted_l2`, `down_weighted_stages`). The
+previous entries' mute with `weight = 0.1`: past the line and its taper the traces are
+multiplied by 0.1 rather than zeroed, which the L2 misfit counts as $0.1^2 = 1\%$
+(2026-11-21, "Mutes and windows"). L2 for five iterations, and the stages.
+
+**Results.** After five iterations ($v_p$ / $v_s$ error ratio; L2 misfit of all the data):
+
+| | L2 left | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m |
+|---|---|---|---|---|---|
+| L2, muted | 85.7% | 0.916 / 0.970 | 0.971 / 1.004 | 0.999 / 1.001 | 1.000 / 1.000 |
+| L2, down-weighted | 84.9% | 0.915 / 0.970 | 0.971 / 1.004 | 0.999 / 1.002 | 1.000 / 1.000 |
+| stages, muted | 89.2% | 0.972 / 0.966 | 0.995 / 1.009 | 1.003 / 1.004 | 1.000 / 1.000 |
+| stages, down-weighted | 89.3% | 0.972 / 0.963 | 0.995 / 1.009 | 1.004 / 1.005 | 1.000 / 1.000 |
+
+The cosines differ by 0.03 at most. 2,709 and 3,507 s.
+
+- *A floor of 0.1 is as good as removing them*, for better and worse: the slow waves' 1% share
+  of the misfit is too small to steer it, and too small to carry the $v_s$ information the
+  unmuted 0.6 Hz stage had. Somewhere between 0.1 and 1 they start to dominate again; that
+  isn't measured.
+
+**Decision.** For L2 on this survey, mute (or a floor this low; it makes no difference). The
+$v_s$ the slow waves carry at low frequencies needs them in at full weight where they are
+within half a cycle and out where they aren't: a mute per stage (`[[inversion.stage.mute]]`,
+none in the 0.6 Hz stage), the follow-up the previous entry named.
+
+**Reproduce:** `just in marmousi2-study down_weighted_l2`, `just in marmousi2-study
+down_weighted_stages` (45 and 58 minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2140,9 +2175,12 @@ $v_s$ unharmed; the unmuted stages are the best for $v_s$ above 1 km.
   truth below 750 m (2026-11-21, "Where Marmousi2's misfit lies"). Frequency stages, time
   shifts, the phase misfit and the receivers' side don't get round them in five iterations
   (2026-11-21, the four Marmousi2 entries after it): the stages keep $v_s$ right down to 1 km, the phase misfit $v_p$, and
-  nothing recovers either below 1 km. Still to try: muting or down-weighting the slow waves by
-  arrival time, alone and with the stages (`feat/mutes`), windowed time shifts, the phase
-  misfit before the stages, more iterations, and a better shallow start.
+  nothing recovers either below 1 km. Muting them (2026-11-21, "Marmousi2: L2 with the slow
+  seafloor waves muted" and the two entries after it) stops the damage: L2 then improves $v_p$
+  down to 1 km and leaves $v_s$ alone, but the low-frequency slow waves that had helped $v_s$
+  go too. Still to try: a mute per stage that keeps them at 0.6 Hz and removes them above,
+  windowed time shifts, the phase misfit with the mute, more iterations, and a better shallow
+  start.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
