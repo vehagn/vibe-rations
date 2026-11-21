@@ -434,13 +434,7 @@ impl Inversion {
                 .unwrap_or_else(|| start.vp_range()[1]),
         );
         let stages = settings.stages()?;
-        let source_frequency = cfg
-            .sources
-            .iter()
-            .map(|s| Ok(s.wavelet.wavelet()?.dominant_frequency()))
-            .collect::<Result<Vec<f64>>>()?
-            .into_iter()
-            .fold(0.0, f64::max);
+        let source_frequency = Measure::source_frequency(cfg)?;
         let measure = Measure::of(&stages[0], settings, source_frequency);
         let mut shots = Vec::with_capacity(cfg.sources.len());
         for (s, observed) in observed.into_iter().enumerate() {

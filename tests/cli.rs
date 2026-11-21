@@ -373,7 +373,7 @@ fn invert_writes_the_model_and_its_history() {
     assert_eq!(stage_of, vec![0, 1], "{info}");
     let plan = vibe(&["memory", "--invert", guess.to_str().unwrap()]);
     let text = String::from_utf8_lossy(&plan.stdout).into_owned();
-    assert!(text.contains("as recorded and filtered"), "{text}");
+    assert!(text.contains("the misfits' own arrays"), "{text}");
     // Iterations belong to the stages when there are any.
     fs::write(
         &guess,

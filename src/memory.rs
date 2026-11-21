@@ -19,6 +19,7 @@ use crate::config::{Config, PlaneKind};
 use crate::fd::Stencil;
 use crate::gradient::checkpoint_interval;
 use crate::grid::Grid;
+use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::receiver::Component;
 use crate::simulation::timing;
@@ -51,8 +52,9 @@ pub struct InversionSize {
     /// Pairs L-BFGS keeps.
     pub memory: usize,
     pub precondition: bool,
-    /// Whether a stage low-pass filters the traces, holding a filtered copy of the observed.
-    pub filtered: bool,
+    /// The most any stage's misfits hold for one shot besides the observed traces
+    /// ([`crate::misfit::Misfit::held_bytes`]): filtered traces, weights, phase kernels.
+    pub misfit_bytes: u64,
     /// Whether it estimates the receivers' side of the illumination, held between stages.
     pub receiver_side: bool,
 }
@@ -140,14 +142,9 @@ impl Plan {
         let interior = self.grid.interior_len() as u64;
         let n = inversion.unknowns as u64;
         let shots = inversion.shots;
-        let copies = 1 + u64::from(inversion.filtered);
         let observed = part(
-            if inversion.filtered {
-                format!("observed traces of {shots} shot(s), as recorded and filtered")
-            } else {
-                format!("observed traces of {shots} shot(s)")
-            },
-            copies * shots as u64 * self.trace_bytes(),
+            format!("observed traces of {shots} shot(s)"),
+            shots as u64 * self.trace_bytes(),
         );
         let mut parts = self.gradient_parts(None, observed);
         parts.extend([
@@ -175,6 +172,17 @@ impl Plan {
                 std::mem::size_of::<usize>() as u64 * n,
             ),
         ]);
+        if inversion.misfit_bytes > 0 {
+            // Before the free nodes' indices, which a test expects last.
+            let at = parts.len() - 1;
+            parts.insert(
+                at,
+                part(
+                    "the misfits' own arrays: filtered traces, weights, phase kernels",
+                    shots as u64 * inversion.misfit_bytes,
+                ),
+            );
+        }
         if inversion.receiver_side {
             // Before the free nodes' indices, which a test expects last.
             let at = parts.len() - 1;
@@ -312,13 +320,29 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         .inversion
         .as_ref()
         .context("the configuration has no [inversion] section")?;
-    let (grid, steps) = timed(cfg, base)?;
+    let taylor = Stencil::taylor(cfg.scheme.order)?;
+    let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
+    let [vp_max, slowest] = Model::extremes(grid, &cfg.model, base)?;
+    let timing = timing(cfg, &grid, vp_max, slowest)?;
+    let steps = timing.steps;
+    // The traces' sampling and the sources' frequency, as `Inversion::new` sets them.
+    let interval = cfg.output.record_every.max(1) as f64 * timing.dt;
+    let source_frequency = Measure::source_frequency(cfg)?;
+    let receivers = cfg.receivers.positions()?.len();
+    let components = cfg.receivers.components.len();
+    let samples = steps.div_ceil(cfg.output.record_every.max(1));
+    let mut misfit_bytes = 0;
+    for stage in settings.stages()? {
+        let measure = Measure::of(&stage, settings, source_frequency);
+        misfit_bytes = misfit_bytes
+            .max(Misfit::held_bytes(&measure, receivers, components, samples, interval)? as u64);
+    }
     let size = InversionSize {
         shots: cfg.sources.len(),
         unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
         memory: settings.memory,
         precondition: settings.precondition || !settings.scale.is_unit(),
-        filtered: settings.stages()?.iter().any(|s| s.max_frequency.is_some()),
+        misfit_bytes,
         receiver_side: settings.precondition && settings.receiver_runs > 0,
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
@@ -604,11 +628,14 @@ mod tests {
                 sim.receivers.traces.into()
             })
             .collect();
-        // As recorded, with a stage that filters (and so keeps filtered copies), and with the
-        // receivers' side of the illumination and a scale.
+        // As recorded; with a stage that filters (and so keeps filtered copies); with the
+        // receivers' side of the illumination and a scale; and with the phase misfit's kernels,
+        // largest in its unfiltered stage.
         let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
         let receivers = "receiver_runs = 1\n[inversion.scale]\nvp = 0.5";
-        for stages in ["", filtering, receivers] {
+        let phase = "misfit = \"phase\"\n[[inversion.stage]]\niterations = 2\n\
+                     [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1";
+        for stages in ["", filtering, receivers, phase] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

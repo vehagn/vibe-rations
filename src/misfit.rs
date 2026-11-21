@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use rayon::prelude::*;
 
-use crate::config::{InversionConfig, MisfitKind, StageConfig};
+use crate::config::{Config, InversionConfig, MisfitKind, StageConfig};
 use crate::gradient::{balancing_weights, l2_misfit};
 use crate::receiver::Component;
 
@@ -43,6 +43,18 @@ impl Measure {
             balance: settings.balance,
             dominant_frequency: Some(stage.max_frequency.unwrap_or(source_frequency)),
         }
+    }
+
+    /// The highest dominant frequency of `cfg`'s sources' wavelets: the phase misfit's scale
+    /// on traces as recorded.
+    pub fn source_frequency(cfg: &Config) -> Result<f64> {
+        Ok(cfg
+            .sources
+            .iter()
+            .map(|s| Ok(s.wavelet.wavelet()?.dominant_frequency()))
+            .collect::<Result<Vec<f64>>>()?
+            .into_iter()
+            .fold(0.0, f64::max))
     }
 
     /// The plain L2 misfit of the traces as recorded, with or without balancing.
@@ -93,10 +105,12 @@ impl Lowpass {
             "the filter order must be 1 to 16"
         );
         let nyquist = 0.5 / interval;
+        // Near the Nyquist frequency the filter barely filters, and its poles approach the
+        // unit circle, so their ringing (and the zeros below) would grow without bound.
         ensure!(
-            corner > 0.0 && corner < nyquist,
-            "the corner frequency {corner} Hz must lie between 0 and the traces' Nyquist \
-             frequency, {nyquist} Hz"
+            corner > 0.0 && corner <= 0.8 * nyquist,
+            "the corner frequency {corner} Hz must lie between 0 and 0.8 of the traces' \
+             Nyquist frequency, {nyquist} Hz"
         );
         let k = (std::f64::consts::PI * corner * interval).tan();
         let mut sections = Vec::with_capacity(order.div_ceil(2));
@@ -117,10 +131,25 @@ impl Lowpass {
             let norm = 1.0 / (1.0 + k);
             sections.push([k * norm, k * norm, 0.0, (k - 1.0) * norm, 0.0]);
         }
-        // The slowest pole decays as exp(-2π f_c sin(π/2n) t): wait until it is below 10⁻⁶ of
-        // where it started, ln 10⁶ / 2π ≈ 2.2, with a margin.
-        let decay = corner * interval * (std::f64::consts::PI / (2 * order) as f64).sin();
-        let pad = (2.4 / decay).ceil() as usize;
+        // The impulse response decays as rⁿ, r the largest pole radius of the digital filter
+        // (z² + a1 z + a2 = 0 for a section, z = -a1 for the first-order one): append zeros
+        // until rⁿ is below 10⁻⁶, with a margin of 10%. Far below the Nyquist frequency that is
+        // the analog prototype's exp(-2π f_c sin(π/2n) t); near it, the bilinear transform's
+        // warping slows the decay.
+        let radius = sections
+            .iter()
+            .map(|&[_, _, b2, a1, a2]| {
+                if b2 == 0.0 && a2 == 0.0 {
+                    a1.abs()
+                } else if a1 * a1 < 4.0 * a2 {
+                    a2.sqrt()
+                } else {
+                    let root = (a1 * a1 - 4.0 * a2).sqrt();
+                    (0.5 * (-a1 + root)).abs().max((0.5 * (-a1 - root)).abs())
+                }
+            })
+            .fold(0.0f64, f64::max);
+        let pad = (1.1 * 1e6f64.ln() / -radius.ln()).ceil() as usize;
         Ok(Self { sections, pad })
     }
 
@@ -235,17 +264,21 @@ impl Misfit {
                 trace_weights(&observed, components, samples)
             }
         };
-        let max_lag = match measure.max_shift {
-            Some(shift) => {
-                ensure!(shift > 0.0, "max_shift must be positive");
-                ((shift / interval).round() as usize).clamp(1, samples - 1)
+        if let Some(shift) = measure.max_shift {
+            ensure!(shift > 0.0, "max_shift must be positive");
+        }
+        let max_lag = if measure.kind == MisfitKind::Traveltime {
+            ensure!(
+                samples >= 3,
+                "the traveltime misfit needs at least three samples per trace"
+            );
+            match measure.max_shift {
+                Some(shift) => ((shift / interval).round() as usize).clamp(1, samples - 1),
+                None => samples - 1,
             }
-            None => samples.saturating_sub(1).max(1),
+        } else {
+            0
         };
-        ensure!(
-            measure.kind != MisfitKind::Traveltime || samples >= 3,
-            "the traveltime misfit needs at least three samples per trace"
-        );
         let gabor = match measure.kind {
             MisfitKind::Phase => {
                 let f0 = measure
@@ -295,13 +328,47 @@ impl Misfit {
         }
     }
 
-    /// Bytes it holds besides what it shares with the caller: the filtered observed traces.
+    /// Bytes it holds besides the observed traces it shares with the caller: the filtered
+    /// observed traces if it filters, the weights, and the phase misfit's kernels.
     pub fn memory_bytes(&self) -> usize {
-        if self.filter.is_some() {
+        let filtered = if self.filter.is_some() {
             4 * self.observed.iter().map(Vec::len).sum::<usize>()
         } else {
             0
-        }
+        };
+        filtered + 8 * self.weights.len() + self.gabor.as_ref().map_or(0, Gabor::memory_bytes)
+    }
+
+    /// [`Misfit::memory_bytes`] of a misfit `measure` would set up for one shot of
+    /// `receivers` receivers recording `components` components, `samples` samples per trace
+    /// `interval` seconds apart, worked out beforehand.
+    pub fn held_bytes(
+        measure: &Measure,
+        receivers: usize,
+        components: usize,
+        samples: usize,
+        interval: f64,
+    ) -> Result<usize> {
+        let traces = receivers * components;
+        let filtered = if measure.max_frequency.is_some() {
+            4 * traces * samples
+        } else {
+            0
+        };
+        let weights = 8 * match measure.kind {
+            MisfitKind::L2 => components,
+            _ => traces,
+        };
+        let kernels = match measure.kind {
+            MisfitKind::Phase => {
+                let f0 = measure
+                    .dominant_frequency
+                    .context("the phase misfit needs the data's dominant frequency")?;
+                Gabor::new(f0, measure.max_frequency.unwrap_or(2.5 * f0), interval)?.memory_bytes()
+            }
+            _ => 0,
+        };
+        Ok(filtered + weights + kernels)
     }
 
     fn compute(&self, synthetic: &[Vec<f32>], derivative: bool) -> Result<(f64, Vec<Vec<f32>>)> {
@@ -580,6 +647,11 @@ impl Gabor {
             half,
             frequencies,
         })
+    }
+
+    /// Bytes its kernels hold.
+    fn memory_bytes(&self) -> usize {
+        self.frequencies.iter().map(|(_, k)| 16 * k.len()).sum()
     }
 
     /// For each window centre of a trace of `n` samples, the samples it reaches, and the
@@ -1000,7 +1072,8 @@ mod tests {
             m.evaluate(&syn).unwrap(),
             l2_misfit(&syn, &obs, &weights).unwrap()
         );
-        assert_eq!(m.memory_bytes(), 0);
+        // It shares the observed traces, holding only its weight.
+        assert_eq!(m.memory_bytes(), 8);
     }
 
     #[test]
@@ -1185,10 +1258,74 @@ mod tests {
         assert!((l - r).abs() <= 1e-12 * l.abs().max(r.abs()), "{l} {r}");
     }
 
+    /// Near the Nyquist frequency the bilinear transform slows the poles' decay; the zeros
+    /// follow the digital poles, so the end of the record is still exact there.
+    #[test]
+    fn pads_enough_near_the_nyquist_frequency() {
+        let dt = 1e-3;
+        for (corner, order) in [(380.0, 4), (300.0, 8), (5.0, 3)] {
+            let f = Lowpass::butterworth(corner, dt, order).unwrap();
+            let short: Vec<f64> = ricker(0.6 * corner, 0.3, dt, 400);
+            let mut long = short.clone();
+            long.resize(40 * short.len(), 0.0);
+            let mut a = short.clone();
+            f.apply(&mut a);
+            f.apply(&mut long);
+            let peak = long.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let err = a
+                .iter()
+                .zip(&long)
+                .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+            assert!(err < 1e-6 * peak, "{corner} Hz: {err} of {peak}");
+        }
+    }
+
+    /// One-sample traces are fine for every misfit but the time shifts, which say so.
+    #[test]
+    fn short_traces_are_refused_only_where_they_must_be() {
+        let obs = Arc::new(vec![vec![1.0f32, 2.0]]);
+        for kind in [MisfitKind::L2, MisfitKind::Traveltime] {
+            let measure = Measure {
+                kind,
+                max_frequency: None,
+                filter_order: 4,
+                max_shift: Some(0.01),
+                balance: true,
+                dominant_frequency: Some(10.0),
+            };
+            let m = Misfit::new(measure, &obs, &[Component::Vz], 1, 1e-3);
+            assert_eq!(m.is_ok(), kind == MisfitKind::L2, "{kind:?}");
+        }
+    }
+
+    /// What a misfit holds is what [`Misfit::held_bytes`] works out beforehand.
+    #[test]
+    fn counts_what_it_holds() {
+        let samples = 300;
+        let obs = Arc::new(vec![vec![0.5f32; 4 * samples], vec![1.0f32; 4 * samples]]);
+        let components = [Component::Vx, Component::P];
+        for kind in [MisfitKind::L2, MisfitKind::Traveltime, MisfitKind::Phase] {
+            for max_frequency in [None, Some(20.0)] {
+                let measure = Measure {
+                    kind,
+                    max_frequency,
+                    filter_order: 4,
+                    max_shift: None,
+                    balance: true,
+                    dominant_frequency: Some(12.0),
+                };
+                let m = Misfit::new(measure, &obs, &components, samples, 1e-3).unwrap();
+                let planned = Misfit::held_bytes(&measure, 4, 2, samples, 1e-3).unwrap();
+                assert_eq!(m.memory_bytes(), planned, "{kind:?} {max_frequency:?}");
+            }
+        }
+    }
+
     #[test]
     fn refuses_corners_outside_the_band() {
         assert!(Lowpass::butterworth(0.0, 1e-3, 4).is_err());
         assert!(Lowpass::butterworth(500.0, 1e-3, 4).is_err());
+        assert!(Lowpass::butterworth(420.0, 1e-3, 4).is_err());
         assert!(Lowpass::butterworth(10.0, 1e-3, 0).is_err());
     }
 }
