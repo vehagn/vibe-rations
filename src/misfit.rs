@@ -29,7 +29,7 @@ pub struct Measure {
     pub filter_order: usize,
     /// The largest time shift the `traveltime` misfit looks for, s; any by default.
     pub max_shift: Option<f64>,
-    /// For `l2`: weigh each component by 1/(its observed energy, after filtering).
+    /// For `l2`: weigh each component by 1/(its observed energy, after muting and filtering).
     pub balance: bool,
     /// For `phase`: the data's dominant frequency, Hz, which sets the time–frequency cells.
     pub dominant_frequency: Option<f64>,
@@ -252,8 +252,8 @@ impl Lowpass {
     }
 }
 
-/// One shot's misfit as a [`Measure`] takes it: the observed traces, filtered if it filters,
-/// and the weights it gives them. Traces are laid out as [`crate::receiver::Receivers::traces`]
+/// One shot's misfit as a [`Measure`] takes it: the observed traces, muted and filtered if it
+/// mutes or filters, and the weights it gives them. Traces are laid out as [`crate::receiver::Receivers::traces`]
 /// keeps them: one array per component, receiver-major, `samples` per trace.
 #[derive(Clone, Debug)]
 pub struct Misfit {
@@ -261,7 +261,8 @@ pub struct Misfit {
     filter: Option<Lowpass>,
     samples: usize,
     interval: f64,
-    /// The observed traces, filtered if the measure filters; shared with the caller if not.
+    /// The observed traces, muted and filtered if the measure mutes or filters; shared with the
+    /// caller if it does neither.
     observed: Arc<Vec<Vec<f32>>>,
     /// `l2`: each component's weight. Otherwise each trace's (component-major), 0 for one
     /// too quiet to measure.
@@ -475,13 +476,23 @@ impl Misfit {
 
     /// How strongly the misfit weighs each trace (per component, per receiver) in the
     /// Gauss–Newton Hessian: the square of its adjoint source's size per unit change of the
-    /// trace. The L2 misfit's is its weight. The time shift's derivative is about the
+    /// trace. The L2 misfit's is its weight, times the trace's mean squared mute weight if it
+    /// mutes (0 for a trace muted entirely, which adds nothing to the gradient; a mute that
+    /// varies in time has no one number, and this one is right at both ends). The time
+    /// shifts and phases are judged on the muted traces already. The time shift's derivative is about the
     /// observed slope over its energy, ∂T/∂s ≈ ḋ/Σḋ², so its weight is 1/Σḋ²; the phase
     /// misfit compares unit phasors, about ‖δs‖²/E per trace (E the observed energy), divided
     /// by the component's number of measured traces as its normalisation does. Quiet traces,
     /// which the trace-by-trace misfits leave out, weigh 0. Built from the observed traces only.
     pub fn receiver_weights(&self) -> Vec<Vec<f64>> {
         let n = self.samples;
+        // Each receiver's mean squared mute weight, for L2.
+        let kept: Vec<f64> = (0..self.offsets.len())
+            .map(|r| {
+                self.mute(r)
+                    .map_or(1.0, |m| m.iter().map(|w| w * w).sum::<f64>() / n as f64)
+            })
+            .collect();
         let mut first = 0;
         self.observed
             .iter()
@@ -500,7 +511,7 @@ impl Misfit {
                     .chunks(n)
                     .enumerate()
                     .map(|(r, d)| match self.measure.kind {
-                        MisfitKind::L2 => self.weights[c],
+                        MisfitKind::L2 => self.weights[c] * kept.get(r).copied().unwrap_or(1.0),
                         kind => {
                             let w = self.weights[first + r];
                             let energy: f64 = if kind == MisfitKind::Traveltime {
@@ -526,8 +537,9 @@ impl Misfit {
             .collect()
     }
 
-    /// Bytes it holds besides the observed traces it shares with the caller: the filtered
-    /// observed traces if it filters, the weights, and the phase misfit's kernels.
+    /// Bytes it holds besides the observed traces it shares with the caller: its muted and
+    /// filtered copy of them if it mutes or filters, the weights, the receivers' offsets if
+    /// it mutes, and the phase misfit's kernels.
     pub fn memory_bytes(&self) -> usize {
         let transformed = if self.transforms() {
             4 * self.observed.iter().map(Vec::len).sum::<usize>()
@@ -1454,6 +1466,164 @@ mod tests {
         );
     }
 
+    /// The signed time shift between `s` and `d`, sampled `dt` apart, as the time-shift misfit
+    /// measures it: |T| from the misfit, ½T², and its sign from the derivative's slope along
+    /// ṡ, which is -T (moving the synthetic earlier lowers a positive T).
+    fn signed_shift(s: &[f64], d: &[f64], dt: f64, max_lag: usize) -> f64 {
+        let (m, g) = traveltime_trace(s, &to_f32(d), max_lag, dt, true);
+        let along: f64 = (1..s.len() - 1)
+            .map(|i| g[i] * (s[i + 1] - s[i - 1]) / (2.0 * dt))
+            .sum();
+        (2.0 * m).sqrt() * if along < 0.0 { 1.0 } else { -1.0 }
+    }
+
+    /// A 1.2 Hz Ricker at 3 s, the synthetic 0.1 s late, and behind it a ten times stronger
+    /// arrival at 5.5 s, the synthetic's 0.3 s early, 10 s at 10 ms: (synthetic, observed).
+    fn kept_and_strong_late(dt: f64) -> (Vec<f64>, Vec<f64>) {
+        let n = (10.0 / dt) as usize;
+        let add = |a: Vec<f64>, b: Vec<f64>| a.iter().zip(&b).map(|(x, y)| x + 10.0 * y).collect();
+        (
+            add(ricker(1.2, 3.1, dt, n), ricker(1.2, 5.2, dt, n)),
+            add(ricker(1.2, 3.0, dt, n), ricker(1.2, 5.5, dt, n)),
+        )
+    }
+
+    /// Mute the trace at `dt`, then filter it (the misfit's order), or the other way round.
+    fn mute_and_filter(
+        x: &[f64],
+        mute: &MuteConfig,
+        f: &Lowpass,
+        dt: f64,
+        mute_first: bool,
+    ) -> Vec<f64> {
+        let mut y = x.to_vec();
+        let muted = |y: &mut Vec<f64>| {
+            for (i, v) in y.iter_mut().enumerate() {
+                *v *= mute_weight(mute, i as f64 * dt, 0.0);
+            }
+        };
+        if mute_first {
+            muted(&mut y);
+            f.apply(&mut y);
+        } else {
+            f.apply(&mut y);
+            muted(&mut y);
+        }
+        y
+    }
+
+    /// Muting before the filter keeps a strong arrival behind the line out of the time shift
+    /// of the one before it; filtering first smears it back across the line.
+    #[test]
+    fn the_mute_comes_before_the_filter() {
+        let dt = 0.01;
+        let (s, d) = kept_and_strong_late(dt);
+        let mute = MuteConfig {
+            keep: MuteSide::Before,
+            velocity: None,
+            delay: 4.0,
+            taper: 0.4,
+            weight: 0.0,
+            shape: MuteShape::Cosine,
+        };
+        let f = Lowpass::butterworth(0.6, dt, 4).unwrap();
+        let shift = |first| {
+            signed_shift(
+                &mute_and_filter(&s, &mute, &f, dt, first),
+                &mute_and_filter(&d, &mute, &f, dt, first),
+                dt,
+                60,
+            )
+        };
+        let (right, wrong) = (shift(true), shift(false));
+        assert!((right - 0.1).abs() < 0.01, "{right}");
+        assert!((wrong - 0.1).abs() > 0.05, "{wrong}");
+    }
+
+    /// The mutes' numbers in the research log: the two orders, the taper's length and the
+    /// floor, each on the time shift of a 1.2 Hz Ricker. `cargo test --release --lib
+    /// mute_study -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn mute_study() {
+        let dt = 0.01;
+        let t0 = 1.0 / 1.2;
+        let flat = |delay: f64, taper: f64, weight: f64| MuteConfig {
+            keep: MuteSide::Before,
+            velocity: None,
+            delay,
+            taper,
+            weight,
+            shape: MuteShape::Cosine,
+        };
+        // The order, with a strong arrival behind the line, and a kept arrival's distortion.
+        let (s, d) = kept_and_strong_late(dt);
+        let f = Lowpass::butterworth(0.6, dt, 4).unwrap();
+        for taper in [0.5 * t0, t0] {
+            let mute = flat(4.0, taper, 0.0);
+            for first in [true, false] {
+                let t = signed_shift(
+                    &mute_and_filter(&s, &mute, &f, dt, first),
+                    &mute_and_filter(&d, &mute, &f, dt, first),
+                    dt,
+                    60,
+                );
+                eprintln!(
+                    "order: {} first, taper {:.2} s: shift {t:+.3} s (true +0.100)",
+                    if first { "mute" } else { "filter" },
+                    taper
+                );
+            }
+        }
+        // The taper: an arrival centred on the line (keeping what comes before it), as
+        // recorded and with the filter after the mute.
+        let n = (10.0 / dt) as usize;
+        let (s, d) = (ricker(1.2, 4.1, dt, n), ricker(1.2, 4.0, dt, n));
+        for periods in [0.01, 0.25, 0.5, 1.0, 2.0] {
+            let mute = flat(4.0, periods * t0, 0.0);
+            let as_recorded = |x: &[f64]| -> Vec<f64> {
+                x.iter()
+                    .enumerate()
+                    .map(|(i, v)| v * mute_weight(&mute, i as f64 * dt, 0.0))
+                    .collect()
+            };
+            let raw = signed_shift(&as_recorded(&s), &as_recorded(&d), dt, 60);
+            let filtered = signed_shift(
+                &mute_and_filter(&s, &mute, &f, dt, true),
+                &mute_and_filter(&d, &mute, &f, dt, true),
+                dt,
+                60,
+            );
+            eprintln!(
+                "taper {periods} periods: shift {raw:+.3} s as recorded, {filtered:+.3} s filtered at 0.6 Hz (true +0.100)"
+            );
+        }
+        // The floor: a ten times stronger arrival behind the line, the same in both traces.
+        let (s, d) = (
+            ricker(1.2, 3.1, dt, n)
+                .iter()
+                .zip(ricker(1.2, 5.5, dt, n))
+                .map(|(a, b)| a + 10.0 * b)
+                .collect::<Vec<_>>(),
+            ricker(1.2, 3.0, dt, n)
+                .iter()
+                .zip(ricker(1.2, 5.5, dt, n))
+                .map(|(a, b)| a + 10.0 * b)
+                .collect::<Vec<_>>(),
+        );
+        for weight in [0.0, 0.01, 0.03, 0.1, 0.3] {
+            let mute = flat(4.0, t0, weight);
+            let muted = |x: &[f64]| -> Vec<f64> {
+                x.iter()
+                    .enumerate()
+                    .map(|(i, v)| v * mute_weight(&mute, i as f64 * dt, 0.0))
+                    .collect()
+            };
+            let t = signed_shift(&muted(&s), &muted(&d), dt, 60);
+            eprintln!("floor {weight}: shift {t:+.3} s (true +0.100)");
+        }
+    }
+
     /// A trace at rest by its end comes out as if the record were longer, and one cut short
     /// by the record's end is still filtered symmetrically.
     #[test]
@@ -1556,6 +1726,34 @@ mod tests {
         }
     }
 
+    /// With mutes, an L2 trace weighs its mean squared mute weight on the receivers' side: a
+    /// trace muted entirely, whose adjoint source is 0, weighs nothing.
+    #[test]
+    fn receiver_weights_follow_the_mutes() {
+        let dt = 2e-3;
+        let n = 150;
+        let obs = Arc::new(vec![to_f32(
+            &[ricker(12.0, 0.1, dt, n), ricker(12.0, 0.1, dt, n)].concat(),
+        )]);
+        // Keeps what comes after t = x / 1000: all of the trace at 0 m, none at 400 m.
+        let measure = Measure {
+            mutes: vec![MuteConfig {
+                keep: MuteSide::After,
+                velocity: Some(1000.0),
+                delay: 0.0,
+                taper: 0.05,
+                weight: 0.0,
+                shape: MuteShape::Cosine,
+            }],
+            ..Measure::l2(true)
+        };
+        let m = Misfit::new(measure, &obs, &[Component::Vz], n, dt, &[0.0, 400.0]).unwrap();
+        let w = m.receiver_weights();
+        assert!(w[0][0] > 0.0 && w[0][1] == 0.0, "{w:?}");
+        let (_, g) = m.evaluate(&[vec![0.5f32; 2 * n]]).unwrap();
+        assert!(g[0][n..].iter().all(|&v| v == 0.0));
+    }
+
     /// One-sample traces are fine for every misfit but the time shifts, which say so.
     #[test]
     fn short_traces_are_refused_only_where_they_must_be() {
@@ -1604,7 +1802,8 @@ mod tests {
         assert_eq!(mute_weight(&after, 0.1, 3000.0), 1.0);
         assert!((mute_weight(&after, 0.0, 3000.0) - 0.625).abs() < 1e-12);
         assert_eq!(mute_weight(&after, -0.2, 0.0), 0.25);
-        // Exponential: e⁻¹ of the way down a time constant past the line, never quite there.
+        // Exponential: a time constant past the line, e⁻¹ of the way from the floor up to 1
+        // is left; it never quite reaches the floor.
         let damped = MuteConfig {
             shape: MuteShape::Exponential,
             weight: 0.1,

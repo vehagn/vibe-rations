@@ -546,8 +546,8 @@ pub struct MuteConfig {
     /// one, so the mute adds little at frequencies the data don't have and doesn't bias the
     /// time shift of an arrival near the line.
     pub taper: f64,
-    /// What the muted side is multiplied by: 0 (the default) removes it, between 0 and 1
-    /// down-weights it. The L2 misfit counts it squared; for the time shifts a strong arrival
+    /// What the muted side is multiplied by: 0 (the default) removes it (the exponential shape
+    /// only tends to it), between 0 and 1 down-weights it. The L2 misfit counts it squared; for the time shifts a strong arrival
     /// down-weighted by less than its amplitude over the kept one's can still win the
     /// correlation.
     #[serde(default)]

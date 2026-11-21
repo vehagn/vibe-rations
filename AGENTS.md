@@ -188,8 +188,10 @@ doesn't show.
 - **The receivers' side of the illumination** (`receiver_runs`, `Inversion::receiver_energy`).
   The runs inject through `Solver::adjoint_op`, exactly as the adjoint injects residuals, and
   each trace by `Misfit::receiver_weights`, so velocity and pressure receivers weigh as they
-  do in the gradient: exactly for L2, by each observed trace's energy (or slope's) for the
-  time shifts and phases, which scale every trace by its own amplitude. Weighing those by
+  do in the gradient: exactly for L2 without mutes (with them, by each trace's mean squared
+  mute weight, so a trace muted entirely weighs nothing), by each observed (muted) trace's
+  energy (or slope's) for the time shifts and phases, which scale every trace by its own
+  amplitude. Weighing those by
   component, as at first, let pressure (10⁶ times velocity) take over the estimate. A run
   needs no sources in the configuration; it steps the solver itself. With a Hadamard matrix's signs
   the cross terms cancel exactly (a unit test); with random ones only on average, which is

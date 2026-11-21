@@ -1681,9 +1681,11 @@ codes, which can't window, damp: $e^{-(t - t_0)/\tau}$ from the first arrival
 waves are seen" [@brossier2009], relaxed over the stages to bring surface waves back in
 [@romdhane2011]. Adjoint tomography windows single arrivals automatically, but on the
 synthetic and anew for each model [@maggi2009], and leaves the processing's transpose
-implicit [@liu2006]. A second agent read DENISE, SeisFlows, LASIF and Pyadjoint: all filter
-first and window afterwards, and none carries both through the adjoint source exactly
-(DENISE injects $W r$ where its misfit has $W^2$).
+implicit [@liu2006]. A second agent read the code of DENISE Black-Edition (commit b07d81d;
+the code of [@kohn2012]), SeisFlows (main d084262 and legacy 46a9604; [@modrak2018]), LASIF
+2.0 (568071f; [@krischer2015]) and Pyadjoint (907cd8a, which has no paper): all filter first
+and window afterwards, and none carries both through the adjoint source exactly (DENISE
+injects $W r$ where its misfit has $W^2$).
 
 **Method** (`[[inversion.mute]]`, `[[inversion.stage.mute]]`, `misfit::mute_weight`). A mute
 keeps one side of a line $t = x / v + t_0$, $x$ the horizontal offset between the nodes source
@@ -1698,11 +1700,16 @@ $-0.11$ to $+0.09$ s at 0.2–1.3 km) where slant distance predicted 0.22–0.85
 quiet traces are judged on the muted traces, from the observed ones only.
 
 *The order.* As first written, the mute came after the filter, as in every code read. The
-second agent's prototype (a 1.2 Hz Ricker kept, a ten times stronger arrival behind the line,
-a 0.6 Hz corner) found that order leaks: the zero-phase filter smears the strong arrival back
-across the line, where the mute can't reach it, and the kept arrival's time shift of
-$+0.100$ s came out $-0.095$; filtering also lengthens the kept arrival into the taper, which
-clips it (4.9% against $5 \times 10^{-10}$). Muting first leaked nothing, so mutes come first.
+second agent's prototype found that order leaks, and `mute_study` reproduces it here: a 1.2 Hz
+Ricker the synthetic has 0.100 s late, a ten times stronger arrival behind it (the synthetic's
+0.3 s early), a mute keeping what comes before 4 s with a 0.42 s taper, a 0.6 Hz corner.
+Filtering first, the zero-phase filter smears the strong arrival back across the line, where
+the mute can't reach it, and the shift came out $-0.095$ s; muting first, $+0.100$ s. The
+prototype also found filtering first lengthens the kept arrival into the taper, which clips it
+(4.9% against $5 \times 10^{-10}$). So mutes come first (`the_mute_comes_before_the_filter`).
+Even so the line and its taper must end before the muted arrival begins: with a whole period's
+taper (0.83 s) the strong arrival's front reached into it, and the shift came out $+0.129$ s
+muting first ($-0.153$ filtering first).
 
 **Results.**
 
@@ -1720,17 +1727,32 @@ clips it (4.9% against $5 \times 10^{-10}$). Muting first leaked nothing, so mut
 - The memory plan counts the muted copy of the observed traces and the offsets
   (`Misfit::held_bytes`), and still equals what an inversion holds with a mute.
 
-**Decision.** Mutes before the filter, fixed by the configuration, horizontal offsets; the
-taper at least half the dominant period (the agent's prototype: a time shift of 0.100 s came
-out 0.050 with no taper, 0.088 with half a period, 0.097 with a whole one, for an arrival on
-the line); `delay` includes the wavelet's own (1.2/$f_0$ for a Ricker). For the time shifts, a
-floor must stay far below the kept arrival's amplitude over the muted one's: at 0.1 against a
-ten times stronger arrival the prototype's shift locked onto the muted one. Windows picked on
+**Decision.** Mutes before the filter, fixed by the configuration, horizontal offsets. The taper
+at least half the dominant period: for an arrival on the line, a shift of 0.100 s came out
+0.048, 0.068, 0.088, 0.097 and 0.099 s with tapers of 0.01, 0.25, 0.5, 1 and 2 periods as
+recorded, and 0.465, 0.221, 0.132, 0.130 and 0.113 s with the 0.6 Hz filter after the mute,
+which lengthens the clipped arrival: on filtered traces a mute should not cut through an arrival
+whose shift is wanted (`mute_study`). `delay` includes the wavelet's own (1.2/$f_0$ for a
+Ricker). For the time shifts a floor must stay far below the kept arrival's amplitude over the
+muted one's: behind a kept arrival, a ten times stronger one the same in both traces pulled the
+0.100 s shift to 0.099, 0.093, 0.050 and 0.009 s at floors of 0.01, 0.03, 0.1 and 0.3. Windows picked on
 the synthetics, as FLEXWIN's, would make the misfit jump between models; picked on the
 observed data, or fixed per stage, they would not, which is what these mutes are. Next: the
 local session tries them on Marmousi2's seafloor waves.
 
-**Reproduce:** `just unit misfit`; `just physics mutes_keep`.
+**Review.** An adversarial review (three reviewers, a skeptic per finding; 12 confirmed, 9 of
+them found twice, 3 refuted) found no error in a gradient. Fixed: the L2 misfit's weights on
+the receivers' side of the illumination ignored the mutes, so a receiver muted entirely still
+sent waves out at full weight; they are now its weight times the trace's mean squared mute
+weight. The README's window had a floor of 0.1, which the numbers above warn against (now
+0.01); four new entries in the bibliography had a stray comma; docs and the memory report
+spoke of a filtered copy where it may be muted, and left out the offsets. It also found, on
+main before this branch, that the page's Gradient failed for any configuration with stages:
+the memory estimate, made first, refused the iterations the page writes beside them
+(`InversionConfig::gradient_only` now serves the estimate and the view alike).
+
+**Reproduce:** `just unit misfit`; `just physics mutes_keep`; the numbers above,
+`cargo test --release --lib mute_study -- --ignored --nocapture`.
 
 ## Open questions
 

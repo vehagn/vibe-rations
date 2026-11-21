@@ -952,8 +952,9 @@ impl Inversion {
     /// [`Misfit::receiver_weights`], relative to the shot's largest, averaged over the
     /// shots), times `sign(run, receiver, component)`, injected as the adjoint run injects
     /// residuals (`Solver::adjoint_op`), so velocity and pressure receivers count about as
-    /// they do in the gradient: exactly for the L2 misfit, by each trace's observed energy
-    /// for the trace-by-trace ones.
+    /// they do in the gradient: exactly for the L2 misfit without mutes (with them, by each
+    /// trace's mean squared mute weight), by each trace's observed energy for the
+    /// trace-by-trace ones.
     ///
     /// With independent random signs its expectation is Σₐ wₐ Σₜ |Gₐ|², Gₐ the waves from
     /// receiver component a alone: the receivers' side of the Gauss–Newton Hessian's diagonal,

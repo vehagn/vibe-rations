@@ -253,12 +253,12 @@ velocity = 3000.0
 delay = -0.1
 taper = 0.1
 
-[[inversion.mute]]   # what comes after them, down to a tenth
+[[inversion.mute]]   # what comes after them, down to a hundredth
 keep = "before"
 velocity = 2000.0
 delay = 0.3
 taper = 0.2
-weight = 0.1
+weight = 0.01   # far below the P waves' amplitude over the later waves', or those win the correlation
 ```
 
 
@@ -304,8 +304,9 @@ against a real gradient run.
 `just memory <config> --invert` counts an inversion: one shot's gradient run at a time, every
 shot's observed traces, three models (as it stands, the start, and the one stepped to), the
 gradient and illumination summed over the shots, and per unknown the L-BFGS pairs ($16m$
-bytes for memory $m$) and five more numbers; with a filtering stage, a filtered copy of the
-observed traces too. Unknowns are counted at every free node, so a
+bytes for memory $m$) and five more numbers; with a stage that mutes or filters, a muted and
+filtered copy of the observed traces too, and the misfits' weights, offsets and phase kernels.
+Unknowns are counted at every free node, so a
 model with fluids (no $v_s$ unknown there) needs a little less. A third test checks it against
 a real inversion.
 

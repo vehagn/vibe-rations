@@ -54,7 +54,8 @@ pub struct InversionSize {
     pub memory: usize,
     pub precondition: bool,
     /// The most any stage's misfits hold for one shot besides the observed traces
-    /// ([`crate::misfit::Misfit::held_bytes`]): filtered traces, weights, phase kernels.
+    /// ([`crate::misfit::Misfit::held_bytes`]): muted or filtered traces, weights, offsets,
+    /// phase kernels.
     pub misfit_bytes: u64,
     /// Whether it estimates the receivers' side of the illumination, held between stages.
     pub receiver_side: bool,
@@ -188,7 +189,8 @@ impl Plan {
             parts.insert(
                 at,
                 part(
-                    "the misfits' own arrays: filtered traces, weights, phase kernels",
+                    "the misfits' own arrays: muted or filtered traces, weights, offsets, phase \
+                     kernels",
                     shots as u64 * inversion.misfit_bytes,
                 ),
             );
