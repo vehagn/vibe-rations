@@ -255,6 +255,13 @@
               <label>Largest step <input type="number" min="0" step="any" data-inversion="max_step" title="The largest change in any iteration, as a fraction"></label>
               <label>Fixed above (m) <input type="number" min="0" step="any" data-inversion="fixed_above" placeholder="none"></label>
               <label>Water level <input type="number" min="0" step="any" data-inversion="water_level"></label>
+              <label>Misfit
+                <select data-inversion="misfit" title="What the misfit compares: the traces sample by sample (L2), each trace's cross-correlation time shift, or the time–frequency phase. [[inversion.stage]] tables in the TOML continue in frequency, each stage with its own misfit.">
+                  <option value="l2">L2 waveform</option>
+                  <option value="traveltime">Time shifts</option>
+                  <option value="phase">Phase</option>
+                </select>
+              </label>
             </div>
             <label class="check-line"><input type="checkbox" data-inversion="balance"> Weigh each component and shot alike</label>
             <label class="check-line"><input type="checkbox" data-inversion="precondition"> Divide by the illumination</label>

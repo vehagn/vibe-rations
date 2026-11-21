@@ -330,6 +330,68 @@ fn invert_writes_the_model_and_its_history() {
     );
     assert!(now < start, "{now} vs {start}");
     assert!(info["memory_bytes"].as_u64().unwrap() > 0, "{info}");
+
+    // Two stages: time shifts of low-passed traces, then the L2 misfit of the traces as
+    // recorded, an iteration each.
+    fs::write(
+        &guess,
+        survey.replace("vp = 2000.0", "vp = 2080.0")
+            + "\n[inversion]\nobserved = \"observed\"\nmisfit = \"traveltime\"\n\
+               [[inversion.stage]]\nmax_frequency = 8.0\niterations = 1\n\
+               [[inversion.stage]]\nmisfit = \"l2\"\niterations = 1\n\
+               [[inversion.stage]]\nmax_frequency = 6.0\niterations = 0\n",
+    )
+    .unwrap();
+    let out = vibe(&[
+        "invert",
+        guess.to_str().unwrap(),
+        "--out",
+        model_out.to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("stage 1: traveltime misfit below 8 Hz"),
+        "{err}"
+    );
+    assert!(err.contains("stage 2: l2 misfit, 1 iteration"), "{err}");
+    let info: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(model_out.join("inversion.json")).unwrap())
+            .unwrap();
+    let stages = info["stages"].as_array().unwrap();
+    // The last stage takes no step, but it was begun.
+    assert_eq!(stages.len(), 3, "{info}");
+    assert_eq!(stages[0]["misfit"], "traveltime", "{info}");
+    assert_eq!(
+        stages[1]["max_frequency"],
+        serde_json::Value::Null,
+        "{info}"
+    );
+    let iterations = info["iterations"].as_array().unwrap();
+    let stage_of: Vec<u64> = iterations
+        .iter()
+        .map(|i| i["stage"].as_u64().unwrap())
+        .collect();
+    assert_eq!(stage_of, vec![0, 1], "{info}");
+    let plan = vibe(&["memory", "--invert", guess.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&plan.stdout).into_owned();
+    assert!(text.contains("the misfits' own arrays"), "{text}");
+    // Iterations belong to the stages when there are any.
+    fs::write(
+        &guess,
+        survey.clone()
+            + "\n[inversion]\nobserved = \"observed\"\niterations = 2\n\
+               [[inversion.stage]]\niterations = 1\n",
+    )
+    .unwrap();
+    let out = vibe(&["invert", guess.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("each [[inversion.stage]]"),
+        "{}",
+        stderr(&out)
+    );
+
     // Without [inversion] there is nothing to do.
     let out = vibe(&["invert", truth.to_str().unwrap()]);
     assert!(!out.status.success());

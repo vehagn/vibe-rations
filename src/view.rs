@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 
-use crate::config::{Config, InversionConfig, Parameter, PlaneKind};
+use crate::config::{Config, InversionConfig, Parameter, PlaneKind, StageConfig};
 use crate::grid::Grid;
 use crate::image;
 use crate::inversion::{Inversion, Observed};
@@ -411,8 +411,11 @@ pub enum Stage {
     Observing(usize),
     /// The misfit and gradient at the start.
     Starting,
-    /// L-BFGS iteration this (from 1).
+    /// L-BFGS iteration this (from 1, counted over every stage).
     Iterating(usize),
+    /// The start of this stage of frequency continuation (from 1; stage 0 starts with the
+    /// inversion): its misfit and gradient on its own filtered traces.
+    Staging(usize),
     Done,
 }
 
@@ -425,9 +428,14 @@ pub struct InversionView {
     truth: Config,
     base: PathBuf,
     settings: InversionConfig,
+    /// The inversion's stages, each with its iterations and misfit.
+    stages: Vec<StageConfig>,
     observed: Vec<Observed>,
     inversion: Option<Inversion>,
     stage: Stage,
+    /// Iterations taken in all, and in the stage under way.
+    iterations: usize,
+    in_stage: usize,
     /// Why it stopped before its last iteration, if it did.
     stopped: Option<String>,
     first_misfit: Option<f64>,
@@ -439,10 +447,18 @@ impl InversionView {
     /// `truth` the same survey with the true model. Both must be sampled alike (the same time
     /// step: `settings::synthetic` in the web crate pins it for both).
     pub fn new(cfg: &Config, truth: &Config, base: &Path) -> Result<Self> {
-        let settings = cfg
+        let mut settings = cfg
             .inversion
             .clone()
             .context("the configuration has no [inversion] section")?;
+        if settings.iterations == Some(0) && !settings.stages.is_empty() {
+            // No iterations (the page's Gradient): the gradient at the start of the first
+            // stage, as it measures the misfit.
+            settings.stages.truncate(1);
+            settings.stages[0].iterations = 0;
+            settings.iterations = None;
+        }
+        let stages = settings.stages()?;
         ensure!(
             truth.sources.len() == cfg.sources.len(),
             "the true model's survey has {} source(s), the start's {}",
@@ -464,6 +480,9 @@ impl InversionView {
             observed: Vec::with_capacity(cfg.sources.len()),
             inversion: None,
             stage: Stage::Observing(0),
+            stages,
+            iterations: 0,
+            in_stage: 0,
             stopped: None,
             first_misfit: None,
             pictures: Pictures {
@@ -485,9 +504,20 @@ impl InversionView {
         self.inversion.is_some()
     }
 
-    /// Units of work in all: a forward run per shot, the start, the iterations.
+    /// Units of work in all: a forward run per shot, the start, every stage's iterations
+    /// and the start of every stage after the first.
     pub fn units(&self) -> usize {
-        self.cfg.sources.len() + 1 + self.settings.iterations
+        self.cfg.sources.len() + 1 + self.planned_iterations() + self.stages.len() - 1
+    }
+
+    /// The iterations the stages ask for, in all.
+    fn planned_iterations(&self) -> usize {
+        self.stages.iter().map(|s| s.iterations).sum()
+    }
+
+    /// The stage under way (from 0).
+    fn inversion_stage(&self) -> usize {
+        self.inversion.as_ref().map_or(0, Inversion::stage)
     }
 
     /// Units done.
@@ -496,15 +526,36 @@ impl InversionView {
         match self.stage {
             Stage::Observing(s) => s,
             Stage::Starting => shots,
-            Stage::Iterating(i) => shots + i,
+            Stage::Iterating(_) | Stage::Staging(_) => {
+                shots + 1 + self.iterations + self.inversion_stage()
+            }
             Stage::Done => self.units(),
+        }
+    }
+
+    /// What follows the end of the stage under way: the next stage's start, or the end.
+    fn after_stage(&self) -> Stage {
+        let next = self.inversion_stage() + 1;
+        if next < self.stages.len() {
+            Stage::Staging(next)
+        } else {
+            Stage::Done
+        }
+    }
+
+    /// What follows the start of stage `s`: its first iteration, or, if it has none, what
+    /// follows it.
+    fn entering_stage(&self, s: usize) -> Stage {
+        if self.stages[s].iterations > 0 {
+            Stage::Iterating(self.iterations + 1)
+        } else {
+            self.after_stage()
         }
     }
 
     /// Does the next unit of work; false once there is none left.
     pub fn advance(&mut self) -> Result<bool> {
         let shots = self.cfg.sources.len();
-        let iterations = self.settings.iterations;
         self.stage = match self.stage {
             Stage::Observing(s) => {
                 let mut sim = Simulation::new(&self.truth.shot(s)?, &self.base)
@@ -534,24 +585,35 @@ impl InversionView {
                 self.first_misfit = Some(inversion.misfit());
                 self.inversion = Some(inversion);
                 self.picture();
-                if iterations > 0 {
-                    Stage::Iterating(1)
-                } else {
-                    Stage::Done
-                }
+                self.entering_stage(0)
             }
-            Stage::Iterating(i) => {
+            Stage::Iterating(_) => {
                 let inversion = self.inversion.as_mut().expect("set up at the start");
+                let s = inversion.stage();
                 let stepped = inversion.iterate()?;
-                if stepped.is_none() {
-                    self.stopped = Some("no step lowers the misfit further".into());
+                if stepped.is_some() {
+                    self.iterations += 1;
+                    self.in_stage += 1;
+                } else {
+                    self.stopped = Some(if self.stages.len() > 1 {
+                        format!("no step lowers stage {}'s misfit further", s + 1)
+                    } else {
+                        "no step lowers the misfit further".into()
+                    });
                 }
                 self.picture();
-                if stepped.is_some() && i < iterations {
-                    Stage::Iterating(i + 1)
+                if stepped.is_some() && self.in_stage < self.stages[s].iterations {
+                    Stage::Iterating(self.iterations + 1)
                 } else {
-                    Stage::Done
+                    self.after_stage()
                 }
+            }
+            Stage::Staging(s) => {
+                let inversion = self.inversion.as_mut().expect("set up at the start");
+                inversion.begin_stage(s)?;
+                self.in_stage = 0;
+                self.picture();
+                self.entering_stage(s)
             }
             Stage::Done => Stage::Done,
         };
@@ -582,6 +644,7 @@ impl InversionView {
             Stage::Observing(s) => ("observing", Some(s), None),
             Stage::Starting => ("starting", None, None),
             Stage::Iterating(i) => ("iterating", None, Some(i)),
+            Stage::Staging(_) => ("staging", None, None),
             Stage::Done => ("done", None, None),
         };
         let inv = self.inversion.as_ref();
@@ -590,7 +653,13 @@ impl InversionView {
             "shot": shot,
             "iteration": iteration,
             "shots": self.cfg.sources.len(),
-            "iterations": self.settings.iterations,
+            "iterations": self.planned_iterations(),
+            "stages": self.stages,
+            "inversion_stage": match self.stage {
+                Stage::Staging(s) => s,
+                _ => self.inversion_stage(),
+            },
+            "stage_misfits": inv.map_or(json!([]), |i| json!(i.stage_misfits)),
             "parameters": self.settings.parameters,
             "units": self.units(),
             "done": self.done(),
@@ -815,6 +884,69 @@ mod tests {
              memory = 1"
         );
         (config("", &inversion), config(sphere, ""))
+    }
+
+    /// With frequency continuation the inversion starts each later stage as a unit of its
+    /// own and counts iterations over all of them; asked for none (the page's Gradient), it
+    /// stops after the first stage's start.
+    #[test]
+    fn steps_an_inversion_in_stages() {
+        let base = Path::new(".");
+        let staged = |extra: &str| {
+            let (mut start, truth) = inversion_pair(1);
+            let inv = start.inversion.as_mut().unwrap();
+            inv.iterations = None;
+            inv.stages = toml::from_str::<StagesToml>(extra).unwrap().stage;
+            (start, truth)
+        };
+        let (start, truth) = staged(
+            "[[stage]]\nmax_frequency = 10.0\niterations = 1\n\
+             [[stage]]\niterations = 1\nmisfit = \"traveltime\"",
+        );
+        let mut v = InversionView::new(&start, &truth, base).unwrap();
+        // Two shots, the start, two iterations and the second stage's start.
+        assert_eq!(v.units(), 6);
+        let mut stages = vec![v.stage()];
+        while v.advance().unwrap() {
+            stages.push(v.stage());
+            assert!(v.done() <= v.units());
+        }
+        stages.push(v.stage());
+        assert_eq!(
+            stages,
+            [
+                Stage::Observing(0),
+                Stage::Observing(1),
+                Stage::Starting,
+                Stage::Iterating(1),
+                Stage::Staging(1),
+                Stage::Iterating(2),
+                Stage::Done
+            ]
+        );
+        let status = v.status();
+        assert_eq!(status["stages"].as_array().unwrap().len(), 2);
+        assert_eq!(status["stage_misfits"].as_array().unwrap().len(), 2);
+        assert_eq!(status["history"][1]["stage"], 1);
+        assert_eq!(status["done"], status["units"]);
+
+        // No iterations: the gradient at the first stage's start.
+        let (mut start, truth) =
+            staged("[[stage]]\nmax_frequency = 10.0\niterations = 3\n[[stage]]\niterations = 2");
+        start.inversion.as_mut().unwrap().iterations = Some(0);
+        let mut v = InversionView::new(&start, &truth, base).unwrap();
+        assert_eq!(v.units(), 3);
+        while v.advance().unwrap() {}
+        let status = v.status();
+        assert_eq!(status["stages"][0]["max_frequency"], 10.0);
+        assert!(status["history"].as_array().unwrap().is_empty());
+        assert!(v.pictures.gradient.iter().any(Option::is_some));
+    }
+
+    /// `[[stage]]` tables, read on their own.
+    #[derive(serde::Deserialize)]
+    struct StagesToml {
+        stage: Vec<StageConfig>,
     }
 
     /// The inversion goes through its stages a unit at a time, lowers the misfit, draws every

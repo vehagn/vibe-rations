@@ -97,9 +97,18 @@ export function refreshForm(text) {
 export const settings = () => current;
 
 function setDisabled(disabled) {
-  for (const e of document.querySelectorAll("#settings input, #settings select, #settings button, #fwi .grid2 input, #fwi .check-line input, #fwi-parameters input")) {
+  for (const e of document.querySelectorAll("#settings input, #settings select, #settings button, #fwi .grid2 input, #fwi .grid2 select, #fwi .check-line input, #fwi-parameters input")) {
     e.disabled = disabled;
   }
+  if (!disabled) staged();
+}
+
+/// With [[inversion.stage]] tables, each stage gives its own iterations.
+function staged() {
+  const stages = (current?.inversion ?? current?.inversion_defaults)?.stage ?? [];
+  const input = document.querySelector('[data-inversion="iterations"]');
+  input.disabled = stages.length > 0;
+  input.title = stages.length ? `Set per stage: ${stages.map((s) => s.iterations).join(" + ")} in the configuration's [[inversion.stage]] tables` : "";
 }
 
 /// Applies `edits` to the configuration; false (and the reason shown) if they fail.
@@ -159,7 +168,7 @@ function inversionSection() {
 
 function editInversion(input) {
   const key = input.dataset.inversion;
-  const value = input.type === "checkbox" ? input.checked : number(input);
+  const value = input.type === "checkbox" ? input.checked : input.tagName === "SELECT" ? input.value : number(input);
   // An empty fixed_above means none; other numbers can't be empty.
   if (value === null && key !== "fixed_above") return fill();
   apply([...inversionSection(), { path: `inversion.${key}`, value }]);
@@ -295,6 +304,7 @@ function fill() {
   const inv = s.inversion ?? s.inversion_defaults;
   for (const box of document.querySelectorAll("#fwi-parameters input")) box.checked = inv.parameters.includes(box.value);
   for (const input of document.querySelectorAll("[data-inversion]")) setValue(input, inv[input.dataset.inversion]);
+  staged();
   for (const input of document.querySelectorAll("[data-range]")) setValue(input, inv[input.dataset.range]?.[Number(input.dataset.index)]);
 }
 

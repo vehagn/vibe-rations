@@ -19,6 +19,7 @@ use crate::config::{Config, PlaneKind};
 use crate::fd::Stencil;
 use crate::gradient::checkpoint_interval;
 use crate::grid::Grid;
+use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::receiver::Component;
 use crate::simulation::timing;
@@ -51,6 +52,11 @@ pub struct InversionSize {
     /// Pairs L-BFGS keeps.
     pub memory: usize,
     pub precondition: bool,
+    /// The most any stage's misfits hold for one shot besides the observed traces
+    /// ([`crate::misfit::Misfit::held_bytes`]): filtered traces, weights, phase kernels.
+    pub misfit_bytes: u64,
+    /// Whether it estimates the receivers' side of the illumination, held between stages.
+    pub receiver_side: bool,
 }
 
 /// What decides a run's memory.
@@ -166,6 +172,25 @@ impl Plan {
                 std::mem::size_of::<usize>() as u64 * n,
             ),
         ]);
+        if inversion.misfit_bytes > 0 {
+            // Before the free nodes' indices, which a test expects last.
+            let at = parts.len() - 1;
+            parts.insert(
+                at,
+                part(
+                    "the misfits' own arrays: filtered traces, weights, phase kernels",
+                    shots as u64 * inversion.misfit_bytes,
+                ),
+            );
+        }
+        if inversion.receiver_side {
+            // Before the free nodes' indices, which a test expects last.
+            let at = parts.len() - 1;
+            parts.insert(
+                at,
+                part("the receivers' side of the illumination", 8 * interior),
+            );
+        }
         Memory::of(parts)
     }
 
@@ -295,12 +320,34 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         .inversion
         .as_ref()
         .context("the configuration has no [inversion] section")?;
-    let (grid, steps) = timed(cfg, base)?;
+    let taylor = Stencil::taylor(cfg.scheme.order)?;
+    let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
+    let [vp_max, slowest] = Model::extremes(grid, &cfg.model, base)?;
+    let timing = timing(cfg, &grid, vp_max, slowest)?;
+    let steps = timing.steps;
+    // The traces' sampling and the sources' frequency, as `Inversion::new` sets them.
+    let interval = cfg.output.record_every.max(1) as f64 * timing.dt;
+    let source_frequency = Measure::source_frequency(cfg)?;
+    let receivers = cfg.receivers.positions()?.len();
+    let components = cfg.receivers.components.len();
+    let samples = steps.div_ceil(cfg.output.record_every.max(1));
+    let mut misfit_bytes = 0;
+    for stage in settings.stages()? {
+        let measure = Measure::of(&stage, settings, source_frequency);
+        misfit_bytes = misfit_bytes
+            .max(Misfit::held_bytes(&measure, receivers, components, samples, interval)? as u64);
+    }
     let size = InversionSize {
         shots: cfg.sources.len(),
         unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
         memory: settings.memory,
-        precondition: settings.precondition,
+        precondition: settings.precondition
+            || settings
+                .parameters
+                .iter()
+                .any(|&p| settings.scale.of(p) != 1.0),
+        misfit_bytes,
+        receiver_side: settings.precondition && settings.receiver_runs > 0,
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
 }
@@ -554,7 +601,7 @@ mod tests {
     #[test]
     fn counts_what_an_inversion_allocates() {
         use crate::inversion::{Inversion, Observed};
-        let model = |vs: f64| {
+        let model = |vs: f64, stages: &str| {
             format!(
                 r#"
                 [grid]
@@ -595,10 +642,11 @@ mod tests {
                 observed = "unused"
                 memory = 1
                 fixed_above = 85.0
+                {stages}
                 "#
             )
         };
-        let truth = Config::from_toml(&model(1350.0)).unwrap();
+        let truth = Config::from_toml(&model(1350.0, "")).unwrap();
         let observed: Vec<Observed> = (0..2)
             .map(|s| {
                 let mut sim = Simulation::new(&truth.shot(s).unwrap(), Path::new(".")).unwrap();
@@ -606,25 +654,40 @@ mod tests {
                 sim.receivers.traces.into()
             })
             .collect();
-        let cfg = Config::from_toml(&model(1200.0)).unwrap();
-        let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
-        let settings = cfg.inversion.clone().unwrap();
-        let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, Path::new("."))
-            .unwrap();
-        let mut inversion = Inversion::new(&cfg, start, observed, &settings).unwrap();
-        assert_eq!(
-            m.parts.last().unwrap().bytes as usize,
-            8 * inversion.unknowns(),
-            "the free nodes"
-        );
-        let first = inversion.iterate().unwrap().unwrap();
-        let second = inversion.iterate().unwrap().unwrap();
-        // The second gradient run had L-BFGS's one pair to hold.
-        assert!(
-            first.memory == 1 && !second.restarted,
-            "{first:?} {second:?}"
-        );
-        assert_eq!(m.peak, inversion.memory_bytes as u64, "\n{}", m.table());
+        // As recorded; with a stage that filters (and so keeps filtered copies); with the
+        // receivers' side of the illumination and a scale; and with the phase misfit's kernels,
+        // largest in its unfiltered stage.
+        let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
+        let receivers = "receiver_runs = 1\n[inversion.scale]\nvp = 0.5";
+        let phase = "misfit = \"phase\"\n[[inversion.stage]]\niterations = 2\n\
+                     [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1";
+        for stages in ["", filtering, receivers, phase] {
+            let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
+            let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
+            let settings = cfg.inversion.clone().unwrap();
+            let start =
+                Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, Path::new("."))
+                    .unwrap();
+            let mut inversion = Inversion::new(&cfg, start, observed.clone(), &settings).unwrap();
+            assert_eq!(
+                m.parts.last().unwrap().bytes as usize,
+                8 * inversion.unknowns(),
+                "the free nodes"
+            );
+            let first = inversion.iterate().unwrap().unwrap();
+            let second = inversion.iterate().unwrap().unwrap();
+            // The second gradient run had L-BFGS's one pair to hold.
+            assert!(
+                first.memory == 1 && !second.restarted,
+                "{stages}: {first:?} {second:?}"
+            );
+            assert_eq!(
+                m.peak,
+                inversion.memory_bytes as u64,
+                "{stages}\n{}",
+                m.table()
+            );
+        }
     }
 
     #[test]

@@ -175,11 +175,22 @@ export function showStatus({ status, running }) {
   drawMisfit();
 }
 
+/// ", stage 2 of 3 (below 8 Hz)" when the inversion has stages.
+function stageOf(s) {
+  const n = s.stages?.length ?? 1;
+  return n > 1 ? `, stage ${s.inversion_stage + 1} of ${n}${band(s.stages[s.inversion_stage])}` : "";
+}
+
+function band(stage) {
+  return stage?.max_frequency ? ` (below ${stage.max_frequency} Hz, ${stage.misfit})` : stage?.misfit ? ` (${stage.misfit})` : "";
+}
+
 function describe(s, running) {
   const what = {
     observing: `the true model's traces, shot ${s.shot + 1} of ${s.shots}`,
     starting: `the misfit and gradient at the start (${s.shots} shot(s))`,
-    iterating: `iteration ${s.iteration} of ${s.iterations}`,
+    iterating: `iteration ${s.iteration} of ${s.iterations}${stageOf(s)}`,
+    staging: `the start of stage ${s.inversion_stage + 1} of ${s.stages?.length}${band(s.stages?.[s.inversion_stage])}`,
     done: s.stopped
       ? `stopped after ${s.history.length} iteration(s): ${s.stopped}`
       : s.iterations

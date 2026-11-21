@@ -19,6 +19,7 @@ opens a shell there instead.
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
@@ -52,7 +53,8 @@ src/
   main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay, correlations
-  inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search
+  inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search, stages
+  misfit.rs      misfits and their exact derivatives: L2, time shifts, phase; zero-phase low-pass
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
@@ -90,6 +92,7 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
   common/        closed-form solutions and setup helpers the two share
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
@@ -126,6 +129,16 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The misfits meet the web page** (merged 2026-11-21). `InversionConfig.iterations` is now
+  an `Option` (stages give their own), so ask `InversionConfig::stages()` how many iterations
+  run, never the field. `view::InversionView` runs the stages: a later stage's start
+  (`Inversion::begin_stage`: its filtered misfits, L-BFGS afresh, the receivers' side
+  re-estimated) is a unit of its own (`Stage::Staging`), `Stage::Iterating` counts iterations
+  over every stage, and a stage that finds no step ends that stage, not the inversion. The
+  page's Gradient asks for `iterations = 0`; with stages that would be refused, so the view
+  turns it into the first stage with no iterations (the gradient as that stage measures the
+  misfit). The FWI tab chooses the misfit; stages are written in the TOML, and the
+  Iterations field steps aside when there are any.
 - **The web page edits, inverts and explains** (2026-11-21). The TOML stays the source of
   truth: the Settings form reads it (`settings::settings`, defaults filled in from `Config`) and
   writes into it (`settings::edit`, `toml_edit`), so comments and layout survive; new keys are
@@ -148,7 +161,42 @@ doesn't show.
   built-in browser's previews come from the main checkout's `.claude/launch.json`, so a
   worktree's build needs an entry there pointing at it (and its `out/`, since a separate
   `CARGO_TARGET_DIR` isn't in the shared volume).
-
+- **The receivers' side of the illumination** (`receiver_runs`, `Inversion::receiver_energy`).
+  The runs inject through `Solver::adjoint_op`, exactly as the adjoint injects residuals, and
+  each trace by `Misfit::receiver_weights`, so velocity and pressure receivers weigh as they
+  do in the gradient: exactly for L2, by each observed trace's energy (or slope's) for the
+  time shifts and phases, which scale every trace by its own amplitude. Weighing those by
+  component, as at first, let pressure (10⁶ times velocity) take over the estimate. A run
+  needs no sources in the configuration; it steps the solver itself. With a Hadamard matrix's signs
+  the cross terms cancel exactly (a unit test); with random ones only on average, which is
+  enough for a preconditioner. Off by default: with the top fixed it changed little; with
+  nothing fixed it helped (the log). The estimate is made at each stage's start and held
+  (8 bytes per node, in the memory plan); the source side is still recomputed every
+  iteration.
+- **Scaling the parameters** (`[inversion.scale]`). A factor $w$ per parameter on the
+  preconditioner is exactly a change of variables ($x = Dz$, $D^2 = w$), so it leaves the
+  L-BFGS pairs, the Armijo test and the bounds valid; 1 keeps every result bit for bit. Don't
+  equalise the classes automatically: relative unknowns already balance $v_s$ and $\rho$, and
+  in a research agent's trial equalising amplified $v_p$, which these data barely constrain,
+  into cross-talk ($v_p$ error 109–115% after 5 iterations). A
+  smaller $\rho$ factor trades density's recovery for less cross-talk.
+- **Misfits and frequency continuation** (`src/misfit.rs`, `[inversion] misfit`,
+  `[[inversion.stage]]`). Every misfit is a function of the samples with its *exact*
+  derivative, so the inversion's finite-difference check covers it
+  (`the_misfits_gradients_match_finite_differences`): don't swap in a textbook adjoint source
+  that assumes something about the data. Tromp et al.'s time-shift source $\dot s / \int s
+  \ddot s$ assumes the observed trace is a shifted copy, and was 45% off for traces of
+  different shape. Weights and trace selections come from the observed traces only; one that
+  depends on the synthetic makes the misfit jump between models. The time shift is a
+  parabola through the correlation's peak: continuous, but its derivative jumps where the
+  peak changes lag, so check it at small steps ($h = 10^{-3}$, where round-off in the
+  shifts holds it near $10^{-4}$). The phase misfit is
+  regularised ($z/\sqrt{|z|^2 + \epsilon^2}$): taken literally, $\Delta\varphi^2$ has a branch
+  cut and blows up where the synthetic lacks an arrival. The forward–backward Butterworth
+  filter, started at rest, is symmetric, so it is its own adjoint; zeros appended to the end
+  keep it so and stop the forward pass's ringing from being cut off (it distorted the last
+  ~3/f_c of every trace), but steady-state starts or mirrored padding would not. A stage rebuilds the misfits (balancing weights from the filtered data)
+  and clears L-BFGS, whose pairs describe the previous misfit.
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients
   would otherwise change with every model it tries) as well as $\Delta t$ and

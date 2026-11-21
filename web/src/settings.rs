@@ -103,8 +103,16 @@ fn default_inversion() -> InversionConfig {
     toml::from_str("observed = \"observed\"").expect("the defaults parse")
 }
 
+/// `[inversion]` as the form shows it: the iterations it runs when it gives none and has no
+/// stages (`InversionConfig::stages`), so the form shows the number, not a blank.
 fn inversion_json(i: &InversionConfig) -> Json {
-    serde_json::to_value(i).expect("InversionConfig serialises")
+    let mut v = serde_json::to_value(i).expect("InversionConfig serialises");
+    if let Ok([only]) = i.stages().as_deref()
+        && i.stages.is_empty()
+    {
+        v["iterations"] = only.iterations.into();
+    }
+    v
 }
 
 /// Keys whose values are whole numbers; every other number is written as a float, so that
@@ -765,7 +773,7 @@ dir = "out/test"
         ]));
         let c = Config::from_toml(&text).unwrap();
         let i = c.inversion.unwrap();
-        assert_eq!(i.iterations, 3);
+        assert_eq!(i.iterations, Some(3));
         assert_eq!(i.vs_range, Some([600.0, 2000.0]));
         assert!(
             text.contains("\n[inversion]\nobserved = \"observed\"\n"),
@@ -856,7 +864,7 @@ dir = "out/test"
         .unwrap();
         let (start, _) = synthetic(&with, &truth, "obs").unwrap();
         let i = Config::from_toml(&start).unwrap().inversion.unwrap();
-        assert_eq!((i.iterations, i.observed.to_str()), (2, Some("obs")));
+        assert_eq!((i.iterations, i.observed.to_str()), (Some(2), Some("obs")));
         assert!(synthetic(CONFIG, "[grid]\npoints = [1, 2, 3]", "obs").is_err());
         // The truth's model alone, as the page shows it, makes the same pair again.
         let shown = model_of(&true_text).unwrap();

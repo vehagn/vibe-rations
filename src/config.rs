@@ -479,6 +479,43 @@ impl Parameter {
     }
 }
 
+/// What an inversion's misfit compares (`crate::misfit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MisfitKind {
+    /// Half the weighted sum of squared differences, sample by sample.
+    #[default]
+    L2,
+    /// Half the sum of each trace's squared cross-correlation time shift (Luo & Schuster
+    /// 1991).
+    Traveltime,
+    /// The time–frequency phase misfit (Fichtner et al. 2008).
+    Phase,
+}
+
+impl MisfitKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            MisfitKind::L2 => "l2",
+            MisfitKind::Traveltime => "traveltime",
+            MisfitKind::Phase => "phase",
+        }
+    }
+}
+
+/// One stage of an inversion: its iterations, on traces low-pass filtered up to
+/// `max_frequency`, with its own misfit if it names one.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageConfig {
+    /// The corner of the low-pass filter applied to observed and synthetic traces alike, in
+    /// Hz: where its amplitude halves. None: the traces as recorded.
+    pub max_frequency: Option<f64>,
+    pub iterations: usize,
+    /// The stage's misfit, instead of the inversion's.
+    pub misfit: Option<MisfitKind>,
+}
+
 /// An L-BFGS inversion of the observed traces for the model (`invert`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -490,8 +527,21 @@ pub struct InversionConfig {
     /// What to update; the rest stays as the configuration's model has it.
     #[serde(default = "default_parameters")]
     pub parameters: Vec<Parameter>,
-    #[serde(default = "default_iterations")]
-    pub iterations: usize,
+    /// Iterations, when there are no stages: 10 by default.
+    pub iterations: Option<usize>,
+    /// What the misfit compares: `l2` (the default), `traveltime` or `phase`.
+    #[serde(default)]
+    pub misfit: MisfitKind,
+    /// For the `traveltime` misfit: the largest time shift sought, in seconds.
+    pub max_shift: Option<f64>,
+    /// The order of the stages' Butterworth low-pass filters (each of its two passes).
+    #[serde(default = "default_filter_order")]
+    pub filter_order: usize,
+    /// Frequency continuation (Bunks et al. 1995): stages run in turn, each with its own
+    /// low-pass filter, iterations and misfit, L-BFGS starting afresh in each. Without them,
+    /// one stage of `iterations` on the traces as recorded.
+    #[serde(default, rename = "stage")]
+    pub stages: Vec<StageConfig>,
     /// Model changes and gradient changes L-BFGS remembers.
     #[serde(default = "default_memory")]
     pub memory: usize,
@@ -516,6 +566,19 @@ pub struct InversionConfig {
     /// The fraction of the largest energy added to every node's before dividing by it.
     #[serde(default = "default_water_level")]
     pub water_level: f64,
+    /// Also divide by the receivers' side of the illumination: the energy, at each node, of
+    /// waves sent out from every receiver at once with random signs, averaged over this many
+    /// runs at the start of each stage (a receiver-side pseudo-Hessian). 0, the default, for
+    /// the source side alone.
+    #[serde(default)]
+    pub receiver_runs: usize,
+    /// Factors on the preconditioner for the inverted parameters: a change of variables that
+    /// sets each one's share of the steps, e.g. `rho = 0.3` where density takes up what the
+    /// velocities should explain. Positive, 1 by default. Only their ratios matter: one
+    /// factor on every inverted parameter, or on the only one, changes nothing (limit the
+    /// steps with `initial_step` and `max_step`).
+    #[serde(default)]
+    pub scale: ParameterScale,
     /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice
     /// the largest of the starting model's, and for vp no faster than the time step allows.
     /// λ ≥ 0 too: vs stays below vp/√2, or vp above √2 vs where vs isn't inverted. The
@@ -525,11 +588,78 @@ pub struct InversionConfig {
     pub rho_range: Option<[f64; 2]>,
 }
 
+/// A factor for each parameter an inversion can update.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterScale {
+    #[serde(default = "one")]
+    pub vp: f64,
+    #[serde(default = "one")]
+    pub vs: f64,
+    #[serde(default = "one")]
+    pub rho: f64,
+}
+
+impl Default for ParameterScale {
+    fn default() -> Self {
+        Self {
+            vp: 1.0,
+            vs: 1.0,
+            rho: 1.0,
+        }
+    }
+}
+
+impl ParameterScale {
+    pub fn of(&self, p: Parameter) -> f64 {
+        match p {
+            Parameter::Vp => self.vp,
+            Parameter::Vs => self.vs,
+            Parameter::Rho => self.rho,
+        }
+    }
+
+    /// Whether every factor is 1.
+    pub fn is_unit(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+impl InversionConfig {
+    /// The stages to run, each with its misfit: the configured ones, or one of `iterations`
+    /// (10 by default) on the traces as recorded.
+    pub fn stages(&self) -> Result<Vec<StageConfig>> {
+        if self.stages.is_empty() {
+            return Ok(vec![StageConfig {
+                max_frequency: None,
+                iterations: self.iterations.unwrap_or(10),
+                misfit: Some(self.misfit),
+            }]);
+        }
+        ensure!(
+            self.iterations.is_none(),
+            "give the iterations of each [[inversion.stage]], not of [inversion]"
+        );
+        Ok(self
+            .stages
+            .iter()
+            .map(|s| StageConfig {
+                misfit: Some(s.misfit.unwrap_or(self.misfit)),
+                ..s.clone()
+            })
+            .collect())
+    }
+}
+
 fn default_parameters() -> Vec<Parameter> {
     vec![Parameter::Vp, Parameter::Vs]
 }
-fn default_iterations() -> usize {
-    10
+fn default_filter_order() -> usize {
+    4
 }
 fn default_memory() -> usize {
     5

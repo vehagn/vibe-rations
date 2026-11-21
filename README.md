@@ -130,7 +130,9 @@ a free surface $z = 0$ is the surface.
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
-| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, bounds `vp_range`, `vs_range`, `rho_range` |
+| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, bounds `vp_range`, `vs_range`, `rho_range` |
+| `[inversion.scale]` | Relative factors on the inverted parameters' steps: `vp`, `vs`, `rho` (1 by default; only their ratios matter) |
+| `[[inversion.stage]]` | Frequency continuation: `max_frequency` (low-pass corner, Hz), `iterations`, `misfit` |
 
 The wavelet is the moment rate of a moment-tensor source and the force of a force source. A
 Ricker wavelet peaks at 1, so its amplitude is a peak rate; a Gaussian has unit area, so its
@@ -195,6 +197,34 @@ just run truth.toml --shots --out out/observed
 just invert guess.toml --out out/inverted   # guess.toml: [inversion] observed = "out/observed"
 ```
 
+The misfit is `l2` by default: half the squared differences, each component weighted by
+1/(its observed energy) with `balance`. `traveltime` measures each trace's cross-correlation
+time shift (Luo & Schuster 1991), up to `max_shift` seconds; `phase` compares the traces'
+phases in a time–frequency (Gabor) transform (Fichtner et al. 2008), regularised where the
+synthetic is faint. Both measure every trace alike, whatever its amplitude, except that they
+leave out traces quieter than $10^{-4}$ of the loudest of their kind (velocity or pressure),
+whose shift or phase would be noise. Each is an exact
+function of the samples, so the gradient stays exact. Frequency continuation (Bunks et al.
+1995) runs stages in turn, each low-pass filtering observed and synthetic traces at its
+`max_frequency` (a zero-phase Butterworth of `filter_order`, 4 by default) and starting
+L-BFGS afresh:
+
+```toml
+[inversion]
+observed = "out/observed"
+misfit = "traveltime"   # stages without their own misfit use this one
+max_shift = 0.05
+
+[[inversion.stage]]
+max_frequency = 5.0
+iterations = 5
+
+[[inversion.stage]]
+max_frequency = 10.0
+misfit = "l2"
+iterations = 5
+```
+
 
 ## Memory
 
@@ -238,7 +268,8 @@ against a real gradient run.
 `just memory <config> --invert` counts an inversion: one shot's gradient run at a time, every
 shot's observed traces, three models (as it stands, the start, and the one stepped to), the
 gradient and illumination summed over the shots, and per unknown the L-BFGS pairs ($16m$
-bytes for memory $m$) and five more numbers. Unknowns are counted at every free node, so a
+bytes for memory $m$) and five more numbers; with a filtering stage, a filtered copy of the
+observed traces too. Unknowns are counted at every free node, so a
 model with fluids (no $v_s$ unknown there) needs a little less. A third test checks it against
 a real inversion.
 
@@ -568,13 +599,25 @@ Planned next, following Fichtner (2011), ch. 7–11:
    transform of the residuals; since the transformed traces equal the time-continuous ones
    for every model, their gradient should too, which takes the time error out of the
    gradient as well. To be measured.
-5. **Misfits and adjoint sources.** L2 waveform first, then cross-correlation time shifts and
-   time–frequency phase misfits (Fichtner 2011, ch. 11).
-6. **Optimisation** (L-BFGS done: `src/inversion.rs`). Preconditioned L-BFGS (Nocedal 1980;
-   Liu & Nocedal 1989) on relative model changes, with bounds and an Armijo line search; each
-   source a shot; the illumination (Shin et al. 2001) as preconditioner. Still to come:
-   frequency continuation (Fichtner et al. 2013), receiver-side preconditioning, and
-   parameter scaling for $\rho$.
+5. **Misfits and adjoint sources** (done: `src/misfit.rs`). L2 waveforms; cross-correlation
+   time shifts (Luo & Schuster 1991), with the exact derivative of the parabola-refined
+   shift rather than the shifted-copy approximation (Tromp et al. 2005), which was 45% off
+   for traces of different shape; and the time–frequency phase misfit (Fichtner et al. 2008),
+   regularised so that it stays smooth where the synthetic lacks an arrival. Each is an exact
+   function of the samples; the inversion's gradient matches finite differences to
+   $4.4 \times 10^{-7}$ (filtered L2) and $4.2 \times 10^{-6}$ (phase), and the time shifts to
+   $1.3 \times 10^{-4}$, round-off in their single-precision traces (their derivative jumps
+   where a correlation's peak moves to the next lag). Still to come: windowing of single
+   arrivals.
+6. **Optimisation** (L-BFGS and frequency continuation done: `src/inversion.rs`).
+   Preconditioned L-BFGS (Nocedal 1980; Liu & Nocedal 1989) on relative model changes, with
+   bounds and an Armijo line search; each source a shot; the illumination (Shin et al. 2001)
+   as preconditioner. Frequency continuation (Bunks et al. 1995) in stages, each low-pass filtering observed and synthetic traces with a zero-phase
+   Butterworth filter, which is its own transpose. A factor per parameter on the
+   preconditioner (`[inversion.scale]`), which is a change of variables, to curb density's
+   cross-talk. The receivers' side of the illumination (`receiver_runs`), from runs that send
+   from every receiver at once with random signs (Krebs et al. 2009), multiplies the
+   sources' side, as in the approximate Hessian's diagonal (Plessix & Mulder 2004).
 7. Later: Born modelling and Hessian-vector products for truncated-Newton FWI (Métivier et
    al. 2013), source estimation, viscoelasticity.
 

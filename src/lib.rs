@@ -15,6 +15,7 @@ pub mod grid;
 pub mod image;
 pub mod inversion;
 pub mod memory;
+pub mod misfit;
 pub mod model;
 pub mod npy;
 pub mod receiver;

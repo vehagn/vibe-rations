@@ -865,8 +865,457 @@ $10^{-5}$ off at one step, scan $h$ before suspecting the gradient.
 
 **Reproduce:** `just physics inversion`; `just unit counts_what_an_inversion_allocates`.
 
+## 2026-11-20 — Misfits beyond L2: filtered traces, time shifts and phases
+
+**Question.** Roadmap step 5: the L2 waveform misfit is the only one, and it cycle-skips once
+the starting model is half a period off [@bunks1995]. Which misfits to add, and how to keep
+the gradient that of the discrete run, checked by finite differences, as the adjoint and the
+gradient are? Each misfit must be a function of the sampled traces with its *exact* derivative
+as the adjoint source (`gradient::gradient` takes $(\chi, \partial\chi/\partial s)$).
+
+**Method** (`src/misfit.rs`). Three pieces, each derived for the samples, not for continuous
+signals, with a literature and numerical check by research agents (Crossref for every
+reference; the papers' equations read where open access).
+
+*Low-pass filter.* A digital Butterworth filter [@butterworth1930] of order $n$: the analog
+prototype's poles, prewarped, through the bilinear transform, as second-order sections,
+$|H(f)|^2 = 1 / (1 + (\tan \pi f \Delta / \tan \pi f_c \Delta)^{2n})$. Applied forwards and then
+backwards, starting at rest, with no padding. A causal recursion started at rest is, on $N$
+samples, the lower-triangular Toeplitz matrix $H$ of its impulse response; reversing time
+($R$) gives $R H R = H^T$, so the forward–backward filter $F = R H R H = H^T H$ is symmetric
+and positive semi-definite. Hence the adjoint source of $\chi(F s, F d)$ is
+$F\, \partial\chi/\partial(F s)$: the same filter, no separate transpose. Libraries that pad
+the ends or start from steady state (e.g. SciPy's `filtfilt`) are not symmetric. The corner
+$f_c$ is where the zero-phase filter halves the amplitude.
+
+*Cross-correlation time shift* [@luo1991]. Per trace, $C(k) = \sum_n s[n + k]\, d[n]$ for
+$|k| \le K$ (`max_shift`), $k^*$ its largest, and a parabola through
+$a, b, c = C(k^* - 1), C(k^*), C(k^* + 1)$:
+$$T = (k^* + \delta)\,\Delta, \qquad \delta = \frac{a - c}{2D}, \quad D = a - 2b + c, \qquad \chi = \tfrac12 \sum T^2 .$$
+$T > 0$ when the synthetic is late: the sign of [@tromp2005]'s "predicted minus observed",
+opposite to [@luo1991]'s $\Delta\tau$ and [@dahlen2000]'s $\delta T$. With
+$\partial C(j)/\partial s[m] = d[m - j]$,
+$$\frac{\partial T}{\partial s[m]} = \frac{\Delta}{D}\Big[(\tfrac12 - \delta)\, d[m - k^* + 1] + 2\delta\, d[m - k^*] - (\tfrac12 + \delta)\, d[m - k^* - 1]\Big],$$
+the observed trace's slope at the shift found, divided by the correlation's curvature: the
+discrete form of [@luo1991]'s eq. 7b. For $|k^*| < K$, $b \ge a, c$ gives $D \le 0$ and
+$|\delta| \le \frac12$, and where $k^*$ jumps to the next lag both parabolas give the same half
+sample: $T$ is continuous, its derivative jumps. At $|k^*| = K$, $\delta$ is held within
+$\pm\frac12$ (no derivative while held), so $T$ saturates at $\pm(K + \frac12)\Delta$ instead of
+extrapolating; a synthetic that correlates positively nowhere (a silent one) gets that
+saturated value, so a model cannot lower the misfit by silencing a trace. Traces quieter than
+$10^{-4}$ of the loudest of their kind (velocity, pressure), judged on the observed data only,
+are left out, so the selection does not depend on the model.
+
+*Time–frequency phase* [@fichtner2008]. A Gabor transform with a unit-norm Gaussian window of
+width $\sigma = 1/f_0$ ("the dominant period", their §2.2.3), truncated at $\pm 3\sigma$, windows
+every $\sigma/2$, frequencies every $1/(4\pi\sigma)$ from the first above zero to $1.2 f_{hi}$
+(the Nyquist cell, being real, is left out); $f_0$ is the stage's corner frequency or the
+sources' dominant frequency, $f_{hi}$ the corner or $2.5 f_0$. They define
+$\chi = \int W^2 \Delta\varphi^2$ with $\Delta\varphi = \arg(\tilde u\, \tilde u_0^*)$ and
+$W = |\tilde u_0|$ or $\log(1 + |\tilde u_0|)$ normalised. Taken literally on samples it has two
+non-differentiable features: a branch cut at $\Delta\varphi = \pm\pi$, and $1/|\tilde u|$ where
+the synthetic lacks an arrival that the data have (any scatterer missing from the starting
+model), which in a prototype made the gradient about $10^7$ times larger there and the
+finite-difference check fail at every step. We compare instead
+$$\chi = \tfrac12 \sum_{\text{cells}} W^2 |u - u_0|^2, \qquad u = \frac{z}{\sqrt{|z|^2 + \epsilon^2}},$$
+$z$ the synthetic's coefficient, $u_0$ likewise the observed one's, $\epsilon = 0.05 \max|z_0|$
+per trace. Where both are large, $|u - u_0|^2 = 2 - 2\cos\Delta\varphi \approx \Delta\varphi^2$; it
+is smooth everywhere and bounded where $|z| \to 0$. $W = \text{taper}(f)\, |z_0| / \max|z_0|$
+where that ratio is at least 0.05, else 0 (Kristeková et al. weight by the reference's
+$|W_r|$ too [@kristekova2009]), from the observed trace alone, normalised to $\sum W^2 = 1$ per component, like the L2 misfit's
+balancing. With $q = |z|^2 + \epsilon^2$ and $e = u - u_0$,
+$d\chi = \mathrm{Re}(A\, dz)$, $A = W^2 q^{-1/2} (\bar e - \mathrm{Re}(\bar e z)\, \bar z / q)$, and
+$dz = G\, ds$ with $G$ the transform's kernel, so the adjoint source is $\mathrm{Re}(G^T A)$.
+LASIF's implementation [@krischer2015] was read and not followed: its weight depends on the
+synthetic, its denominator is a water level and its resampling is not transposed, so its
+adjoint source is not the derivative of its misfit.
+
+**Results** (`just unit misfit`).
+
+- Filter: $\langle F x, y\rangle = \langle x, F y\rangle$ to $8.9 \times 10^{-15}$ (relative); the measured gain
+  matches the squared Butterworth response to $10^{-3}$ at orders 1–6; a pulse inside the band
+  keeps its peak's sample.
+- Time shift, f64: central differences agree with the derivative to $10^{-6}$ (relative)
+  along four directions, between lag jumps. Parabola bias, Ricker at $P$ samples per peak
+  period, true shifts across a sample, at most 0.049 samples at $P = 5$ (1.0% of a period), 0.011
+at 10 (0.11%), $2.8 \times 10^{-3}$ at 20 and $4.4 \times 10^{-4}$ at 50 ($9 \times 10^{-6}$ of a
+period), falling as $P^{-2}$. The bias is odd and zero at whole and half
+  samples, so it does not move the minimum for consistent data. Against the familiar
+  adjoint source $T\,\dot s / \int s \ddot s$ [@tromp2005; @dahlen2000], which assumes $d$ is a
+  shifted copy of $s$: it agrees to $1.5 \times 10^{-7}$ for a whole-sample shift of a copy and
+$9.3 \times 10^{-4}$ for 3.3 samples, but for traces of different shape (two Rickers against
+one) the two point 27° apart (cosine 0.89) and differ by 45%. Using it would fail the
+finite-difference check.
+- Phase: $\mathrm{Re}\langle G x, a\rangle = \langle x, G^T a\rangle$ to $10^{-12}$; finite
+  differences to $10^{-6}$ with an arrival in the synthetic that the data lack; identical
+  traces give 0, a synthetic three times too loud $1.1 \times 10^{-4}$ (from $\epsilon$, in the
+  faint cells) against 0.29 for one shifted by a tenth of a period that has an extra arrival.
+  Cells at 12 Hz and 1 ms
+  sampling: windows every 42 samples, 250 samples either side, 37 frequencies.
+- Through `Misfit` (f32 traces, weights, filter), all three misfits, filtered or not, agree
+  with central differences to $2 \times 10^{-3}$ (f32 round-off).
+
+**Decision.** Keep the parabola (closed form, local, exact derivative); its bias is below
+$10^{-3}$ of a period at the sampling these runs record. Use the regularised phase misfit,
+documented as such, rather than $\Delta\varphi^2$ literally. Weights and selections come from the
+observed data only, so each misfit is one smooth (time shift: piecewise smooth) function of
+the synthetics.
+
+**Reproduce:** `just unit misfit`; the numbers above,
+`cargo test --release --lib misfit_study -- --ignored --nocapture`.
+
+## 2026-11-20 — Choosing the misfit, and frequency continuation
+
+**Question.** Roadmap step 6 asks for frequency continuation: invert the low frequencies
+first, whose misfit has wider basins, then add the higher ones [@bunks1995]; frequency-domain
+codes choose the frequencies by the survey's geometry [@sirgue2004], and Fichtner et al.
+broaden the period band as the iterations go [@fichtner2013, §3.2.4; their "multiscale" is
+mainly about spatial scales]. How should stages and the new misfits (previous entry) enter
+the inversion without losing the exactness of its gradient?
+
+**Method** (`src/inversion.rs`, `[inversion] misfit`, `[[inversion.stage]]`). A stage
+low-pass filters the observed and the synthetic traces alike at its `max_frequency`, the
+standard way to apply a multiscale strategy in the time domain [@bunks1995], and runs its
+`iterations` with its own misfit, or the inversion's. Bunks et al. filtered the source
+wavelet and the data instead [as described by @boonyasiriwat2009], which lets the low stages
+run on coarser grids; here the grid and $\Delta t$ are pinned for the gradient's exactness, so
+that advantage is gone, and a filtered source can only give a causal filter, not the zero-phase
+one. Filtering the traces keeps one simulation per shot for every stage, and the filter is its
+own transpose, so the adjoint source needs nothing more. At each stage's start
+(`Inversion::begin_stage`): each shot's misfit is rebuilt from the observed traces (shared,
+not copied, when unfiltered); the L2 misfit's balancing weights are taken from the *filtered*
+observed traces; the phase misfit's scale $f_0$ is the stage's corner (the sources' dominant
+frequency without one); L-BFGS forgets its pairs, since $(s, y)$ pairs describe the curvature
+of another misfit [@nocedal2006] (Modrak & Tromp found restarting at each transition faster in
+all nine of their test cases, and without it four failed [@modrak2016, §8.1]); and the misfit, gradient and preconditioner are evaluated
+afresh at the model as it stands. The unknowns stay relative to the starting model, so stages
+continue one another's model. Every stage's filter is checked against the traces' Nyquist
+frequency before the first one runs. Without stages there is one stage on the traces as
+recorded, so the defaults reproduce the previous inversion bit for bit: the unfiltered L2
+misfit is still `l2_misfit` with the same weights.
+
+**Gradient checks.** The inversion's gradient against extrapolated central differences
+down the gradient (`the_inversion_gradient_matches_finite_differences`' model: two shots,
+$v_s$, $\rho$ and $v_p$, velocity and pressure), relative error, at steps $h$ and $h/2$:
+
+| Misfit | $h = 2 \times 10^{-3}$ | $5 \times 10^{-3}$ | $10^{-2}$ | $2 \times 10^{-2}$ |
+|---|---|---|---|---|
+| L2, filtered at 10 Hz | $1.4 \times 10^{-5}$ | $1.0 \times 10^{-5}$ | $1.5 \times 10^{-5}$ | $1.8 \times 10^{-4}$ |
+| time shifts | $4.3 \times 10^{-5}$ | $2.0 \times 10^{-4}$ | $4.4 \times 10^{-4}$ | $5.6 \times 10^{-4}$ |
+| time shifts, filtered at 10 Hz | $7.5 \times 10^{-6}$ | $3.1 \times 10^{-6}$ | $2.2 \times 10^{-4}$ | $1.7 \times 10^{-3}$ |
+| phase | $3.9 \times 10^{-5}$ | | $4.2 \times 10^{-6}$ | |
+| phase, filtered at 10 Hz | $3.4 \times 10^{-5}$ | | $1.0 \times 10^{-5}$ | |
+
+The filtered L2 and phase misfits behave like the plain L2 one (previous entries): round-off
+in single-precision traces below $h \approx 10^{-2}$, the extrapolation's $h^4$ above. The time
+shifts do not converge cleanly with $h$: their plain differences at $5 \times 10^{-3}$ were
+$7.5 \times 10^{-5}$ and, at half the step, $1.7 \times 10^{-4}$, worse. Each trace's shift is
+continuous but its derivative jumps where the correlation's peak moves to the next lag
+(previous entry), and with 42 traces some cross a jump within a few $10^{-3}$ of relative
+model change. The jumps are small (in a prototype the slope changed by 4%, 2% and 1% at 5, 10 and
+20 samples per period, less at the 70 these traces have, 100 filtered), so the check holds at
+small steps; a wrong derivative would be off by tens of per cent. Low-pass filtering makes the traces smoother and
+the check cleaner.
+
+**Memory.** A filtering stage keeps a filtered copy of every shot's observed traces; the plan
+(`memory --invert`) counts it when any stage filters, and `counts_what_an_inversion_allocates`
+still matches a real inversion byte for byte, with and without a filtering stage.
+
+**Decision.** The test checks filtered L2 and phase at $h = 10^{-2}$ and the filtered time
+shifts at $2 \times 10^{-3}$, all within the existing $3 \times 10^{-5}$
+(`the_misfits_gradients_match_finite_differences`). `iterations` beside stages is refused
+rather than guessed at.
+
+**Reproduce:** `just physics misfits_gradients`; `just unit stages`;
+`just unit counts_what_an_inversion_allocates`.
+
+## 2026-11-20 — Filtering up to the record's end
+
+**Question.** A research agent's check of the stages (previous entry) against ObsPy's
+filtering [@beyreuther2010] and the literature found the filter right (symmetric to
+$10^{-14}$, the same operator as ObsPy's zero-phase `lowpass`) but inexact near the end of a
+record: the forward pass rings on for several periods of the corner after the last sample,
+and the record cut that ringing off, so even a trace at rest by its end came out distorted.
+How much, and does padding keep the filter its own transpose?
+
+**Method.** Append $M$ zeros to each trace, filter forwards and backwards, and keep the first
+$N$ samples: $G = P^T F P$ with $P$ the padding, symmetric because $F$ is. The slowest pole of
+an order-$n$ Butterworth filter decays as $e^{-2\pi f_c \sin(\pi/2n)\, t}$, so
+$M = \lceil 2.4 / (f_c \Delta \sin(\pi / 2n)) \rceil$ samples bring it below $10^{-6}$ (2091 samples
+at 3 Hz, 1 ms, order 4). The start needs nothing: the forward pass runs first, from rest, so
+a trace at rest at its start is filtered exactly there. A 12 Hz Ricker filtered at 3 Hz was
+compared with the same pulse in a record ten times as long.
+
+**Results.** Largest error relative to the filtered pulse's peak:
+
+| Pulse ends before the record does | Without zeros | With them |
+|---|---|---|
+| about $0.5 / f_c$ | 0.56 | $8.1 \times 10^{-14}$ |
+| about $3 / f_c$ | $1.4 \times 10^{-3}$ | $3.0 \times 10^{-14}$ |
+
+The padded filter stays symmetric to $10^{-12}$ (unit test). Through the inversion's
+finite-difference check (previous entry's model, whose 0.25 s records at a 10 Hz corner are
+2.5 periods of the corner long, so their ends mattered), the filtered L2 misfit's gradient now
+agrees to $4.4 \times 10^{-7}$ at $h = 10^{-2}$ ($1.5 \times 10^{-5}$ before). The filtered time
+shifts changed with the traces, and at $h = 2 \times 10^{-3}$, which had happened to miss every
+lag jump before, the coarse difference now crossed one ($8.5 \times 10^{-4}$). Scanning $h$:
+$2.2, 1.4, 1.3 \times 10^{-4}$ at $h = 2.5 \times 10^{-4}, 5 \times 10^{-4}, 10^{-3}$, no trend,
+which is round-off in the shifts of single-precision traces; $8.5 \times 10^{-4}$ and
+$2.0 \times 10^{-3}$ at $2 \times 10^{-3}$ and $3 \times 10^{-3}$, the jumps.
+
+**Decision.** Pad. The time shifts' check runs at $h = 10^{-3}$ against $5 \times 10^{-4}$: their
+derivative is exact between lag jumps, a wrong one would be off by tens of per cent, and a
+smooth sub-sample estimate (Newton on the correlation's band-limited interpolant, which a
+research prototype found unbiased and free of jumps) would cost all $2N - 1$ lags of every
+trace without an FFT; it stays an option if the jumps hamper L-BFGS. Records shorter than a
+few periods of a stage's corner are still edge-dominated: a cut arrival can't be filtered
+correctly by any filter.
+
+**Reproduce:** `just physics misfits_gradients`; the table,
+`cargo test --release --lib misfit_study -- --ignored --nocapture`.
+
+## 2026-11-21 — The misfits and stages on two test inversions
+
+**Question.** Do the new misfits and frequency-continuation stages (previous entries) help
+the inversion, and where? Frequency continuation and traveltime-like misfits exist to widen
+the basin of attraction when the starting model is more than half a period off
+[@bunks1995; @luo1991; @fichtner2008]; with a start inside the basin, L2 should do at least as
+well.
+
+**Method** (`tests/inversion_study.rs`, `just study`). Two surveys, each inverted from the
+same start by every variant; after each stage, the balanced L2 misfit of the model (one scale
+for every variant, relative to the start's) and the model error over a target, relative to
+the start's error.
+
+- *Sphere*: `an_inversion_finds_a_sphere`'s survey (two force shots at 12 Hz, 50 surface
+  receivers, the top 60 m fixed), $v_p$ and $v_s$ from the homogeneous start, 6 iterations;
+  the target is the sphere.
+- *Slow start*: a homogeneous model ($v_p = 2400$, $v_s = 1300$ m/s), started 20% too slow
+  in both, 60 × 36 × 28 nodes of 10 m, two force shots at 30 m depth and 400 m apart, 43
+  receivers on a 420 m surface line, 0.5 s, nothing fixed, 8 iterations. At the far offsets
+  (about 410 m) the start's P waves come about half a period (43 ms at 12 Hz) late and its S
+  waves about a full period (79 ms); the S waves are half a period late at about 220 m. The
+  target is every free node below 60 m.
+
+**Results.**
+
+| Sphere, 6 iterations | L2 left | $v_s$ error | $v_p$ error |
+|---|---|---|---|
+| L2 | 5.4% | 81.1% | 100.9% |
+| L2 below 6 Hz (3), then all (3) | 36.1% → 7.1% | 82.8% → 78.9% | 98.9% |
+| time shifts (3), then L2 (3) | 61.1% → 9.7% | 95.9% → 86.5% | 100.6% |
+| phase (6) | 12.4% | 86.8% | 101.5% |
+| phase (3), then L2 (3) | 32.5% → 7.9% | 94.8% → 84.4% | 100.9% |
+
+| Slow start, 8 iterations | L2 left | $v_s$ error below 60 m | $v_p$ error |
+|---|---|---|---|
+| L2 | 10.5% | 101.7% | 100.3% |
+| L2 below 4 Hz (3), 8 Hz (3), then all (2) | 86.3% → 55.4% → 35.1% | 100.0% | 100.2% |
+| time shifts (4), then L2 (4) | 67.0% → 16.6% | 99.3% | 99.9% |
+| phase (4), then L2 (4) | 88.4% → 29.2% | 100.7% | 100.1% |
+
+Each variant took 70–80 s (sphere) or 170–290 s (slow start) on 4 cores shared with other
+work.
+
+On the sphere, whose start is well inside L2's basin, L2 fits the data best; going through
+6 Hz first ends with the smallest $v_s$ error (78.9% against 81.1%) at a little more misfit.
+The time shifts and phases ignore amplitudes, so they fit less of the L2 misfit, and three
+L2 iterations afterwards don't make up for it. On the slow start the test does not
+discriminate: no variant changed the deep model in 8 iterations (errors 99–102%), while L2
+lowered its misfit to 10.5%: the updates went where the preconditioned gradient is largest,
+around the sources and receivers, which nothing held fixed here. The low-passed stages kept
+little of the data's energy (a 12 Hz Ricker keeps about 0.5% of its energy below 4 Hz, as a
+research agent measured for the filter) and moved slowly.
+
+**Decision.** Keep L2 on the traces as recorded as the default; the misfits and stages are
+options, with exact gradients, for starts outside L2's basin. Testing that they widen the
+basin needs a survey with more propagation (several wavelengths to the targets) and more
+iterations than this machine affords for a test, and a reference for what reaches the deep
+model (fixing the near-surface, or the receivers' side of the illumination; next entries).
+
+**Reproduce:** `just study misfits_on_a_sphere`; `just study slow_start` (about 6 and 15
+minutes).
+
+## 2026-11-21 — Scaling each parameter's steps
+
+**Question.** Roadmap step 6 asks for parameter scaling for $\rho$. In multiparameter FWI the
+classes' gradients differ in size and in how well the data constrain them, and an inversion
+"is very sensitive to the parameter scaling" even with an approximate Hessian
+[@lavoue2014]; density is the least resolved of the elastic parameters [@kohn2012;
+@operto2013]. What should the scaling be here, where the unknowns are already relative
+changes $x = m/m_0 - 1$?
+
+**Literature** (read by a research agent on the publishers' pages; equations as images
+were not read). Prieux et al. normalise each class by its mean in the starting model, so that
+the classes share an order of magnitude, and start L-BFGS from a Gauss–Newton diagonal
+[@prieux2013]; that is what relative unknowns already do. Kamei & Pratt scale the second
+class's gradient by a factor $\xi$ chosen from trade-off curves (0.025–0.075 for
+attenuation), although the gradients were "similar in magnitudes" [@kamei2013]. Köhn et al.
+"normalize the material parameters and the gradients" without saying how in the readable
+text [@kohn2012].
+
+**Method** (`[inversion.scale]`, `Inversion::preconditioner_for`). A factor $w_c$ per
+parameter multiplies the preconditioner: $P' = D^2 P$, $D = \mathrm{diag}(\sqrt{w_c})$. L-BFGS
+with initial matrix $\gamma P'$ and pairs $(s, y)$ gives exactly $D$ times the direction of
+L-BFGS on $z = D^{-1} x$ with pairs $(D^{-1}s, D y)$, gradient $D g$ and $\gamma P$
+[@nocedal2006]: $s^T y$ and $\gamma$ are unchanged, and so are the Armijo test (which uses
+$g^T s$) and the bounds, which act on $x$. So a factor is a change of variables for its
+class, and the pairs stay valid if the factors change (L-BFGS converges for any bounded,
+positive-definite initial matrix [@liu1989]). Without the illumination, the factors alone
+make the preconditioner. The first step's largest change in class $c$ becomes
+`initial_step` times $w_c \max_c |P g| / \max_{c'} (w_{c'} \max_{c'} |P g|)$. A unit test
+checks the change of variables to $10^{-14}$; factors of 1 leave every result bit for bit.
+
+**Experiment.** The sphere survey inverted for $v_s$, $\rho$ and $v_p$, the top 60 m fixed,
+5 iterations, with $\rho$'s factor 1, 0.3 and 0.1: once with a denser core too ($\rho$ 2300
+against 2100 kg/m³), and once with none, where any change of $\rho$ is cross-talk. Errors
+over the sphere, relative to the start's; for the second, the rms relative change of $\rho$
+there:
+
+| $\rho$'s factor | L2 left | $v_s$ error | $v_p$ error | $\rho$ error (denser core) |
+|---|---|---|---|---|
+| 1 | 6.6% | 85.0% | 100.4% | 79.6% |
+| 0.3 | 6.1% | 84.1% | 100.0% | 92.3% |
+| 0.1 | 6.6% | 83.2% | 99.8% | 97.1% |
+
+| $\rho$'s factor | L2 left | $v_s$ error | $v_p$ error | $\rho$ changed (no anomaly) |
+|---|---|---|---|---|
+| 1 | 6.2% | 86.0% | 101.1% | 1.78% |
+| 0.3 | 7.4% | 82.5% | 101.1% | 0.74% |
+| 0.1 | 6.3% | 83.4% | 101.0% | 0.26% |
+
+Where density has no anomaly, a smaller factor cuts its cross-talk sevenfold and the $v_s$
+anomaly is recovered a little better; where it has one, the same factor leaves it mostly
+unrecovered (97% at 0.1). The factor is a trade-off between the two, as Kamei & Pratt found
+for attenuation [@kamei2013], and nothing in the data alone says which case holds.
+
+A research agent also measured, in a copy of this code, that the relative unknowns already
+balance the classes: at the start, the largest preconditioned gradient of $\rho$ was 0.70–0.78
+of $v_s$'s, and $v_p$'s 1/37 of it (its wavelength is twice the sphere's). Equalising the
+classes' largest (or rms) preconditioned gradients automatically made it worse: $v_p$, barely
+constrained, was amplified 37-fold into cross-talk ($v_p$ error 109–115%, misfit no better).
+
+**Decision.** Fixed factors, 1 by default, set per inversion (`[inversion.scale] rho = 0.3`,
+say) where density takes up what the velocities should explain; no automatic equalisation.
+Choosing them is the trade-off-curve exercise of Kamei & Pratt.
+
+**Reproduce:** `just study density_scaling` (about 5 minutes); the unit tests
+`preconditioner_factors_change_variables` and `scale_multiplies_each_parameters_preconditioner`.
+
+## 2026-11-21 — The receivers' side of the illumination
+
+**Question.** The preconditioner divides by the sources' side of the illumination, the
+forward wavefield's energy $I_s$ at each node [@shin2001], which leaves out the receivers'
+Green's functions; without fixing the near-surface, the updates still pile up around the
+receivers (the L-BFGS entry). Can the receivers' side be added cheaply, and does it help?
+
+**Method** (`receiver_runs`, `Inversion::receiver_energy`). In the Born approximation the
+Gauss–Newton Hessian's diagonal is $\sum_s \sum_a w_a \sum_t (\partial d_{s,a} / \partial m)^2$,
+which for pulses of similar spectra is about $I_s(n)\, I_r(n)$ with
+$I_r(n) = \sum_a w_a \sum_t |G_a(n, t)|^2$, $G_a$ the waves sent from receiver component $a$
+[@plessix2004, whose "type 1" weights, assuming $I_r$ constant, are Shin et al.'s]. Sending
+from every component at once with random signs $\varepsilon_a = \pm 1$, as encoded simultaneous
+sources [@krebs2009], gives $|\sum_a \varepsilon_a \sqrt{w_a} G_a|^2$, whose expectation is
+$I_r$: the cross terms average out. Each run injects the first shot's wavelet through
+`Solver::adjoint_op`, as the adjoint run injects residuals, so velocity and pressure
+receivers weigh as in the gradient, with $w_a$ each component's weight in the misfit
+relative to the largest, averaged over the shots; signs come from SplitMix64 [@steele2014],
+seeded by the stage. The estimate, averaged over `receiver_runs` runs, is made at each
+stage's start in the model as it stands and held; the preconditioner becomes
+$w_c / (I_s I_r / \max + \epsilon)$. Each run costs a forward run, so 8 runs cost about two
+fifths of an iteration of this two-shot survey, and less with more shots. A unit test checks
+the estimator: with the signs of a 4 × 4 Hadamard matrix's rows, four runs average to the
+sum of the four components sent alone to $10^{-5}$ of the largest. A research agent compared
+the estimate with the exact sum of 150 single-receiver runs: the log-standard deviation over
+the free nodes was 0.36 for 1 run, 0.215 for 4 and 0.099 for 16 in a homogeneous model, and
+an analytic $\sum_r 1 / r^2$ missed the depth decay of a layered one by about twofold over
+100 m.
+
+**Experiment** (`just study receivers_side`). The sphere survey ($v_p$, $v_s$), 5 iterations:
+
+| | L2 left | $v_s$ error | $v_p$ error |
+|---|---|---|---|
+| nothing fixed, sources' side | 14.1% | 92.3% | 100.5% |
+| nothing fixed, both sides, 2 runs | 8.8% | 87.3% | 100.7% |
+| nothing fixed, both sides, 8 runs | 9.5% | 88.6% | 100.7% |
+| top 60 m fixed, sources' side | 6.5% | 82.8% | 100.9% |
+| top 60 m fixed, both sides, 8 runs | 6.7% | 82.2% | 101.1% |
+
+With nothing fixed, the receivers' side takes over part of what fixing the top does: a third
+less misfit and a better $v_s$ anomaly. The estimate's accuracy hardly matters (2 and 8 runs
+alike; the research agent found the exact sum and an analytic one within 0.2% of misfit of
+each other). With the top fixed, where the receivers' factor varies only 4–8-fold over the
+free nodes, it changes nothing beyond noise. The source side is still recomputed every
+iteration and the receiver side once per stage.
+
+**Decision.** An option, off by default (`receiver_runs = 0`) so the baselines stand; use it
+when the near-surface can't be fixed. 2–8 runs are enough.
+
+**Reproduce:** `just study receivers_side` (about 4 minutes); the unit test
+`the_receivers_side_adds_each_receivers_energy`.
+
+## 2026-11-21 — Review of the misfits, stages and preconditioners
+
+**Method.** An adversarial review of this branch's six commits: four reviewers (the misfits'
+mathematics; stages and settings; scaling and the receivers' side; documentation and
+citations), each finding then handed to a separate agent told to refute it. 21 findings, 19
+confirmed (14 distinct, some found twice), 2 refuted.
+
+**Results.** None concerned a gradient: every derivative the reviewers checked, by
+derivation or by finite differences, held. Confirmed and fixed:
+
+- *Receivers' side under the time shifts and phases.* Those misfits scale every trace by its
+  own amplitude, so their adjoint sources, and the Gauss–Newton diagonal, weigh a trace about
+  1/its energy, while the receivers' side weighed each component 1: pressure, $10^6$ times
+  velocity, took over the estimate. Each trace now has its own weight
+  (`Misfit::receiver_weights`: L2's as before, $1/\sum \dot d^2$ for the time shifts,
+  $1 / (E \cdot \text{traces measured})$ for the phases). The previous entry's runs used L2, so
+  its numbers stand; its sentence that receivers "weigh as in the gradient" held only for L2.
+- *End padding near the Nyquist frequency.* The number of zeros came from the analog
+  prototype's decay, which the bilinear transform slows near the Nyquist frequency; it now
+  follows the digital filter's largest pole radius $r$, $r^M < 10^{-6}$ with 10% margin (2107
+  samples at 3 Hz, 1 ms, order 4, where the entry on filtering up to the record's end has
+  2091), and corners above 0.8 of the Nyquist frequency are refused.
+- *Memory.* The phase misfit's kernels and the misfits' weights weren't counted; the plan now
+  works out each stage's misfit arrays (`Misfit::held_bytes`) and takes the largest, and
+  counts the preconditioner only when an inverted parameter's factor differs from 1.
+- *Robustness.* One-sample traces with `max_shift` set panicked in any misfit; scale factors
+  weren't checked (a negative one would step uphill); a stage that took no step was missing
+  from `inversion.json`.
+- *Documentation.* Only the scale factors' ratios matter (L-BFGS's $\gamma$ and the first
+  step's scaling absorb a common factor), which the docs now say. In the entry on two test
+  inversions, the slow start's far-offset S waves come about a full period late (79 ms), not
+  half (P waves 43 ms; S half a period at about 220 m), so L2 there faced cycle skipping in
+  the S waves, and still lowered its misfit, near the sources and receivers. Corrected in
+  place: 42 traces, not 36, in the stages entry; the phase test's shifted synthetic is a
+  tenth of a period off and has an extra arrival; the README's "every trace alike" leaves out
+  quiet traces; `just study sphere` also ran the density study, so the studies are renamed
+  (`misfits_on_a_sphere`, `density_scaling`).
+
+Refuted: that commit b3a9943's "28–39%" contradicts the 45% in the log (the commit quotes a
+research prototype's range, the log our own test); that the first misfit entry describes the
+filter as unpadded (it was, at the time; the padding entry follows it).
+
+**Reproduce:** the unit tests `receiver_weights_follow_the_adjoint_sources`,
+`pads_enough_near_the_nyquist_frequency`, `short_traces_are_refused_only_where_they_must_be`,
+`counts_what_it_holds`, `counts_what_an_inversion_allocates` and
+`scale_multiplies_each_parameters_preconditioner`; `tests/cli.rs`'s invert test.
+
 ## Open questions
 
+- **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
+  untouched with every misfit in 8 iterations; a survey with more wavelengths to the targets,
+  more iterations and the near-surface held (or the receivers' side of the illumination) is
+  needed to show whether time shifts, phases or frequency continuation widen the basin here
+  [@bunks1995; @luo1991; @fichtner2008]. Windowing single arrivals, which the time shift
+  assumes for traces with several, is still to come.
+- **Smoother time shifts.** The parabola's shift is continuous but its derivative jumps
+  where the correlation's peak changes lag, which limits the finite-difference check to
+  $10^{-4}$; Newton's method on the correlation's band-limited interpolant would be smooth and
+  unbiased at the cost of every lag of every trace.
+- **The phase misfit's scale** is the stage's corner frequency; a low-passed spectrum peaks
+  at about 0.85 of it (a research agent's measurement), so $\sigma = 1/f_c$ may be 15% short.
+  The receivers' side ignores a stage's filter too.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw

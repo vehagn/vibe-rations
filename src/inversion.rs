@@ -20,12 +20,14 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::config::{Coefficients, Config, InversionConfig, Parameter, shot_dir};
-use crate::gradient::{balancing_weights, gradient, l2_misfit};
+use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
+use crate::gradient::gradient;
+use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
 use crate::simulation::{Simulation, stable_dt, timing};
@@ -324,12 +326,16 @@ pub fn shared_operator(start: &Config, truth: &Config, base: &Path) -> Result<Op
 }
 
 /// One shot of the survey: its configuration (one source, the inversion's time step and
-/// layers) and observed traces, with the weight of each component in the misfit.
+/// layers) and observed traces, with the misfit the current stage measures them by.
 #[derive(Clone, Debug)]
 pub struct Shot {
     pub config: Config,
-    pub observed: Vec<Vec<f32>>,
-    pub weights: Vec<f64>,
+    pub observed: Arc<Vec<Vec<f32>>>,
+    pub misfit: Misfit,
+    /// The receivers' components, samples per trace and sample interval.
+    components: Vec<crate::receiver::Component>,
+    samples: usize,
+    interval: f64,
 }
 
 /// The misfit, its gradient with respect to the unknowns, and the forward wavefields' energy
@@ -347,6 +353,8 @@ pub struct Evaluation {
 #[derive(Clone, Debug, Serialize)]
 pub struct Iteration {
     pub iteration: usize,
+    /// The stage it belongs to, counted from 0.
+    pub stage: usize,
     pub misfit: f64,
     /// The fraction of the scaled L-BFGS direction taken.
     pub step: f64,
@@ -369,8 +377,22 @@ pub struct Inversion {
     free: Vec<(Parameter, Vec<usize>)>,
     bounds: Vec<[f64; 2]>,
     limits: StepLimits,
-    /// The water level of the preconditioner, if there is one.
+    /// The stages, each with its misfit, and the one under way.
+    stages: Vec<StageConfig>,
+    stage: usize,
+    /// The sources' dominant frequency, Hz: the phase misfit's scale on unfiltered traces.
+    source_frequency: f64,
+    /// The misfit at the start of each stage begun, as that stage measures it.
+    pub stage_misfits: Vec<f64>,
+    settings: InversionConfig,
+    /// The water level of the illumination, if the inversion divides by it.
     water_level: Option<f64>,
+    /// Each free parameter's factor on the preconditioner (`[inversion] scale`).
+    scale: Vec<f64>,
+    /// Runs that estimate the receivers' side of the illumination at each stage's start, and
+    /// that estimate (Σₜ |v|² at every interior node), if there are any.
+    receiver_runs: usize,
+    receiver_side: Option<Vec<f64>>,
     preconditioner: Option<Vec<f64>>,
     lbfgs: Lbfgs,
     x: Vec<f64>,
@@ -424,6 +446,14 @@ impl Inversion {
             cfg.sources.len()
         );
         ensure!(!settings.parameters.is_empty(), "nothing to invert for");
+        for &p in &settings.parameters {
+            let w = settings.scale.of(p);
+            ensure!(
+                w.is_finite() && w > 0.0,
+                "[inversion.scale] {} must be positive, not {w}",
+                p.name()
+            );
+        }
         for (i, p) in settings.parameters.iter().enumerate() {
             ensure!(
                 !settings.parameters[..i].contains(p),
@@ -454,23 +484,39 @@ impl Inversion {
                 .pml_vp_max
                 .unwrap_or_else(|| start.vp_range()[1]),
         );
+        let stages = settings.stages()?;
+        let source_frequency = Measure::source_frequency(cfg)?;
+        let measure = Measure::of(&stages[0], settings, source_frequency);
         let mut shots = Vec::with_capacity(cfg.sources.len());
         for (s, observed) in observed.into_iter().enumerate() {
             let config = fixed.shot(s)?;
             let sim = Simulation::with_model(&config, start.clone())?;
             let r = &sim.receivers;
             observed.check(&sim).with_context(|| format!("shot {s}"))?;
-            let observed = observed.traces;
-            let weights = if settings.balance {
-                balancing_weights(&observed, &r.components)
-            } else {
-                vec![1.0; observed.len()]
-            };
+            let observed = Arc::new(observed.traces);
+            let (components, samples) = (r.components.clone(), r.samples);
+            let interval = sim.info.sample_interval;
+            let misfit = Misfit::new(measure, &observed, &components, samples, interval)
+                .with_context(|| format!("shot {s}"))?;
             shots.push(Shot {
                 config,
                 observed,
-                weights,
+                misfit,
+                components,
+                samples,
+                interval,
             });
+        }
+        // Every stage's filter must suit the traces before the first one starts.
+        for stage in &stages[1..] {
+            let shot = &shots[0];
+            Misfit::new(
+                Measure::of(stage, settings, source_frequency),
+                &shot.observed,
+                &shot.components,
+                shot.samples,
+                shot.interval,
+            )?;
         }
 
         // The nodes each parameter may change at.
@@ -583,7 +629,19 @@ impl Inversion {
                 initial: settings.initial_step,
                 max: settings.max_step,
             },
+            stages,
+            stage: 0,
+            source_frequency,
+            stage_misfits: Vec::new(),
+            settings: settings.clone(),
             water_level: settings.precondition.then_some(settings.water_level),
+            scale: settings
+                .parameters
+                .iter()
+                .map(|&p| settings.scale.of(p))
+                .collect(),
+            receiver_runs: settings.receiver_runs,
+            receiver_side: None,
             preconditioner: None,
             lbfgs: Lbfgs::new(settings.memory),
             x: vec![0.0; n],
@@ -597,12 +655,58 @@ impl Inversion {
             settings.water_level > 0.0,
             "the water level must be positive"
         );
+        inversion.illuminate_from_receivers(0)?;
         let e = inversion.evaluate(&inversion.model)?;
-        inversion.memory_bytes = e.memory_bytes;
+        inversion.memory_bytes = inversion.memory_bytes.max(e.memory_bytes);
         inversion.misfit = e.misfit;
         inversion.g = e.gradient;
         inversion.preconditioner = inversion.preconditioner_for(&e.illumination);
+        inversion.stage_misfits.push(e.misfit);
         Ok(inversion)
+    }
+
+    /// The stages, each with its misfit.
+    pub fn stages(&self) -> &[StageConfig] {
+        &self.stages
+    }
+
+    /// The stage under way, counted from 0.
+    pub fn stage(&self) -> usize {
+        self.stage
+    }
+
+    /// Starts stage `s` from the model as it stands: each shot's misfit as the stage measures
+    /// it, and L-BFGS afresh, since the pairs it learnt describe another misfit.
+    pub fn begin_stage(&mut self, s: usize) -> Result<()> {
+        ensure!(
+            s < self.stages.len(),
+            "there is no stage {s}; the inversion has {}",
+            self.stages.len()
+        );
+        let measure = Measure::of(&self.stages[s], &self.settings, self.source_frequency);
+        for shot in &mut self.shots {
+            shot.misfit = Misfit::new(
+                measure,
+                &shot.observed,
+                &shot.components,
+                shot.samples,
+                shot.interval,
+            )?;
+        }
+        self.stage = s;
+        self.lbfgs.clear();
+        self.illuminate_from_receivers(s as u64)?;
+        let e = self.evaluate(&self.model)?;
+        self.memory_bytes = self.memory_bytes.max(e.memory_bytes);
+        ensure!(
+            e.misfit.is_finite(),
+            "the misfit isn't finite at the start of stage {s}"
+        );
+        self.misfit = e.misfit;
+        self.g = e.gradient;
+        self.preconditioner = self.preconditioner_for(&e.illumination);
+        self.stage_misfits.push(e.misfit);
+        Ok(())
     }
 
     /// The misfit of the model as it now stands.
@@ -706,7 +810,7 @@ impl Inversion {
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
             sim.run(None, false)?;
-            total += l2_misfit(&sim.receivers.traces, &shot.observed, &shot.weights)?.0;
+            total += shot.misfit.value(&sim.receivers.traces)?;
         }
         Ok(total)
     }
@@ -727,11 +831,7 @@ impl Inversion {
         let mut memory_bytes = held;
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
-            let run = gradient(
-                &mut sim,
-                |r| l2_misfit(&r.traces, &shot.observed, &shot.weights),
-                None,
-            )?;
+            let run = gradient(&mut sim, |r| shot.misfit.evaluate(&r.traces), None)?;
             total += run.misfit;
             memory_bytes = memory_bytes.max(held + run.memory_bytes);
             illumination
@@ -767,12 +867,16 @@ impl Inversion {
         let observed: usize = self
             .shots
             .iter()
-            .flat_map(|s| &s.observed)
+            .flat_map(|s| s.observed.iter())
             .map(Vec::len)
             .sum();
+        let misfits: usize = self.shots.iter().map(|s| s.misfit.memory_bytes()).sum();
+        let receiver_side = 8 * self.receiver_side.as_ref().map_or(0, Vec::len);
         let model = |m: &Model| 4 * (m.vp.len() + m.vs.len() + m.rho.len());
         let free: usize = self.free.iter().map(|(_, nodes)| nodes.len()).sum();
         4 * observed
+            + misfits
+            + receiver_side
             + model(&self.model)
             + model(&self.start)
             + std::mem::size_of::<usize>() * free
@@ -780,24 +884,135 @@ impl Inversion {
             + self.lbfgs.memory_bytes()
     }
 
-    /// 1 / (I / I_max + water level) for each unknown, I the energy at its node, if the
-    /// inversion preconditions.
+    /// For each unknown, its parameter's factor w divided by (I / I_max + water level), I the
+    /// energy at its node, if the inversion divides by it; w alone if not, and none if every w
+    /// is 1 too.
+    ///
+    /// L-BFGS with an initial matrix γ D² P is L-BFGS with γ P on the unknowns scaled by D⁻¹,
+    /// D = diag(√w): the pairs (s, y) and the products sᵀy, the Armijo test and the step
+    /// limits are unchanged, so a factor is a change of variables for its parameter (the
+    /// pairs would stay valid if the factors changed; they are fixed for the inversion). Only
+    /// their ratios matter: γ and the first step's scaling to `initial_step` absorb a common
+    /// factor.
     fn preconditioner_for(&self, illumination: &[f64]) -> Option<Vec<f64>> {
-        let level = self.water_level?;
+        let unit = self.scale.iter().all(|&w| w == 1.0);
+        let scaled = |f: &dyn Fn(usize) -> f64| -> Vec<f64> {
+            self.free
+                .iter()
+                .zip(&self.scale)
+                .flat_map(|((_, nodes), &w)| nodes.iter().map(move |&n| w * f(n)))
+                .collect()
+        };
+        // The source side times, if it was estimated, the receivers' side.
+        let both = |n: usize| illumination[n] * self.receiver_side.as_ref().map_or(1.0, |r| r[n]);
         let max = self
             .free
             .iter()
-            .flat_map(|(_, nodes)| nodes.iter().map(|&n| illumination[n]))
+            .flat_map(|(_, nodes)| nodes.iter().map(|&n| both(n)))
             .fold(0.0, f64::max);
-        if max <= 0.0 {
-            return None;
+        match self.water_level {
+            Some(level) if max > 0.0 => Some(scaled(&|n| 1.0 / (both(n) / max + level))),
+            _ if !unit => Some(scaled(&|_| 1.0)),
+            _ => None,
         }
-        Some(
-            self.free
-                .iter()
-                .flat_map(|(_, nodes)| nodes.iter().map(|&n| 1.0 / (illumination[n] / max + level)))
-                .collect(),
-        )
+    }
+
+    /// Estimates the receivers' side of the illumination in the model as it stands, if the
+    /// inversion asks for it, with signs drawn from `seed`.
+    fn illuminate_from_receivers(&mut self, seed: u64) -> Result<()> {
+        if self.receiver_runs == 0 || self.water_level.is_none() {
+            return Ok(());
+        }
+        let mut rng = seed;
+        let mut sign = move |_: usize, _: usize, _: usize| {
+            if splitmix64(&mut rng) >> 63 == 0 {
+                1.0
+            } else {
+                -1.0
+            }
+        };
+        let (energy, peak) = self.receiver_energy(&self.model, self.receiver_runs, &mut sign)?;
+        self.memory_bytes = self.memory_bytes.max(peak);
+        self.receiver_side = Some(energy);
+        Ok(())
+    }
+
+    /// Σₜ |v|² at every interior node of waves sent out from every receiver of the first shot
+    /// at once, averaged over `runs` runs, and the most memory held meanwhile. Each receiver
+    /// component sends the first source's wavelet times √(its weight,
+    /// [`Misfit::receiver_weights`], relative to the shot's largest, averaged over the
+    /// shots), times `sign(run, receiver, component)`, injected as the adjoint run injects
+    /// residuals (`Solver::adjoint_op`), so velocity and pressure receivers count about as
+    /// they do in the gradient: exactly for the L2 misfit, by each trace's observed energy
+    /// for the trace-by-trace ones.
+    ///
+    /// With independent random signs its expectation is Σₐ wₐ Σₜ |Gₐ|², Gₐ the waves from
+    /// receiver component a alone: the receivers' side of the Gauss–Newton Hessian's diagonal,
+    /// which the source side's energy multiplies (Shin et al. 2001; Plessix & Mulder 2004).
+    /// Firing them all at once with random signs, as encoded simultaneous sources (Krebs et
+    /// al. 2009), costs a forward run per run instead of one per receiver component; the cross
+    /// terms only average out, so a few runs give a rough estimate, enough for a
+    /// preconditioner.
+    fn receiver_energy(
+        &self,
+        model: &Model,
+        runs: usize,
+        sign: &mut dyn FnMut(usize, usize, usize) -> f64,
+    ) -> Result<(Vec<f64>, usize)> {
+        use crate::receiver::Component;
+        let shot = &self.shots[0];
+        let wavelet = shot.config.sources[0].wavelet.wavelet()?;
+        let mut weights: Vec<Vec<f64>> = Vec::new();
+        for s in &self.shots {
+            let w = s.misfit.receiver_weights();
+            let max = w.iter().flatten().fold(0.0f64, |m, &v| m.max(v));
+            if weights.is_empty() {
+                weights = w.iter().map(|c| vec![0.0; c.len()]).collect();
+            }
+            if max > 0.0 {
+                for (a, b) in weights.iter_mut().flatten().zip(w.iter().flatten()) {
+                    *a += b / max;
+                }
+            }
+        }
+        let n = model.grid.interior_len();
+        let mut energy = vec![0.0f64; n];
+        let held = self.memory_held() + 8 * n;
+        let mut peak = held;
+        for run in 0..runs.max(1) {
+            let mut sim = Simulation::with_model(&shot.config, model.clone())?;
+            peak = peak.max(held + sim.memory_bytes());
+            let mut forces = Vec::new();
+            let mut stresses = Vec::new();
+            for (c, (&component, w)) in shot.components.iter().zip(&weights).enumerate() {
+                for (r, (&node, &w)) in sim.receivers.nodes.iter().zip(w).enumerate() {
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let op = sim.solver.adjoint_op(component, node);
+                    let amplitude = sign(run, r, c) * (w / self.shots.len() as f64).sqrt();
+                    match component {
+                        Component::P => stresses.push((op, amplitude)),
+                        _ => forces.push((op, amplitude)),
+                    }
+                }
+            }
+            for _ in 0..sim.steps {
+                let send = |ops: &[(crate::solver::PointOp, f64)],
+                            fields: &mut crate::solver::Fields,
+                            t: f64| {
+                    let w = wavelet.value(t);
+                    for (op, a) in ops {
+                        op.inject(fields, (a * w) as f32);
+                    }
+                };
+                sim.solver
+                    .step_with(|f, t| send(&forces, f, t), |f, t| send(&stresses, f, t));
+                add_energy(&sim.solver, &mut energy);
+            }
+        }
+        energy.iter_mut().for_each(|e| *e /= runs.max(1) as f64);
+        Ok((energy, peak))
     }
 
     /// One iteration, or None if no step along the L-BFGS direction (or, after a restart,
@@ -854,6 +1069,7 @@ impl Inversion {
         self.iteration += 1;
         let it = Iteration {
             iteration: self.iteration,
+            stage: self.stage,
             misfit,
             step: step.length,
             trials: step.trials,
@@ -864,6 +1080,36 @@ impl Inversion {
         self.history.push(it.clone());
         Ok(Some(it))
     }
+}
+
+/// Adds |v|² at every interior node, each component taken where it is stored.
+fn add_energy(solver: &crate::solver::Solver, energy: &mut [f64]) {
+    use rayon::prelude::*;
+    let g = solver.grid;
+    let [nx, ny, _] = g.n;
+    let v = [&solver.fields.vx, &solver.fields.vy, &solver.fields.vz];
+    energy
+        .par_chunks_mut(nx * ny)
+        .enumerate()
+        .for_each(|(k, plane)| {
+            for j in 0..ny {
+                let row = g.idx(0, j, k);
+                for i in 0..nx {
+                    let p = row + i;
+                    plane[j * nx + i] += v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>();
+                }
+            }
+        });
+}
+
+/// The next number of a SplitMix64 sequence (Steele, Lea & Flood 2014): reproducible signs
+/// without a dependency.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// One shot's observed traces, in the layout of [`crate::receiver::Receivers::traces`], with
@@ -1166,6 +1412,36 @@ mod tests {
         );
     }
 
+    /// A factor w on the preconditioner is a change of variables x = D z, D = diag(√w): the
+    /// direction with γ D² P and pairs (s, y) is D times the direction for z, with pairs
+    /// (D⁻¹ s, D y), gradient D g and γ P.
+    #[test]
+    fn preconditioner_factors_change_variables() {
+        let pairs = [
+            (vec![0.3, -0.2, 0.5], vec![1.1, -0.4, 0.9]),
+            (vec![-0.1, 0.4, 0.2], vec![0.2, 1.3, 0.1]),
+        ];
+        let g = [0.7, -1.1, 0.4];
+        let p = [0.5, 4.0, 1.5];
+        let w = [1.0, 0.09, 2.5];
+        let d: Vec<f64> = w.iter().map(|w: &f64| w.sqrt()).collect();
+        let (mut x, mut z) = (Lbfgs::new(5), Lbfgs::new(5));
+        for (s, y) in &pairs {
+            x.update(s.clone(), y.clone());
+            z.update(
+                s.iter().zip(&d).map(|(s, d)| s / d).collect(),
+                y.iter().zip(&d).map(|(y, d)| y * d).collect(),
+            );
+        }
+        let wp: Vec<f64> = w.iter().zip(&p).map(|(w, p)| w * p).collect();
+        let dg: Vec<f64> = g.iter().zip(&d).map(|(g, d)| g * d).collect();
+        let direct = x.direction(&g, Some(&wp));
+        let changed = z.direction(&dg, Some(&p));
+        for ((a, b), d) in direct.iter().zip(&changed).zip(&d) {
+            assert!((a - b * d).abs() < 1e-14, "{direct:?} {changed:?}");
+        }
+    }
+
     /// Trials that can't be computed count as too long; only if every one fails is that an
     /// error.
     #[test]
@@ -1295,7 +1571,7 @@ mod tests {
         );
     }
 
-    use crate::config::Config;
+    use crate::config::{Config, MisfitKind};
     use crate::model::Model;
 
     /// A small survey: one explosion, two receivers on the free surface.
@@ -1445,6 +1721,160 @@ mod tests {
         let mut other = fast.clone();
         other.grid.points = [16, 16, 16];
         assert!(shared_operator(&slow, &other, base).is_err());
+    }
+
+    /// Stages run in turn: each measures the misfit its own way, on its own filtered traces,
+    /// and starts L-BFGS afresh; iterations say which stage they belong to.
+    #[test]
+    fn stages_change_the_misfit_and_restart_lbfgs() {
+        let truth = survey(
+            "[[model.layer]]\ntop = 0.0\nvp = 2200.0\nvs = 1400.0\nrho = 2000.0",
+            "",
+        );
+        let cfg = survey(
+            SOLID,
+            "parameters = [\"vs\"]\n\
+             [[inversion.stage]]\nmax_frequency = 30.0\niterations = 1\nmisfit = \"traveltime\"\n\
+             [[inversion.stage]]\niterations = 1",
+        );
+        let settings = cfg.inversion.clone().unwrap();
+        let mut inv = Inversion::new(&cfg, start(&cfg), vec![recorded(&truth)], &settings).unwrap();
+        assert_eq!(inv.stages().len(), 2);
+        assert_eq!(inv.stages()[1].misfit, Some(MisfitKind::L2));
+        // The first stage measures time shifts of filtered traces.
+        let shot = &inv.shots[0];
+        let traveltime = Misfit::new(
+            Measure::of(&inv.stages()[0], &settings, inv.source_frequency),
+            &shot.observed,
+            &shot.components,
+            shot.samples,
+            shot.interval,
+        )
+        .unwrap();
+        let mut sim = Simulation::with_model(&shot.config, inv.model.clone()).unwrap();
+        sim.run(None, false).unwrap();
+        assert_eq!(
+            inv.misfit(),
+            traveltime.value(&sim.receivers.traces).unwrap()
+        );
+        let it = inv.iterate().unwrap().expect("a step");
+        assert_eq!(it.stage, 0);
+        let n = inv.unknowns();
+        assert!(inv.lbfgs.update(vec![1.0; n], vec![1.0; n]));
+
+        inv.begin_stage(1).unwrap();
+        assert_eq!((inv.stage(), inv.lbfgs.len()), (1, 0));
+        let l2 = Misfit::new(
+            Measure::l2(true),
+            &inv.shots[0].observed,
+            &inv.shots[0].components,
+            inv.shots[0].samples,
+            inv.shots[0].interval,
+        )
+        .unwrap();
+        assert_eq!(inv.misfit_of(&inv.model).unwrap(), inv.misfit());
+        let mut sim = Simulation::with_model(&inv.shots[0].config, inv.model.clone()).unwrap();
+        sim.run(None, false).unwrap();
+        assert_eq!(inv.misfit(), l2.value(&sim.receivers.traces).unwrap());
+        assert_eq!(inv.stage_misfits.len(), 2);
+        let it = inv.iterate().unwrap().expect("a step");
+        assert_eq!(it.stage, 1);
+        assert!(inv.begin_stage(2).is_err());
+
+        // Iterations go with the stages when there are any.
+        let both = survey(SOLID, "iterations = 3\n[[inversion.stage]]\niterations = 1");
+        assert!(setup(&both).is_err());
+        // A corner above the traces' Nyquist frequency is refused before anything runs.
+        let high = survey(
+            SOLID,
+            "[[inversion.stage]]\niterations = 1\n[[inversion.stage]]\nmax_frequency = 900.0\niterations = 1",
+        );
+        let e = setup(&high).err().expect("refused").to_string();
+        assert!(e.contains("Nyquist"), "{e}");
+    }
+
+    /// `[inversion.scale]` multiplies each parameter's part of the preconditioner, and alone
+    /// makes one; with every factor 1 nothing changes.
+    #[test]
+    fn scale_multiplies_each_parameters_preconditioner() {
+        let plain = setup(&survey(SOLID, r#"parameters = ["vs", "rho"]"#)).unwrap();
+        let scaled = setup(&survey(
+            SOLID,
+            "parameters = [\"vs\", \"rho\"]\n[inversion.scale]\nrho = 0.25\nvp = 7.0",
+        ))
+        .unwrap();
+        let (p, q) = (
+            plain.preconditioner.as_ref().unwrap(),
+            scaled.preconditioner.as_ref().unwrap(),
+        );
+        let half = plain.unknowns() / 2;
+        assert_eq!(p[..half], q[..half]);
+        assert!(
+            p[half..]
+                .iter()
+                .zip(&q[half..])
+                .all(|(a, b)| *b == 0.25 * a)
+        );
+        let alone = setup(&survey(
+            SOLID,
+            "parameters = [\"vs\", \"rho\"]\nprecondition = false\n[inversion.scale]\nrho = 0.25",
+        ))
+        .unwrap();
+        let r = alone.preconditioner.as_ref().unwrap();
+        assert!(r[..half].iter().all(|&v| v == 1.0) && r[half..].iter().all(|&v| v == 0.25));
+        let none = setup(&survey(SOLID, "precondition = false")).unwrap();
+        assert!(none.preconditioner.is_none());
+        // Factors must be positive where they act; elsewhere they are ignored.
+        for bad in ["0.0", "-0.5", "nan"] {
+            let cfg = survey(
+                SOLID,
+                &format!("parameters = [\"vs\"]\n[inversion.scale]\nvs = {bad}"),
+            );
+            assert!(setup(&cfg).is_err(), "{bad}");
+        }
+        let cfg = survey(SOLID, "parameters = [\"vs\"]\n[inversion.scale]\nvp = -1.0");
+        assert!(setup(&cfg).is_ok());
+    }
+
+    /// Sending from every receiver component at once with the signs of a Hadamard matrix's
+    /// rows, as many runs as components, gives on average exactly the energy of each
+    /// component sent alone, summed: the cross terms cancel. Random signs only cancel them on
+    /// average; the inversion then divides by both sides of the illumination.
+    #[test]
+    fn the_receivers_side_adds_each_receivers_energy() {
+        let cfg = survey(SOLID, "receiver_runs = 3\nparameters = [\"vs\"]");
+        let inv = setup(&cfg).unwrap();
+        // Two receivers, vx and vz: four sources in all, (receiver, component) → 2r + c.
+        let hadamard = [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0, 1.0],
+        ];
+        let (coded, _) = inv
+            .receiver_energy(&inv.model, 4, &mut |k, r, c| hadamard[k][2 * r + c])
+            .unwrap();
+        let (alone, _) = inv
+            .receiver_energy(&inv.model, 4, &mut |k, r, c| {
+                if 2 * r + c == k { 1.0 } else { 0.0 }
+            })
+            .unwrap();
+        let max = alone.iter().fold(0.0f64, |m, &v| m.max(v));
+        assert!(max > 0.0);
+        // Four single runs averaged: a quarter of the sum.
+        let worst = coded
+            .iter()
+            .zip(&alone)
+            .fold(0.0f64, |m, (a, b)| m.max((a - 4.0 * b).abs()));
+        assert!(worst < 1e-5 * 4.0 * max, "{worst} of {}", 4.0 * max);
+        // The inversion's own estimate multiplies the source side.
+        let plain = setup(&survey(SOLID, "parameters = [\"vs\"]")).unwrap();
+        let (p, q) = (
+            plain.preconditioner.as_ref().unwrap(),
+            inv.preconditioner.as_ref().unwrap(),
+        );
+        assert!(inv.receiver_side.is_some() && p != q);
+        assert!(q.iter().all(|&v| v.is_finite() && v > 0.0));
     }
 
     /// λ ≥ 0 survives projection in every case: vp inverted alone (vp held above √2 vs), and
