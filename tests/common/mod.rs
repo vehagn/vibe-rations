@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod plane;
+
 use std::f64::consts::PI;
 use std::path::Path;
 
