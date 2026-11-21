@@ -130,7 +130,8 @@ marmousi2:
     examples/marmousi2/convert.sh
 
 # A Marmousi2 inversion study (after `just marmousi2`; tests/marmousi2_study.rs): `misfit_by_arrival`,
-# `l2`, `frequency_stages`, `time_shifts_then_l2` or `phase_then_l2`, each 20-50 minutes
+# `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2` or
+# `stages_with_receivers_side`, each 15-60 minutes
 [group("simulate")]
 marmousi2-study name:
     cargo test --release --test marmousi2_study {{ name }} -- --ignored --exact --nocapture --test-threads 1

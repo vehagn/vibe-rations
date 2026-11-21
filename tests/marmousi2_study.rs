@@ -154,6 +154,9 @@ const FREQUENCY_STAGES: Variant = (
      [[inversion.stage]]\nmax_frequency = 1.0\niterations = 2\n\
      [[inversion.stage]]\niterations = 1",
 );
+/// The stages, the best of the first four variants for vs, with the receivers' side of the
+/// illumination estimated from eight runs at each stage's start.
+const STAGES_WITH_RECEIVERS_SIDE: Variant = ("receiver_runs = 8", FREQUENCY_STAGES.1);
 const TIME_SHIFTS_THEN_L2: Variant = (
     "max_shift = 0.8",
     "[[inversion.stage]]\nmisfit = \"traveltime\"\niterations = 3\n\
@@ -172,6 +175,7 @@ fn the_variants_parse() {
     for (variant, stages) in [
         (L2, 1),
         (FREQUENCY_STAGES, 3),
+        (STAGES_WITH_RECEIVERS_SIDE, 3),
         (TIME_SHIFTS_THEN_L2, 2),
         (PHASE_THEN_L2, 2),
         (("iterations = 0", ""), 1),
@@ -596,6 +600,15 @@ fn l2() {
 #[ignore = "a study: `just marmousi2-study frequency_stages` (about 50 minutes)"]
 fn frequency_stages() {
     invert("frequency-stages", &Case::central(FREQUENCY_STAGES));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study stages_with_receivers_side` (about an hour)"]
+fn stages_with_receivers_side() {
+    invert(
+        "stages-with-receivers-side",
+        &Case::central(STAGES_WITH_RECEIVERS_SIDE),
+    );
 }
 
 #[test]
