@@ -175,7 +175,9 @@ The misfit is `l2` by default: half the squared differences, each component weig
 1/(its observed energy) with `balance`. `traveltime` measures each trace's cross-correlation
 time shift (Luo & Schuster 1991), up to `max_shift` seconds; `phase` compares the traces'
 phases in a time–frequency (Gabor) transform (Fichtner et al. 2008), regularised where the
-synthetic is faint. Both measure every trace alike, whatever its amplitude. Each is an exact
+synthetic is faint. Both measure every trace alike, whatever its amplitude, except that they
+leave out traces quieter than $10^{-4}$ of the loudest of their kind (velocity or pressure),
+whose shift or phase would be noise. Each is an exact
 function of the samples, so the gradient stays exact. Frequency continuation (Bunks et al.
 1995) runs stages in turn, each low-pass filtering observed and synthetic traces at its
 `max_frequency` (a zero-phase Butterworth of `filter_order`, 4 by default) and starting

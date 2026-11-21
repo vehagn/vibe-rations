@@ -1,16 +1,20 @@
-//! How the misfits and frequency-continuation stages invert two small surveys: `just study`.
+//! How the misfits, frequency-continuation stages and preconditioners invert small surveys:
+//! `just study`, or `just study <name>` for one.
 //!
-//! Not part of the regular suite (about 25 minutes on 4 cores). Each variant inverts the same
+//! Not part of the regular suite (about 30 minutes on 4 cores). Each variant inverts the same
 //! observed traces from the same start, and prints after each stage the plain balanced L2
 //! misfit (one scale for every variant, relative to the start's) and the model error over the
-//! target, relative to the start's error. The research log's entry "The misfits and stages on
-//! two test inversions" records the results.
+//! target, relative to the start's error. The research log records the results.
 //!
-//! - `sphere`: `an_inversion_finds_a_sphere`'s survey and start, 6 iterations: a small
-//!   anomaly, the start within a fraction of a period of the data.
+//! - `misfits_on_a_sphere`: `an_inversion_finds_a_sphere`'s survey and start, 6 iterations:
+//!   a small anomaly, the start within a fraction of a period of the data.
+//! - `density_scaling`: the same, inverted for ρ too, with ρ's steps scaled down.
+//! - `receivers_side`: the same with nothing fixed, preconditioned by one or both sides of
+//!   the illumination.
 //! - `slow_start`: a homogeneous model, started 20% too slow in vp and vs, a line of 43
-//!   receivers over 420 m, 8 iterations: arrivals at the far offsets come about half a period
-//!   late, where L2 starts to cycle-skip. The target is every free node below 60 m.
+//!   receivers over 420 m, 8 iterations: at the far offsets the P waves come about half a
+//!   period late and the S waves about a full period, where L2 cycle-skips. The target is
+//!   every free node below 60 m.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -173,7 +177,7 @@ fn sphere_survey(sphere: &str, inversion: &str) -> String {
 
 #[test]
 #[ignore]
-fn sphere() {
+fn misfits_on_a_sphere() {
     let anomaly = "[[model.sphere]]\ncenter = [175.0, 155.0, 115.0]\nradius = 40.0\n\
                    vp = 2700.0\nvs = 1500.0\nrho = 2100.0";
     let (observed, truth) = record(&Config::from_toml(&sphere_survey(anomaly, "")).unwrap());
@@ -214,7 +218,7 @@ fn sphere() {
 /// is cross-talk.
 #[test]
 #[ignore]
-fn sphere_with_density() {
+fn density_scaling() {
     let variants: [Variant; 3] = [
         (
             "rho x 1",

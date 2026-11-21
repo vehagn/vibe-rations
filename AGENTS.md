@@ -19,7 +19,7 @@ opens a shell there instead.
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
-| `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~25 min |
+| `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |

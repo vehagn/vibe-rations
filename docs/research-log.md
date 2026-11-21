@@ -949,7 +949,8 @@ finite-difference check.
 - Phase: $\mathrm{Re}\langle G x, a\rangle = \langle x, G^T a\rangle$ to $10^{-12}$; finite
   differences to $10^{-6}$ with an arrival in the synthetic that the data lack; identical
   traces give 0, a synthetic three times too loud $1.1 \times 10^{-4}$ (from $\epsilon$, in the
-  faint cells) against 0.29 for one shifted by an eighth of a period. Cells at 12 Hz and 1 ms
+  faint cells) against 0.29 for one shifted by a tenth of a period that has an extra arrival.
+  Cells at 12 Hz and 1 ms
   sampling: windows every 42 samples, 250 samples either side, 37 frequencies.
 - Through `Misfit` (f32 traces, weights, filter), all three misfits, filtered or not, agree
   with central differences to $2 \times 10^{-3}$ (f32 round-off).
@@ -1010,7 +1011,7 @@ in single-precision traces below $h \approx 10^{-2}$, the extrapolation's $h^4$ 
 shifts do not converge cleanly with $h$: their plain differences at $5 \times 10^{-3}$ were
 $7.5 \times 10^{-5}$ and, at half the step, $1.7 \times 10^{-4}$, worse. Each trace's shift is
 continuous but its derivative jumps where the correlation's peak moves to the next lag
-(previous entry), and with 36 traces some cross a jump within a few $10^{-3}$ of relative
+(previous entry), and with 42 traces some cross a jump within a few $10^{-3}$ of relative
 model change. The jumps are small (in a prototype the slope changed by 4%, 2% and 1% at 5, 10 and
 20 samples per period, less at the 70 these traces have, 100 filtered), so the check holds at
 small steps; a wrong derivative would be off by tens of per cent. Low-pass filtering makes the traces smoother and
@@ -1092,8 +1093,9 @@ the start's error.
 - *Slow start*: a homogeneous model ($v_p = 2400$, $v_s = 1300$ m/s), started 20% too slow
   in both, 60 × 36 × 28 nodes of 10 m, two force shots at 30 m depth and 400 m apart, 43
   receivers on a 420 m surface line, 0.5 s, nothing fixed, 8 iterations. At the far offsets
-  the start's S waves come about half a period (40 ms at 12 Hz) late. The target is every
-  free node below 60 m.
+  (about 410 m) the start's P waves come about half a period (43 ms at 12 Hz) late and its S
+  waves about a full period (79 ms); the S waves are half a period late at about 220 m. The
+  target is every free node below 60 m.
 
 **Results.**
 
@@ -1131,7 +1133,8 @@ basin needs a survey with more propagation (several wavelengths to the targets) 
 iterations than this machine affords for a test, and a reference for what reaches the deep
 model (fixing the near-surface, or the receivers' side of the illumination; next entries).
 
-**Reproduce:** `just study sphere`; `just study slow_start` (about 6 and 15 minutes).
+**Reproduce:** `just study misfits_on_a_sphere`; `just study slow_start` (about 6 and 15
+minutes).
 
 ## 2026-11-21 — Scaling each parameter's steps
 
@@ -1196,7 +1199,7 @@ constrained, was amplified 37-fold into cross-talk ($v_p$ error 109–115%, misf
 say) where density takes up what the velocities should explain; no automatic equalisation.
 Choosing them is the trade-off-curve exercise of Kamei & Pratt.
 
-**Reproduce:** `just study sphere_with_density` (about 5 minutes); the unit tests
+**Reproduce:** `just study density_scaling` (about 5 minutes); the unit tests
 `preconditioner_factors_change_variables` and `scale_multiplies_each_parameters_preconditioner`.
 
 ## 2026-11-21 — The receivers' side of the illumination
@@ -1251,8 +1254,68 @@ when the near-surface can't be fixed. 2–8 runs are enough.
 **Reproduce:** `just study receivers_side` (about 4 minutes); the unit test
 `the_receivers_side_adds_each_receivers_energy`.
 
+## 2026-11-21 — Review of the misfits, stages and preconditioners
+
+**Method.** An adversarial review of this branch's six commits: four reviewers (the misfits'
+mathematics; stages and settings; scaling and the receivers' side; documentation and
+citations), each finding then handed to a separate agent told to refute it. 21 findings, 19
+confirmed (14 distinct, some found twice), 2 refuted.
+
+**Results.** None concerned a gradient: every derivative the reviewers checked, by
+derivation or by finite differences, held. Confirmed and fixed:
+
+- *Receivers' side under the time shifts and phases.* Those misfits scale every trace by its
+  own amplitude, so their adjoint sources, and the Gauss–Newton diagonal, weigh a trace about
+  1/its energy, while the receivers' side weighed each component 1: pressure, $10^6$ times
+  velocity, took over the estimate. Each trace now has its own weight
+  (`Misfit::receiver_weights`: L2's as before, $1/\sum \dot d^2$ for the time shifts,
+  $1 / (E \cdot \text{traces measured})$ for the phases). The previous entry's runs used L2, so
+  its numbers stand; its sentence that receivers "weigh as in the gradient" held only for L2.
+- *End padding near the Nyquist frequency.* The number of zeros came from the analog
+  prototype's decay, which the bilinear transform slows near the Nyquist frequency; it now
+  follows the digital filter's largest pole radius $r$, $r^M < 10^{-6}$ with 10% margin (2107
+  samples at 3 Hz, 1 ms, order 4, where the entry on filtering up to the record's end has
+  2091), and corners above 0.8 of the Nyquist frequency are refused.
+- *Memory.* The phase misfit's kernels and the misfits' weights weren't counted; the plan now
+  works out each stage's misfit arrays (`Misfit::held_bytes`) and takes the largest, and
+  counts the preconditioner only when an inverted parameter's factor differs from 1.
+- *Robustness.* One-sample traces with `max_shift` set panicked in any misfit; scale factors
+  weren't checked (a negative one would step uphill); a stage that took no step was missing
+  from `inversion.json`.
+- *Documentation.* Only the scale factors' ratios matter (L-BFGS's $\gamma$ and the first
+  step's scaling absorb a common factor), which the docs now say. In the entry on two test
+  inversions, the slow start's far-offset S waves come about a full period late (79 ms), not
+  half (P waves 43 ms; S half a period at about 220 m), so L2 there faced cycle skipping in
+  the S waves, and still lowered its misfit, near the sources and receivers. Corrected in
+  place: 42 traces, not 36, in the stages entry; the phase test's shifted synthetic is a
+  tenth of a period off and has an extra arrival; the README's "every trace alike" leaves out
+  quiet traces; `just study sphere` also ran the density study, so the studies are renamed
+  (`misfits_on_a_sphere`, `density_scaling`).
+
+Refuted: that commit b3a9943's "28–39%" contradicts the 45% in the log (the commit quotes a
+research prototype's range, the log our own test); that the first misfit entry describes the
+filter as unpadded (it was, at the time; the padding entry follows it).
+
+**Reproduce:** the unit tests `receiver_weights_follow_the_adjoint_sources`,
+`pads_enough_near_the_nyquist_frequency`, `short_traces_are_refused_only_where_they_must_be`,
+`counts_what_it_holds`, `counts_what_an_inversion_allocates` and
+`scale_multiplies_each_parameters_preconditioner`; `tests/cli.rs`'s invert test.
+
 ## Open questions
 
+- **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
+  untouched with every misfit in 8 iterations; a survey with more wavelengths to the targets,
+  more iterations and the near-surface held (or the receivers' side of the illumination) is
+  needed to show whether time shifts, phases or frequency continuation widen the basin here
+  [@bunks1995; @luo1991; @fichtner2008]. Windowing single arrivals, which the time shift
+  assumes for traces with several, is still to come.
+- **Smoother time shifts.** The parabola's shift is continuous but its derivative jumps
+  where the correlation's peak changes lag, which limits the finite-difference check to
+  $10^{-4}$; Newton's method on the correlation's band-limited interpolant would be smooth and
+  unbiased at the cost of every lag of every trace.
+- **The phase misfit's scale** is the stage's corner frequency; a low-passed spectrum peaks
+  at about 0.85 of it (a research agent's measurement), so $\sigma = 1/f_c$ may be 15% short.
+  The receivers' side ignores a stage's filter too.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
