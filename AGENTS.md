@@ -27,7 +27,7 @@ opens a shell there instead.
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
 | `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces | |
 | `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
-| `just marmousi2` | Fetch Marmousi2 (467 MB, once) and make its model files for `examples/marmousi2` | ~1 min |
+| `just marmousi2` | Fetch Marmousi2 (467 MB, once) and make its model files, for `examples/marmousi2*` | ~2 min |
 | `just marmousi2-bench` | Time forward and gradient runs on it at orders 4 and 8, with their memory | ~10 min |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
@@ -58,7 +58,7 @@ src/
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
-  model.rs       vp, vs, rho on the nodes: layers, .npy files, spheres
+  model.rs       vp, vs, rho on the nodes: layers, .npy files (on disk or in memory), spheres
   solver.rs      fields, staggered material, the update kernels, free surface, PointOp
   fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
@@ -93,7 +93,7 @@ tests/
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
-examples/        annotated configurations; marmousi2/ needs `just marmousi2`'s model files
+examples/        annotated configurations; the marmousi2 ones need `just marmousi2`'s model files
 ```
 
 ## Conventions
@@ -125,16 +125,23 @@ examples/        annotated configurations; marmousi2/ needs `just marmousi2`'s m
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
-- **Marmousi2** (`just marmousi2`, `examples/marmousi2/`, `vibe-rations extrude`; the log's
-  "Marmousi2"). The model isn't in the repository: the recipe fetches 467 MB of SEG-Y from the
-  Madagascar project's mirror (SEG's own link answers 403) into git-ignored `data/` and checks
-  SHA-256 sums. `extrude` averages a 2D section onto the nodes (Backus's harmonic moduli, a
-  node fluid by majority, so the seafloor stays within half a node) and repeats it along $y$.
-  The soft sediments under the seafloor ($v_s$ from 303 m/s at 25 m) set the grid and hold
-  most of the late energy and the gradient. The whole section's gradient needs 15 GiB, so
-  gradients use the central 6 km (4.3 GiB). Configurations in `examples/` subdirectories are
-  not on the web page (it can't read model files); `tests/examples.rs` parses them and sets
-  them up only where their files exist.
+- **Marmousi2** (`just marmousi2`, `examples/marmousi2*`, `vibe-rations extrude`; the log's
+  "Marmousi2" entries). The model isn't in the repository: `examples/marmousi2/fetch.sh`
+  fetches 467 MB of SEG-Y from the Madagascar project's mirror (SEG's own link answers 403)
+  into git-ignored `data/` and checks SHA-256 sums; `convert.sh` writes sections, (nz, nx),
+  into git-ignored directories beside the configurations, so their paths have no `..` (the run
+  server refuses those). `extrude` averages a 2D section onto the nodes (Backus's harmonic
+  moduli, a node fluid by majority, so the seafloor stays within half a node). The soft
+  sediments under the seafloor ($v_s$ from 303 m/s at 25 m) set the grid and hold most of the
+  late energy and the gradient. The whole section's gradient needs 15 GiB, so gradients use
+  the central 6 km (4.3 GiB). Without the files, `tests/examples.rs` only parses the
+  configurations and `web/build.sh` leaves them out; the web image's `marmousi2` stage fetches
+  and converts them itself, so the hosted page has them.
+- **Model files in the browser** (`model::Files`). A browser has no files: the worker asks
+  `Simulator.modelFiles` what a configuration names, fetches those relative to `examples/`,
+  and hands them over as `ModelFiles`; `Model`, `memory` and `Simulation` read them from
+  `Files::Memory` as they would from `Files::Dir`. Sections, (nz, nx), keep the downloads
+  small: Marmousi2 at 25 m is 1.2 MB as sections against 47 MB as a 41-node-wide grid.
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients
   would otherwise change with every model it tries) as well as $\Delta t$ and

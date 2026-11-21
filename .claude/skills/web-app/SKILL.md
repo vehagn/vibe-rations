@@ -59,7 +59,11 @@ Driving it from scripts: `#run` toggles run and pause, `#reset` reloads the conf
 - `just in unit` runs the web crate's tests; `just in lint` also runs clippy on the
   `wasm32-unknown-unknown` target.
 - Examples in `examples/` appear in the page's menu automatically. Keep them small enough
-  for a browser: a few million cells.
+  for a browser: a few million cells. An example's `[model.files]` (paths relative to it, no
+  `..`) are copied next to it by `build.sh` and fetched by the worker (`modelFiles` in
+  `worker.js`, `ModelFiles` in `web/src/lib.rs`); one whose files are missing is left out of
+  the build. Prefer sections, (nz, nx), to whole grids: they are ny times smaller to fetch.
+  The image's `marmousi2` stage fetches and converts Marmousi2 for its two examples.
 
 ## Threads
 

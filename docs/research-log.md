@@ -996,6 +996,56 @@ inversion: `just in run examples/marmousi2/central-true.toml --shots --out
 out/marmousi2/observed`, then `just in invert examples/marmousi2/central.toml` (40 minutes,
 writing the model after each iteration to `out/marmousi2/central`).
 
+## 2026-11-21 — Marmousi2 in the browser
+
+**Question.** Can the web page run Marmousi2? The browser solver refused model files (a
+browser has no files to read), and the whole section at 25 m, 41 nodes wide in $y$, is
+47 MB of `.npy` to fetch.
+
+**Method.** Model files may now be sections, shape (nz, nx), which a run repeats along $y$
+(`Model::from_files`); `extrude` writes sections unless given `--ny`. `model::Files` says
+where a configuration's files come from, a directory or bytes in memory, and `Model`,
+`memory` and `Simulation` read either. In the page, the worker asks which files a
+configuration names (`Simulator.modelFiles`), fetches them relative to `examples/`, and passes
+them in (`ModelFiles`); served by `vibe-rations serve`, the page uploads them with the
+configuration instead. `web/build.sh` copies each example's files next to it and leaves out
+an example whose files are missing; the web image's `marmousi2` stage fetches Marmousi2 and
+converts it first, so the hosted page has them. The model files moved from `data/` to
+git-ignored directories beside the configurations, since the run server refuses paths with
+`..`. Two examples are for the browser: the whole section decimated to 50 m
+(`marmousi2-50m.toml`: cells of $40 \times 40$ samples, $341 \times 41 \times 71$ = 0.99 M
+nodes, $v_s$ from 321 m/s, so a Ricker at 0.6 Hz for 4.3 points per wavelength at 1.5 Hz,
+8 s in 2,019 steps) and the central 6 km at 25 m (`marmousi2-central.toml`: 1.39 M nodes,
+1.2 Hz, 4 s in 2,020 steps). Both ran in the Claude app's built-in browser pane (10 threads,
+Apple M1 Max, the page visible), with live pictures, timed from Run to the last step.
+
+**Results.**
+
+| Example | Files | Memory | Speed | Run |
+|---|---|---|---|---|
+| `marmousi2-50m` | 290 KB | 129 MiB | 162–174 Mcell/s | 14.9 s |
+| `marmousi2-central` | 408 KB | 170 MiB | 185 Mcell/s | 20.9 s |
+| `marmousi2-50m`, page served by `vibe-rations serve` (4 threads in the container) | uploaded | | 152 Mcell/s | 14.5 s |
+
+As sections the whole section at 25 m is 1.15 MB (47 MB as the grid). Set up from its
+sections, `examples/marmousi2/marmousi2.toml` gets the same time step, steps and memory plan
+(471 MiB) as from the grid, and a run from sections in memory records the same traces, bit for
+bit, as the same model given as a layer (`runs_model_files_it_is_given`). Setting up takes
+0.3–0.4 s in the page once the files are fetched. Decimating to 50 m halves the frequency the
+grid holds (the sediments' $v_s$ barely changes: 321 m/s at 50 m, 303 at 25 m), so the
+whole section at 50 m resolves less than the central part at 25 m, at about the same cost.
+
+**Decision.** Examples may take model files, and the hosted page carries Marmousi2's two:
+the decimated whole and the central part at full resolution. The whole section at 25 m
+(3.94 M nodes, 3,034 steps) would fit a browser too (471 MiB), at these speeds in about a
+minute on ten threads, but is left to the command line. The hosted page redistributes Marmousi2-derived
+data; its licence (SEG wiki) could not be read, so that is the maintainer's call, made
+2026-11-21.
+
+**Reproduce:** `just in marmousi2`, `just in web`, `just serve`, then open
+`http://localhost:8088/?example=marmousi2-50m` (or `marmousi2-central`) and Run; the page
+shows speed and steps. `just in unit runs_model_files_it_is_given`.
+
 ## Open questions
 
 - **Inverting Marmousi2's elastic data.** From a start smoothed over 250 m, L2 on all the
