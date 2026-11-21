@@ -60,6 +60,13 @@ physics *args:
 accuracy:
     cargo test --release --test accuracy -- --ignored --nocapture --test-threads 1
 
+# The gradient accuracy study: the solver's gradients against the exact sensitivity kernels
+# of a homogeneous full space, by grid spacing, order, time step and residual (about 40
+# minutes; `just gradient-accuracy <name>` for one). The research log records the results.
+[group("check")]
+gradient-accuracy *args:
+    cargo test --release --test gradient_accuracy {{ args }} -- --ignored --nocapture --test-threads 1
+
 # The inversion study: misfits, frequency-continuation stages and preconditioners on small
 # surveys (about 30 minutes; `just study <name>` for one). The research log records the results.
 [group("check")]
