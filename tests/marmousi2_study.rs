@@ -13,6 +13,9 @@
 //!   misfit and of its gradient, by component, by depth band.
 //! - `l2_rebuilt`: `l2` with the forward wavefields rebuilt backwards instead of replayed
 //!   from checkpoints, and how far its model lies from `l2`'s.
+//! - `mute_lines`, `west_l2`, `west_muted_l2`, `west_stages_muted_after_the_first`: the
+//!   western 6 km (`Case::part`), held out from the choices made on the central part, with
+//!   the slow waves' mute worked out from its own start (`slow_waves_mute`).
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
 //!   `stages_with_receivers_side`, and `muted_l2`, `muted_stages`, `down_weighted_l2` and
 //!   `down_weighted_stages` with the seafloor's slow waves muted or down-weighted: inversions
@@ -44,10 +47,19 @@ impl Case {
     /// `examples/marmousi2/central.toml` and `central-true.toml`, the start's `[inversion]`
     /// as `variant` makes it (`central_text`).
     fn central(variant: Variant) -> Case {
+        Case::part("central", variant)
+    }
+
+    /// [`Case::central`] on another 6 km of the section, whose model files `convert.sh` makes
+    /// as `25m-<part>` and `25m-<part>-smooth`: the same survey, start and numerics, another
+    /// model below the same seafloor (`west`, x = 0–6 km, is held out from the choices made
+    /// on the central part).
+    fn part(part: &str, variant: Variant) -> Case {
         let base = PathBuf::from("examples/marmousi2");
-        let read = |name: &str| std::fs::read_to_string(base.join(name)).unwrap();
-        let start = central_text(variant);
-        let missing = base.join("25m-central/vp.npy");
+        let on_part = |text: String| text.replace("25m-central", &format!("25m-{part}"));
+        let start = on_part(central_text(variant));
+        let truth = on_part(std::fs::read_to_string(base.join("central-true.toml")).unwrap());
+        let missing = base.join(format!("25m-{part}/vp.npy"));
         assert!(
             missing.is_file(),
             "{} is missing: run `just marmousi2` first",
@@ -55,7 +67,7 @@ impl Case {
         );
         Case {
             start: Config::from_toml(&start).unwrap(),
-            truth: Config::from_toml(&read("central-true.toml")).unwrap(),
+            truth: Config::from_toml(&truth).unwrap(),
             base,
             bands: vec![
                 [500.0, 750.0],
@@ -208,7 +220,12 @@ fn muted_l2_longer_variant() -> Variant {
 /// at 0.6 Hz, unmuted, they turned vs towards the truth down to 1 km (`frequency_stages`), and
 /// muted they didn't (`muted_stages`).
 fn stages_muted_after_the_first_variant() -> Variant {
-    let mute = SLOW_WAVES_MUTED.replacen("[[inversion.mute]]", "[[inversion.stage.mute]]", 1);
+    stages_muted_after_the_first_with(SLOW_WAVES_MUTED)
+}
+
+/// [`stages_muted_after_the_first_variant`] with another mute.
+fn stages_muted_after_the_first_with(mute: &str) -> Variant {
+    let mute = mute.replacen("[[inversion.mute]]", "[[inversion.stage.mute]]", 1);
     (
         "",
         leak(format!(
@@ -580,6 +597,43 @@ fn split_by_arrival(
         t.elapsed().as_secs_f64()
     );
     sum
+}
+
+/// The slow waves' mute for `case`, worked out from its start and source alone, not from the
+/// true model: a line through t₀, the earliest a wave can leave the seafloor below the
+/// source (the Ricker's peak 1.2/f₀ less half a period, plus the `water` metres between the
+/// sources and the receivers at 1500 m/s), as fast as needs be for a taper of half a period
+/// (0.5/f₀) to end, from 500 m offset on, before waves at the start's slowest S speed at the
+/// receivers v_s: 1/v_line = 1/v_s - (0.5/f₀)/500 m. The observed slow waves must come
+/// later too, which the true models here satisfy (345 m/s at the seafloor) but which these
+/// runs didn't check from the data: stacks along lines and f-k spectra of the gathers within
+/// 1 km didn't find them under the direct wave's energy. Returns the line's speed and the
+/// mute.
+fn slow_waves_mute(case: &Case, water: f64) -> (f64, String) {
+    let start = case.model(&case.start);
+    let grid = Simulation::grid(&case.start).unwrap();
+    let slowest = case
+        .start
+        .receivers
+        .positions()
+        .unwrap()
+        .into_iter()
+        .map(|p| {
+            let [i, j, k] = grid.nearest_node(p).unwrap();
+            start.vs[grid.interior_idx(i, j, k)] as f64
+        })
+        .fold(f64::INFINITY, f64::min);
+    let f0 = 1.2;
+    let taper = 0.5 / f0;
+    let velocity = 1.0 / (1.0 / slowest - taper / 500.0);
+    let delay = 1.2 / f0 - taper + water / 1500.0;
+    (
+        velocity,
+        format!(
+            "[[inversion.mute]]\nkeep = \"before\"\nvelocity = {velocity:.1}\n\
+             delay = {delay:.2}\ntaper = {taper:.2}"
+        ),
+    )
 }
 
 /// The product of `mutes`' weights on one shot's traces at `offsets`, receiver-major like the
@@ -987,6 +1041,44 @@ fn misfit_by_mute() {
                 mutes_of(muted(false, SLOW_WAVES_DOWN_WEIGHTED)),
             ),
         ],
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_stages_muted_after_the_first` (about an hour)"]
+fn west_stages_muted_after_the_first() {
+    let (velocity, mute) = slow_waves_mute(&Case::part("west", L2), 425.0);
+    println!("the mute line: {velocity:.0} m/s");
+    invert(
+        "west-stages-muted-after-the-first",
+        &Case::part("west", stages_muted_after_the_first_with(&mute)),
+    );
+}
+
+/// The slow waves' mute lines `slow_waves_mute` works out for each part, at once.
+#[test]
+#[ignore = "a study: `just marmousi2-study mute_lines` (seconds)"]
+fn mute_lines() {
+    for part in ["central", "west"] {
+        let (velocity, mute) = slow_waves_mute(&Case::part(part, L2), 425.0);
+        println!("{part}: {velocity:.0} m/s\n{mute}");
+    }
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_l2` (about 45 minutes)"]
+fn west_l2() {
+    invert("west-l2", &Case::part("west", L2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_muted_l2` (about 45 minutes)"]
+fn west_muted_l2() {
+    let (velocity, mute) = slow_waves_mute(&Case::part("west", L2), 425.0);
+    println!("the mute line: {velocity:.0} m/s");
+    invert(
+        "west-muted-l2",
+        &Case::part("west", muted_with("iterations = 5", false, &mute)),
     );
 }
 
