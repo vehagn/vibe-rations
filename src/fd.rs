@@ -12,6 +12,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use std::f64::consts::PI;
+use std::sync::Mutex;
 
 use anyhow::{Result, ensure};
 
@@ -71,7 +72,29 @@ impl Stencil {
     /// Designed by Lawson's algorithm (Rice & Usow 1968) on the linearised error, in the
     /// manner of Holberg (1987), who bounded the group-velocity error the same way. Order 2
     /// has nothing to choose and is Taylor's.
+    ///
+    /// The design takes a good fraction of a second, and an inversion sets up many runs with
+    /// the same operator, so designs are remembered (a few, the latest kept).
     pub fn optimised(order: usize, band: f64, tolerance: f64) -> Result<Self> {
+        /// Designs remembered: (order, band and tolerance bits) and the stencil.
+        type Designs = Vec<((usize, u64, u64), Stencil)>;
+        static DESIGNS: Mutex<Designs> = Mutex::new(Vec::new());
+        const REMEMBERED: usize = 8;
+        let key = (order, band.to_bits(), tolerance.to_bits());
+        if let Some((_, s)) = DESIGNS.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return Ok(s.clone());
+        }
+        let s = Self::design(order, band, tolerance)?;
+        let mut designs = DESIGNS.lock().unwrap();
+        if designs.len() == REMEMBERED {
+            designs.remove(0);
+        }
+        designs.push((key, s.clone()));
+        Ok(s)
+    }
+
+    /// [`Stencil::optimised`], designed afresh.
+    fn design(order: usize, band: f64, tolerance: f64) -> Result<Self> {
         let taylor = Self::taylor(order)?;
         ensure!(
             band > 0.0 && band < PI,
@@ -421,6 +444,28 @@ fn accumulate(out: &mut [f32], a: f32, hi: &[f32], lo: &[f32], first: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A remembered design is the design, bit for bit, and comes back far faster.
+    #[test]
+    fn remembers_designs() {
+        // A band no other test designs for, so the first call designs it; wide enough that
+        // the design searches for the band it can have, as runs at few points per wavelength do.
+        let band = 0.85 * PI + 1e-9;
+        let t = std::time::Instant::now();
+        let first = Stencil::optimised(12, band, 1e-4).unwrap();
+        let designing = t.elapsed();
+        let t = std::time::Instant::now();
+        let again = Stencil::optimised(12, band, 1e-4).unwrap();
+        let remembering = t.elapsed();
+        assert_eq!(first, again);
+        assert_eq!(first, Stencil::design(12, band, 1e-4).unwrap());
+        assert_ne!(first, Stencil::optimised(12, band - 0.1, 1e-4).unwrap());
+        println!("designing {designing:?}, remembering {remembering:?}");
+        assert!(
+            remembering * 10 < designing,
+            "{remembering:?} vs {designing:?}"
+        );
+    }
 
     #[test]
     fn taylor_coefficients_are_the_known_ones() {
