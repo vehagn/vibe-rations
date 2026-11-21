@@ -65,14 +65,18 @@ src/
   receiver.rs    recording traces through PointOps
   server.rs      `vibe-rations serve`: runs kept for clients that come and go, an HTTP API
   remote.rs      its client: submit, follow, fetch; an SSH tunnel through the system's ssh
-  view.rs        sections and gathers of a live run (the browser and the server share it)
+  view.rs        sections and gathers of a live run, and an inversion of synthetic data stepped
+                 a unit at a time with pictures of it (the browser and the server share it)
   snapshot.rs    sections and volumes during a run
   simulation.rs  a run set up from a configuration; outputs
   image.rs, npy.rs
 web/
-  src/lib.rs     wasm-bindgen wrapper (Simulator) over a plain-Rust View with native tests
-  www/           the page: index.html, app.js (UI), worker.js (the solver here),
-                 remote.js (the server's solver, same messages), style.css
+  src/lib.rs     wasm-bindgen wrappers (Simulator, Inverter) over View and InversionView
+  src/settings.rs the TOML read and edited for the page's form (toml_edit), the headless
+                 commands, an inversion's start and truth; native tests
+  www/           the page: index.html, app.js (wiring), worker.js (the solver here),
+                 remote.js (the server's solver, same messages), config.js (settings.rs on
+                 the page's thread), form.js, commands.js, fwi.js, plot.js, util.js, style.css
   build.sh       builds web/dist: single-threaded and threaded WebAssembly, page, examples
   sws.toml       static-web-server settings, with the cross-origin isolation headers
   Containerfile  the hosted page's image
@@ -121,6 +125,29 @@ examples/        annotated configurations
 
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
+
+- **The web page edits, inverts and explains** (2026-11-21). The TOML stays the source of
+  truth: the Settings form reads it (`settings::settings`, defaults filled in from `Config`) and
+  writes into it (`settings::edit`, `toml_edit`), so comments and layout survive; new keys are
+  typed by name (`INTEGER_KEYS`) and new tables follow their siblings (a table without a
+  position follows the one before it). The page loads the single-threaded `pkg/` on its own
+  thread for this, whichever solver runs. The FWI tab inverts synthetic data: the
+  configuration is the start, a `[model]` block the truth, and `settings::synthetic` writes both
+  with one `dt`, `pml_vp_max` and `optimised_for` (`inversion::shared_operator`: the faster
+  model's time step and layers, the slower one's band), so the two are sampled alike and the
+  downloaded pair, run through `run --shots` and `invert`, gives the page's misfits (checked:
+  51.4, 20.7, 14.4, 8.6, 5.5% for `examples/sphere-inversion.toml`, in the browser, on the
+  server and on the command line). `view::InversionView` steps it a unit at a time (a shot of
+  observed traces, the start, an iteration) for the worker and for `vibe-rations serve`, where
+  an inversion is a run of `kind=inversion` in a thread of its own; its pictures
+  (`view::Pictures`) are counted in `memory::estimate_synthetic_inversion`, exactly. Two things
+  it turned up: `Simulation::run` read the clock on every step, which panics in WebAssembly, so
+  it now does only when reporting; and designing optimised coefficients took about 0.7 s
+  (order 12, a band the design must shrink), paid by every run an inversion sets up, so
+  `Stencil::optimised` remembers its last eight designs (bit for bit the same; 125 ns). The
+  built-in browser's previews come from the main checkout's `.claude/launch.json`, so a
+  worktree's build needs an entry there pointing at it (and its `out/`, since a separate
+  `CARGO_TARGET_DIR` isn't in the shared volume).
 
 - **The inversion meets this branch's defaults** (merged 2026-11-20). (1) `Inversion::new`
   pins `optimised_for` at the starting model's points per wavelength (the coefficients

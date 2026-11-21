@@ -7,8 +7,10 @@ description: Set up and run a vibe-rations simulation - write the TOML configura
 
 ## 1. Start from an example
 
-Copy the closest of `examples/explosion.toml` (homogeneous half-space, explosion) or
-`examples/layered.toml` (layers, double-couple earthquake) into `out/` for experiments, or
+Copy the closest of `examples/explosion.toml` (homogeneous half-space, explosion),
+`examples/layered.toml` (layers, double-couple earthquake) or `examples/sphere-inversion.toml`
+(two force shots and an `[inversion]` section, small enough to invert in a browser) into
+`out/` for experiments, or
 into `examples/` for a new example (`tests/examples.rs` then requires it to set up without
 warnings). Every key is documented in `src/config.rs`; unknown keys are errors.
 

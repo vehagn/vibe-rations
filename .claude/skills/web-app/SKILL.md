@@ -12,11 +12,23 @@ handles the controls. Served by `vibe-rations serve` instead (the `remote-runs` 
 page can also use that server's solver through `remote.js`, which answers the same messages;
 the pictures come from `src/view.rs` either way.
 
+The configuration's text (`#editor`) is the source of truth. The **Settings** tab's form
+reads it and writes into it through `web/src/settings.rs` (`toml_edit`, so comments and
+layout survive), loaded on the page's own thread from the single-threaded `pkg/` whichever
+solver runs; edits show an Apply/Revert bar until applied. The **FWI** tab runs an inversion
+of synthetic data (`view::InversionView`): the configuration's model is the start, a true
+model in TOML makes the observed traces, and `settings::synthetic` pins one time step,
+`pml_vp_max` and `optimised_for` for both. The **Command** tab shows the command lines that
+run the configuration (and the inversion) without the page, and downloads their files.
+
 ```
-web/src/lib.rs   Simulator (wasm-bindgen) → View (plain Rust; unit-tested natively)
-web/www/         index.html, app.js, worker.js, style.css (no bundler, no npm)
-web/build.sh     → web/dist: pkg/ (1 thread), pkg-threads/ (rayon on workers), page, examples
-web/sws.toml     static-web-server: COOP/COEP headers, no-cache, /health
+web/src/lib.rs       Simulator → View, Inverter → InversionView (wasm-bindgen; tested natively)
+web/src/settings.rs  read/edit the TOML, the commands, the inversion's pair of configurations
+web/www/             index.html, app.js (wiring), worker.js, remote.js, config.js (settings on
+                     the main thread), form.js, commands.js, fwi.js, plot.js, util.js, style.css
+                     (no bundler, no npm)
+web/build.sh         → web/dist: pkg/ (1 thread), pkg-threads/ (rayon on workers), page, examples
+web/sws.toml         static-web-server: COOP/COEP headers, no-cache, /health
 ```
 
 ## Build, serve, look
@@ -41,7 +53,15 @@ solver…". Check:
 - the memory line under the example follows the configuration as it is edited (the worker's
   `estimate` handler, `Simulator.estimateMemory`), and a grid over the 4 GiB WebAssembly can
   address (e.g. `points = [801, 801, 535]`) turns it red and is refused on Apply, before
-  anything is allocated (`View::new`, `BROWSER_LIMIT`).
+  anything is allocated (`View::new`, `BROWSER_LIMIT`);
+- **Settings:** changing a control rewrites the TOML (comments kept), shows Apply/Revert and
+  moves the memory line; a TOML that doesn't parse disables the form with the reason;
+- **FWI:** Gradient, then Invert, on the explosion example with the default true model (a
+  sphere): the stage line counts shots, the start and iterations, the history table and the
+  misfit chart fill in, and the inversion panel draws the update, the true update, the model
+  and −gradient for vp, vs, ρ on any plane; Stop waits for the unit in progress;
+- **Command:** the commands name the file and machine typed there; Copy copies; the downloads
+  give the configuration, and the inversion's start and truth.
 
 Useful URLs: `?example=layered`, `?threads=1` (to compare speeds).
 
@@ -51,16 +71,24 @@ background page and is throttled tenfold or more. Expect ~51 Mcell/s on one thre
 drawing a section costs ~2 ms.
 
 Driving it from scripts: `#run` toggles run and pause, `#reset` reloads the configuration,
-`#editor` and `#apply` hold and apply the TOML, and `#stat-step`, `#stat-speed`,
-`#stat-threads` and `#status` show progress.
+`#editor` and `#apply` hold and apply the TOML (dispatch an `input` event on `#editor` after
+setting it, so the form and memory follow), the tabs are `#tab-run`, `#tab-settings`,
+`#tab-fwi` and `#tab-command`, `#fwi-gradient`, `#fwi-run` and `#fwi-stop` drive the
+inversion, and `#stat-step`, `#stat-speed`, `#stat-threads`, `#status` and `#fwi-stage` show
+progress.
 
 ## Changing it
 
 - New solver features show up in the web app through `vibe-rations` itself. Expose
   anything new the page needs on `View` first, with a native test in `web/src/lib.rs`, then
   wrap it on `Simulator`.
-- Keep the worker protocol small: messages `load`, `run`, `pause`, `view`, `npy` in; `ready`,
-  `loaded`, `state`, `frame`, `npy`, `error` out.
+- Keep the worker protocol small: messages `load`, `run`, `pause`, `view`, `live`, `npy`,
+  `estimate` (with `kind: "inversion"` for an inversion's), `invert`, `stopInversion`,
+  `resumeInversion`, `inversionView`, `modelNpy` in (`attach` for the server); `ready`,
+  `loaded`, `state`, `frame`, `estimate`, `npy`, `inversion`, `inversionFrame`, `modelNpy`,
+  `error` out (`inversionAttached` from the server). worker.js and remote.js answer the same.
+- Logic worth testing goes in Rust: `settings.rs` (natively tested) for anything about the
+  configuration's text or the commands, `view.rs` for pictures. The JavaScript only wires.
 - `just in unit` runs the web crate's tests; `just in lint` also runs clippy on the
   `wasm32-unknown-unknown` target.
 - Examples in `examples/` appear in the page's menu automatically. Keep them small enough

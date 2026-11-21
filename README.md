@@ -61,6 +61,32 @@ TOML, run and pause, and watch a section of any field on any plane while the gat
 The visitor's computer does all the work, in a Web Worker; the server only hands out files,
 so it costs next to nothing to host.
 
+The configuration's TOML is the whole story, and four tabs work on it:
+
+- **Run**: run, pause, the section, the gather, the run's grid and accuracy, downloads.
+- **Settings**: the common settings as controls that write into the TOML, keeping its
+  comments: grid points and spacing, duration, a Courant fraction or a fixed $\Delta t$,
+  stencil order, Taylor or optimised coefficients, the time-dispersion transform, absorbing
+  layers, free surface, record interval, each source's position and wavelet, the recorded
+  components, and the model's layers and spheres. Edits show **Apply**/**Revert** until applied;
+  the memory line follows them.
+- **FWI**: an inversion of synthetic data. The configuration's model is where it starts, a
+  true model (TOML layers and spheres; by default the start with a faster sphere below the
+  sources) makes the observed traces, and each source is a shot. The controls are `[inversion]`'s
+  (parameters, iterations, L-BFGS pairs, step limits, balancing, `fixed_above`, the
+  preconditioner's water level, bounds). **Gradient** computes the misfit and gradient at the
+  start, **Invert** runs L-BFGS; the page shows each iteration's misfit, as a table and a chart,
+  and the model, its update, the true update and $-\nabla\chi$ for $v_p$, $v_s$ or $\rho$ on any
+  plane. `examples/sphere-inversion.toml` takes about a minute in a browser. A gradient needs
+  about 25 times a forward run's memory, and a browser gives WebAssembly 4 GiB, so larger
+  inversions belong on a run server (below).
+- **Command**: the command lines that run the configuration without the page (`vibe-rations
+  run`, `check`, `just run`, `run --remote … --detach`, and `remote … attach|fetch` for the
+  run on the page's server), with Copy buttons and a download of the TOML; for the inversion,
+  its start and truth as two files with the same time step, layers and coefficients, and the
+  commands that make the observed traces from the truth and invert them (`run --shots`, then
+  `invert`), which give what the page gives.
+
 ```bash
 just in web     # build web/dist in the dev container
 just serve      # on the host: http://localhost:8088, with the production server and headers
@@ -276,6 +302,9 @@ just tunnel me@bigbox     # ssh -N -L 8089:127.0.0.1:8088 me@bigbox
 
 and open http://localhost:8089. **Compute** chooses between the server and this browser;
 **Runs** lists the server's runs to attach to, including ones started from the command line.
+With the server chosen, the FWI tab's inversions run there too, each a run of its own that
+outlasts the page; attaching to one brings back its start, true model, misfits and pictures,
+and `vibe-rations remote … attach|fetch` fetch its model and `inversion.json` like `invert`'s.
 A run started from the page keeps going when the page is closed. The memory line shows what
 the server has available. Turning **Live pictures** off leaves progress only: the page asks
 for the run's status every 2 s instead of a section and a gather five times a second, which
@@ -290,7 +319,10 @@ times a second: about 12% less time, and next to nothing over the network.
 
 **The API** is plain HTTP and JSON (listed in `src/server.rs`): create a run from a
 configuration, upload its model files, start, pause, resume or delete it, read its status,
-draw sections and gathers as PNG, and fetch its traces and outputs. Each run keeps its
+draw sections and gathers as PNG, and fetch its traces and outputs. An inversion is a run
+with `kind=inversion` and a `truth.toml`; it steps a unit of work at a time (a shot of
+observed traces, the start, an iteration), pauses between units, and draws its model,
+update and gradient as PNG. Each run keeps its
 configuration, model files, status and outputs in a directory of its own under the server's
 `--data`; after a restart, finished runs' results are still there, and runs that were in
 progress are marked interrupted.

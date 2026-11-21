@@ -50,8 +50,19 @@ fail the same way; a real browser doesn't.
 - **Paths from clients stay inside the run** (`server::relative`): model files, outputs and
   page files. Keep the refusal tests in `tests/remote.rs` passing.
 - **The page's two solvers answer the same messages** (`load`, `run`, `pause`, `view`,
-  `live`, `npy`, `estimate`; `attach` for the server). Change worker.js and remote.js
-  together. A `frame` without a section is progress only (live pictures off).
+  `live`, `npy`, `estimate`, and the inversion's `invert`, `stopInversion`,
+  `resumeInversion`, `inversionView`, `modelNpy`; `attach` for the server). Change worker.js
+  and remote.js together. A `frame` without a section is progress only (live pictures off).
+- **Inversions are runs of `kind=inversion`** (`POST /api/runs?kind=inversion`, then
+  `PUT …/files/truth.toml`, then `start`): `Status::inversion` has `InversionView::status`,
+  `step`/`total_steps` count units (shots, the start, iterations), `GET …/model` draws the
+  pictures, and the outputs are `invert`'s (`vp.npy`, `vs.npy`, `rho.npy`,
+  `inversion.json`), so `remote list/attach/fetch/cancel` work on them unchanged. Each runs in
+  a thread of its own, a unit at a time; the scheduler skips them. Pausing waits for the unit
+  in progress; deleting sets `Run::deleted`, which the thread checks before writing. Its
+  pictures (`view::Pictures`, cheap to clone) sit in `State::pictures`, so requests never
+  wait for a unit. `tests/remote.rs` checks a server inversion ends where a local one does,
+  bit for bit.
 - **Never hold `Run::shared` while stepping, and take `Run::state` through `Run::state()`**
   (not `.state.lock()`), so requests take turns with the scheduler: std's Mutex isn't fair.
   Status must answer in milliseconds during a run; check it with curl's
