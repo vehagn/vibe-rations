@@ -659,6 +659,13 @@ pub struct InversionConfig {
     /// steps with `initial_step` and `max_step`).
     #[serde(default)]
     pub scale: ParameterScale,
+    /// Get each shot's forward wavefield back for its gradient by rebuilding it backwards
+    /// from the band around the absorbing layers, as `gradient --reconstruct` does
+    /// ([`crate::gradient::Strategy::Reconstruct`], segments of the length that needs least
+    /// memory), instead of replaying it from checkpoints: exact only up to single-precision
+    /// round-off.
+    #[serde(default)]
+    pub reconstruct: bool,
     /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice
     /// the largest of the starting model's, and for vp no faster than the time step allows.
     /// λ ≥ 0 too: vs stays below vp/√2, or vp above √2 vs where vs isn't inverted. The

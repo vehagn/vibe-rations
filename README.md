@@ -137,7 +137,7 @@ a free surface $z = 0$ is the surface.
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
-| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, bounds `vp_range`, `vs_range`, `rho_range` |
+| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, `reconstruct` (rebuild the forward wavefields, as `gradient --reconstruct`), bounds `vp_range`, `vs_range`, `rho_range` |
 | `[inversion.scale]` | Relative factors on the inverted parameters' steps: `vp`, `vs`, `rho` (1 by default; only their ratios matter) |
 | `[[inversion.stage]]` | Frequency continuation: `max_frequency` (low-pass corner, Hz), `iterations`, `misfit` |
 | `[[inversion.mute]]` | A mute or one side of a window, in every stage (`[[inversion.stage.mute]]`: one stage's): `keep` (`before` or `after` the line $t = x/$`velocity`$ + $`delay`, $x$ the horizontal offset), `taper` (s), `weight` on the other side (0 by default), `shape` (`cosine`, or `exponential` damping with `taper` its time constant) |
