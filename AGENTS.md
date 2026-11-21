@@ -21,6 +21,7 @@ opens a shell there instead.
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
+| `just gradient-accuracy [name]` | The solver's gradients against the exact kernels of a homogeneous full space | ~40 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
@@ -100,7 +101,10 @@ tests/
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
   reconstruction.rs  the rebuilt wavefield's drift (ignored; `just drift`)
-  common/        closed-form solutions and setup helpers the two share
+  gradient_accuracy.rs  gradients against the exact kernels (studies ignored; `just
+                 gradient-accuracy`), and a baseline at the coarsest grid
+  common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
+                 force's field with its gradient for any time function, and the exact kernels
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -136,6 +140,19 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The gradient against the exact kernels** (`tests/gradient_accuracy.rs`,
+  `tests/common/stokes.rs`; the log's 2026-11-21 entry). In a homogeneous full space the
+  kernels of an L2 trace misfit are closed-form correlations of Stokes's solution. Compare the
+  solver's gradient times the sample interval over the cell volume, not the bare gradient: the
+  misfit sums samples, it doesn't integrate them. And compare it with the exact correlations
+  taken where the solver takes them (`Problem::grid_kernels`: ρ at the six velocity
+  positions, half each; λ and μ's normal part at the node; μ's shear parts at the twelve
+  shear positions, a quarter each), or the grid's sampling of the model, $O(h^2)$ and 4% for
+  vs at 3.5 points per wavelength (11% for ρ), swamps the wavefields' error (0.26%). Kernels
+  are singular at the source and receiver: compare outside half a dominant wavelength. Error
+  in the traces and in the gradient differ: the gradient's was a quarter of the trace's at
+  the default's coarsest grid, but with order 4 or the time error kept about the recorded
+  residual's, 1.3–1.7 times the trace's.
 - **Mutes and windows** (`[[inversion.mute]]`, `[[inversion.stage.mute]]`,
   `misfit::mute_weight`, `misfit::offsets`). A mute is a fixed diagonal weight by time and
   horizontal offset, applied before the filter to observed and synthetic traces alike, so the
@@ -425,7 +442,9 @@ doesn't show.
   $4.0 \times 10^{-6}$ (at $h = 10^{-2}$); the rebuilt wavefield retraces the run to
   $\le 1.2 \times 10^{-6}$ of each array's peak and its gradient the replay's to
   $\le 7.1 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
-  the replay's numbers (order 8 $\le 1.6 \times 10^{-5}$); the 9 s soft-sediment run drains to
+  the replay's numbers (order 8 $\le 1.6 \times 10^{-5}$); the gradient against the exact
+  kernels at 3.5 points per S wavelength (`tests/gradient_accuracy.rs`), the wavefields' part
+  0.26% (S) and 0.12% (P) in the Fresnel zone, +0.19% and −0.10% along a smooth change; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
   for these long waves), 0.001–0.008%, 2.53%, the same layers, $\le 7 \times 10^{-7}$. With
   the time error kept at $C = 0.3$ (the default before): 0.07–0.19%, 0.03–0.09%, 2.40%,

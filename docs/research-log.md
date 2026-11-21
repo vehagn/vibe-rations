@@ -1754,6 +1754,157 @@ the memory estimate, made first, refused the iterations the page writes beside t
 **Reproduce:** `just unit misfit`; `just physics mutes_keep`; the numbers above,
 `cargo test --release --lib mute_study -- --ignored --nocapture`.
 
+## 2026-11-21 — The gradient against the exact kernels
+
+**Question.** The finite-difference checks show that the gradient is that of the discrete
+run, to its round-off (2026-11-20, the gradient entries). How far is that from the gradient
+of the wave equation itself, and what sets the difference: the wavefields' dispersion, the
+time step, the stencil, the residual the adjoint run starts from, or the grid's sampling of
+the model? This is the roadmap's step 4 for dispersion, and two open questions: the accuracy
+study repeated for gradients, and whether the time-dispersion transform, which takes the time
+error out of the traces, takes it out of the gradient too.
+
+**Method** (`tests/gradient_accuracy.rs`, `tests/common/stokes.rs`). In a homogeneous full
+space ($v_p$ = 3000 m/s, $v_s$ = 1732 m/s, $\rho$ = 2500 kg/m³) a point force's displacement is
+Stokes's solution [@aki2002, eq. 4.23]; `stokes` evaluates it for any time function and
+differentiates it in space in closed form. For $\chi = \tfrac12 \int_0^T r(t)^2\, dt$, $r$ the
+residual of one velocity component at the receiver, Born's approximation and reciprocity give
+the kernels [@tromp2005; @liu2006; @fichtner2011]
+
+$$
+K_\rho = -\int \ddot{\mathbf u} \cdot \mathbf a \, d\tau, \qquad
+K_\lambda = -\int (\nabla\cdot\mathbf a)(\nabla\cdot\mathbf u)\, d\tau, \qquad
+K_\mu = -\int \partial_j a_i\, (\partial_j u_i + \partial_i u_j)\, d\tau,
+$$
+
+$\mathbf u$ the forward displacement and $\mathbf a(\tau)$ the velocity at time $T - \tau$ of a
+force at the receiver whose time function is the residual reversed. Both are Stokes's
+solution, so the kernels are time integrals of closed forms (trapezium rule every 1 ms; the
+reversed residual is tabulated every 10 μs with its first three derivatives and its
+integral, and interpolated by cubic Hermite polynomials). Checks (`the_reference_is_consistent`):
+the velocity agrees with the physics tests' Stokes solution to $10^{-5}$, the spatial
+derivatives with finite differences to $10^{-6}$, the table with the residual to $10^{-7}$.
+
+A force of $10^9$ N (Ricker, 10 Hz) is recorded 720 m away: S, a force along $y$ with $v_y$
+recorded along $x$ (broadside S, so the $v_s$ kernel); P, a force along $x$ with $v_x$ recorded
+(P along its axis, so the $v_p$ kernel). 720 m is 4.2 dominant and 10.4 shortest S
+wavelengths. The observed trace is Stokes's solution in a medium 2% faster, so the residual
+is what an inversion sees: mostly a shift of 8 ms, a twelfth of a period. The grid reaches
+360 m beyond source and receiver and to either side, inside 12 nodes of CPML; record 0.75 s,
+after which the residual is below $10^{-6}$ of its peak.
+
+The solver's gradient at a node, times the sample interval over the cell volume (the misfit
+sums samples rather than integrating them, and a node stands for a cell), is compared in
+three ways:
+
+- *all*: against the exact kernel at the node;
+- *fields*: against the exact correlations taken where the solver takes them and averaged as
+  it averages the model (`Problem::grid_kernels`): $\rho$'s three components at the six
+  velocity positions around the node, half each (arithmetic means); $\lambda$ and the normal
+  part of $\mu$ at the node; $\mu$'s shear parts at the twelve shear-stress positions, a
+  quarter each (harmonic means; Moczo et al.'s averaging [@moczo2002]). What differs here is
+  the solver's wavefields: dispersion, the time step, the residual;
+- *grid*: the second against the first, the staggered grid's sampling of the model, with exact
+  fields.
+
+On the horizontal plane through source and receiver, outside half a dominant S wavelength
+(87 m) around both, where the kernels are singular: in the first Fresnel zone, where the
+detour is under half a dominant wavelength [@spetzler2004], and on the whole plane; the
+error is $\lVert g - k \rVert / \lVert k \rVert$ for the main parameter ($v_s$ for S, $v_p$ for
+P) and the cosine. And along a smooth change, a Gaussian ($\sigma$ = 60 m, cut at $4\sigma$)
+midway between them, relative ($v_s(1 + \delta)$): the derivative a line search uses, against
+its exact value integrated on a 10 m grid (5 m changes it by $5 \times 10^{-6}$), split in the
+same way (`Problem::grid_integral`).
+
+**Results.** *S, the default scheme* (order 8, optimised coefficients, $C$ = 0.85, time error
+removed), by grid spacing; points per shortest S wavelength, the trace's misfit and the
+recorded residual's, then the gradient's errors for $v_s$:
+
+| Points per wavelength | Trace | Residual | Fresnel: all | cosine | fields | grid | Plane: all | fields | Along the Gaussian: all | fields | grid |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 3.46 | 0.96% | 1.49% | 4.15% | +0.99918 | 0.26% | 4.19% | 5.74% | 0.27% | −0.46% | +0.19% | −0.65% |
+| 3.85 | 0.30% | 0.47% | 3.97% | +0.99925 | 0.11% | 4.00% | 4.97% | 0.12% | −0.42% | +0.11% | −0.53% |
+| 4.62 | 0.06% | 0.09% | 2.73% | +0.99965 | 0.05% | 2.74% | 3.56% | 0.05% | −0.33% | +0.04% | −0.37% |
+| 5.77 | 0.01% | 0.02% | 1.69% | +0.99987 | 0.01% | 1.69% | 2.17% | 0.01% | −0.24% | −0.01% | −0.23% |
+| 6.93 | 0.01% | 0.02% | 1.20% | +0.99993 | 0.01% | 1.20% | 1.54% | 0.01% | −0.16% | +0.00% | −0.16% |
+| 7.70 | 0.01% | 0.02% | 0.96% | +0.99996 | 0.01% | 0.96% | 1.26% | 0.01% | −0.12% | +0.01% | −0.13% |
+| 8.66 | 0.01% | 0.02% | 0.76% | +0.99997 | 0.02% | 0.77% | 1.00% | 0.02% | −0.09% | +0.02% | −0.10% |
+
+The wavefields' error in the gradient (*fields*) follows the trace's down to a floor of
+0.01–0.02% (round-off, the layers, the 1 ms quadrature), and is smaller: a quarter of the
+trace's misfit at 3.5 points per wavelength and a sixth of the recorded residual's. That is
+not general: with the time error kept or with order 4 (below) the gradient is about as wrong
+as the residual. Why the default's coarse-grid error weighs so little in the kernel was not
+traced. The grid's sampling falls as $h^2$ (5.4 times
+from 20 to 8 m, against 6.25) and dominates from the start. For $\rho$, averaged along all
+three axes, the whole error is larger (11% at 3.5 points per wavelength, 1.8% at 8.7) and
+*fields* about the same (0.18% and 0.02%). Cosines with the exact kernel: 0.9992 at 3.5, 0.99997 at 8.7.
+
+*P*, the same: *fields* 0.12% (3.5 points per S wavelength, 6.0 per P), 0.12%, 0.04% (4.6),
+then 0.01%; *grid* 0.00% at every spacing, because $\lambda$, which alone carries the $v_p$
+kernel, sits on the node and isn't averaged; along the Gaussian −0.10% at 3.5, −0.04% at 4.6,
+under 0.01% from 5.8. For $\rho$, *fields* is 0.35% at 3.5 and 0.10–0.15% from 4.6, and the
+whole error falls from 6.1% to 1.2%.
+
+*The time step* (S, 4.6 points per wavelength, order 8, optimised):
+
+| Courant, time error | Trace | Residual | Fresnel: all | cosine | fields | grid | Plane: all | fields | Along the Gaussian: all | fields | grid |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.85, kept | 4.91% | 7.57% | 9.36% | +0.99952 | 8.39% | 2.74% | 9.75% | 8.39% | −7.65% | −7.31% | −0.37% |
+| 0.5, kept | 1.69% | 2.61% | 4.40% | +0.99965 | 2.89% | 2.74% | 5.04% | 2.89% | −2.85% | −2.49% | −0.37% |
+| 0.3, kept | 0.60% | 0.93% | 3.13% | +0.99966 | 1.02% | 2.74% | 3.92% | 1.02% | −1.24% | −0.88% | −0.37% |
+| 0.85, removed | 0.06% | 0.09% | 2.73% | +0.99965 | 0.05% | 2.74% | 3.56% | 0.05% | −0.33% | +0.04% | −0.37% |
+| 0.5, removed | 0.06% | 0.09% | 2.73% | +0.99965 | 0.04% | 2.74% | 3.56% | 0.05% | −0.33% | +0.04% | −0.37% |
+| 0.3, removed | 0.06% | 0.09% | 2.73% | +0.99965 | 0.04% | 2.74% | 3.57% | 0.04% | −0.33% | +0.03% | −0.37% |
+
+With leapfrog's time error kept, the gradient is wrong by 1.7 times the trace's misfit,
+about as much as the recorded residual (8.4% against 7.6% at $C$ = 0.85), and $C$ = 0.3
+still leaves 1.0%; removed, the error is 0.04–0.05% at every $C$. The transform
+takes the time error out of the gradient as out of the traces, as expected: the transformed
+traces are the time-continuous ones for any model, and the adjoint source goes back through
+the transform's exact transpose (2026-11-20, "The adjoint and gradients with the new
+defaults").
+
+*Orders and coefficients* (S, 4.6 points per wavelength):
+
+| Order, coefficients | Trace | Residual | Fresnel: all | cosine | fields | grid | Plane: all | fields | Along the Gaussian: all | fields | grid |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4, Taylor | 11.68% | 18.00% | 15.55% | +0.99880 | 16.08% | 2.74% | 15.56% | 16.05% | +12.77% | +13.19% | −0.37% |
+| 8, Taylor | 0.48% | 0.75% | 2.67% | +0.99965 | 0.43% | 2.74% | 3.52% | 0.42% | −0.03% | +0.34% | −0.37% |
+| 12, Taylor | 0.05% | 0.08% | 2.73% | +0.99965 | 0.03% | 2.74% | 3.58% | 0.03% | −0.35% | +0.02% | −0.37% |
+| 16, Taylor | 0.01% | 0.02% | 2.74% | +0.99965 | 0.01% | 2.74% | 3.58% | 0.02% | −0.36% | +0.01% | −0.37% |
+| 4, optimised | 8.95% | 13.80% | 10.84% | +0.99912 | 11.24% | 2.74% | 10.96% | 11.23% | +8.66% | +9.06% | −0.37% |
+| 8, optimised | 0.06% | 0.09% | 2.73% | +0.99965 | 0.05% | 2.74% | 3.56% | 0.05% | −0.33% | +0.04% | −0.37% |
+| 12, optimised | 0.01% | 0.02% | 2.74% | +0.99965 | 0.01% | 2.74% | 3.58% | 0.02% | −0.36% | +0.00% | −0.37% |
+| 16, optimised | 0.01% | 0.02% | 2.74% | +0.99965 | 0.02% | 2.74% | 3.58% | 0.02% | −0.36% | +0.00% | −0.37% |
+
+Order 4 gets its gradient 11–16% wrong, 1.3–1.4 times its traces' misfit and a little
+less than its residual's (14–18%), and along the Gaussian 9–13%; order 8 with Taylor coefficients 0.43%; from order 8 optimised up, the floor.
+
+*The residual.* With the exact residual as the adjoint source instead of the recorded one,
+*fields* falls from 0.26% to 0.12% at 3.5 points per wavelength (along the Gaussian from
++0.19% to −0.02%), and from 0.05% to 0.02% at 4.6: at the coarsest grid about half of the
+gradient's error comes in with the residual, whose own error is the recorded trace's
+(1.5 times the trace's misfit, the residual being about two thirds of the trace), and half
+through the forward and adjoint wavefields.
+
+**Decision.** No change to the defaults. At them, from 3.5 points per shortest S wavelength,
+the solver's gradient is the wave equation's to within 0.26% (the cosine 0.9992), less than
+its traces' error, and the time step doesn't matter; the gradient is as trustworthy as the
+traces, so dispersion doesn't limit an inversion at the grids we use. What separates it from
+the continuous kernel is how the staggered grid samples $\rho$ and $\mu$: a node's value stands
+for the averages around it, which differs from a point sample by $O(h^2)$. That is the model's
+parametrisation, not an error of the gradient: the forward runs use the same averages, and
+differentiating the discrete run, as we do, gives the exact gradient for that
+parametrisation [@sirkes1997]. Along smooth changes it costs 0.1–0.6%. A baseline test,
+`the_gradient_matches_the_exact_kernels`, holds the coarsest grid's numbers (S: 0.26% and
++0.19%; P: 0.12% and −0.10%). Still to measure: interfaces and the free surface, which have
+no closed-form kernels, against finer grids; and whether an inversion's model error follows.
+
+**Reproduce:** `just gradient-accuracy` (38 minutes on four cores; `just gradient-accuracy
+by_time_step` and the like for one table); the baseline with `cargo test --release --test
+gradient_accuracy`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -1791,11 +1942,11 @@ the memory estimate, made first, refused the iterations the page writes beside t
   band an inversion pins (the starting model's slowest wave, or the lowest speed allowed).
   Gradients with them agree with finite differences (2026-11-20, the adjoint and gradients
   with the new defaults).
-- **The time error in gradients.** Residuals enter through the transposed transform, and the
-  gradient agrees with finite differences of the transformed run (same entry). Since the
-  transformed traces equal the time-continuous ones for every model, the gradient should
-  too: compare with a small-$C$ reference. And whether order 12 or 16 should be the
-  default.
+- **Order 12 or 16 by default?** Not for the gradient's sake: from 4.6 points per shortest S
+  wavelength every order from 8 up leaves the wavefields' part of the gradient's error at
+  0.01–0.05%, and order 8 has 0.26% at 3.5 (2026-11-21, "The gradient against the exact
+  kernels"). The case for them is cost on coarse grids (2026-11-20, optimised coefficients).
+  (That entry also settled the time error in gradients: the transform takes it out.)
 - **Absorbing layers at high order.** Tune the profile or width so reflection returns to
   $-76$ dB.
 - **Error propagation into adjoint fields and gradients.** Forward-field error (dispersion,
@@ -1807,6 +1958,10 @@ the memory estimate, made first, refused the iterations the page writes beside t
   rebuilding it backwards from the band (2026-11-20: single-precision round-off,
   $10^{-7}$–$10^{-6}$ of the gradient, set by the field's loudest stretch in a segment; the
   layers and the free surface add nothing). Still open there: why a water layer drifts five
-  times more, and whether that drift moves an inversion. Still to measure: the accuracy study
-  repeated for gradients (against the gradient of the exact wave
-  equation, e.g. a fine-grid reference) as a function of stencil order, $C$ and ppw.
+  times more, and whether that drift moves an inversion. Dispersion in a homogeneous full space
+  is settled too, against the exact kernels (2026-11-21, "The gradient against the exact
+  kernels"): at the defaults the wavefields put 0.26% into the gradient at 3.5 points per
+  shortest S wavelength and $\le 0.05\%$ from 4.6, less than into the traces; with the time
+  error kept, or order 4, more. Still to measure: interfaces and the free surface, which have
+  no closed-form kernels, against finer grids [@mittet2017]; and whether an inversion's model
+  error follows the gradient's (data from a fine grid inverted on coarse ones).

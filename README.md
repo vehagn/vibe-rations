@@ -606,6 +606,30 @@ Order 12 at 3.0 points per S wavelength is more accurate (0.89%) than order 8 wi
 coefficients at 4.6 (1.2%), for about a quarter of the compute and 0.28 of the memory. The
 larger $\sum_n \lvert c_n\rvert$ of optimised coefficients costs 4–6% more time steps.
 
+**Gradients** (`just gradient-accuracy`). In a homogeneous full space a point force's field is
+Stokes's solution, so the kernels of an L2 trace misfit are exact correlations (Tromp et al.
+2005), and the solver's gradient can be split against them: what its wavefields get wrong
+(*fields*: the exact correlations taken at the staggered positions and averaged as the solver
+averages the model), and how the staggered grid samples the model (*grid*: those against the
+kernel at the node). S waves 720 m (10.4 shortest wavelengths) from a force, the residual
+against a medium 2% faster; error in the first Fresnel zone, default scheme:
+
+| Points per shortest S wavelength | Trace | Gradient, fields | Gradient, grid | Along a smooth change |
+|---|---|---|---|---|
+| 3.5 | 0.96% | 0.26% | 4.2% | −0.46% |
+| 4.6 | 0.06% | 0.05% | 2.7% | −0.33% |
+| 6.9 | 0.01% | 0.01% | 1.2% | −0.16% |
+| 8.7 | 0.01% | 0.02% | 0.77% | −0.09% |
+
+At the defaults the wavefields' error in the gradient is no larger than in the traces (with
+order 4 or the time error kept it is 1.3–1.7 times larger), and removing the time
+error takes it out of the gradient too (kept, at 4.6 points per wavelength: 8.4% at a Courant
+fraction of 0.85, 1.0% at 0.3; removed: 0.05% at either). What remains is the grid's: a
+node's ρ and μ stand for the averages around it, not a point, which differs from the point
+kernel by $O(h^2)$ (vs, above; none for vp, whose λ sits on the node; 11% for ρ at 3.5 points
+per wavelength) and costs a smooth change of the model 0.1–0.6%. Order 4 at 4.6 points per
+wavelength gets 11–16% of its gradient wrong.
+
 Rules of thumb:
 
 | Purpose | Settings | Points per shortest wavelength |
@@ -687,12 +711,13 @@ Planned next, following Fichtner (2011), ch. 7–11:
    (research log, "Rebuilding the forward wavefield backwards"; `just drift`): it is
    single-precision round-off, $10^{-7}$–$10^{-6}$ of the gradient's largest value, growing
    while the rebuilt field is loud rather than with run length, order or time step, and the
-   layers and the free surface add nothing to it. The tools: dot-product and reciprocity tests for adjoint
-   consistency, gradient checks against finite differences, and the accuracy study repeated
-   for gradients. With the time-dispersion transform, the adjoint source is the transposed
-   transform of the residuals; since the transformed traces equal the time-continuous ones
-   for every model, their gradient should too, which takes the time error out of the
-   gradient as well. To be measured.
+   layers and the free surface add nothing to it. The dispersion's part is measured in a
+   homogeneous full space against the exact kernels (`just gradient-accuracy`; research log,
+   "The gradient against the exact kernels"; "Gradients" under "Accuracy" below): at the
+   defaults the wavefields put 0.26% into the gradient at 3.5 points per shortest S wavelength
+   and at most 0.05% from 4.6, and the time-dispersion transform takes the time error out of
+   the gradient as it does out of the traces. Still to measure: interfaces and the free
+   surface, which have no closed-form kernels, against finer grids.
 5. **Misfits and adjoint sources** (done: `src/misfit.rs`). L2 waveforms; cross-correlation
    time shifts (Luo & Schuster 1991), with the exact derivative of the parabola-refined
    shift rather than the shifted-copy approximation (Tromp et al. 2005), which was 45% off
