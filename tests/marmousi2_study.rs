@@ -9,8 +9,10 @@
 //! - `misfit_by_arrival`: the start's balanced L2 misfit split by arrival time (before and
 //!   after lines t = |Δx|/v + t₀), by component and by offset, and its gradient split at one
 //!   of the lines: each part's norm and its cosine with the true update by depth band.
-//! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`: inversions from the
-//!   same start, reporting after each stage the balanced L2 misfit of all the data (one scale
+//! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
+//!   `stages_with_receivers_side`, and `muted_l2`, `muted_stages`, `down_weighted_l2` and
+//!   `down_weighted_stages` with the seafloor's slow waves muted or down-weighted: inversions
+//!   from the same start, reporting after each stage the balanced L2 misfit of all the data (one scale
 //!   for every variant, relative to the start's), and by depth band the error ratio
 //!   ‖m - m_true‖ / ‖m₀ - m_true‖ and the cosine of the update m - m₀ with the true one.
 
@@ -154,6 +156,30 @@ const FREQUENCY_STAGES: Variant = (
      [[inversion.stage]]\nmax_frequency = 1.0\niterations = 2\n\
      [[inversion.stage]]\niterations = 1",
 );
+/// What `misfit_by_arrival` found the slow seafloor waves arrive after: a line at 600 m/s from
+/// 0.87 s (`central_lines`' t₀), over half a period (0.42 s) of taper, so that the weight is down
+/// by the time the start's 400 m/s waves arrive (at 0.5 km offset just then, at 1 km 0.4 s
+/// before). The inversion's mutes are the same in every stage.
+const SLOW_WAVES_MUTED: &str = "[[inversion.mute]]\nkeep = \"before\"\nvelocity = 600.0\n\
+                                delay = 0.87\ntaper = 0.42";
+/// The same line, down-weighting to 0.1 (1% in the L2 misfit) instead of removing.
+const SLOW_WAVES_DOWN_WEIGHTED: &str = "[[inversion.mute]]\nkeep = \"before\"\n\
+                                        velocity = 600.0\ndelay = 0.87\ntaper = 0.42\n\
+                                        weight = 0.1";
+/// L2 with the slow waves muted, and with them down-weighted; the same with the stages. The
+/// tables are put together at the test's start (`Variant` holds `&'static str`s).
+fn muted(stages: bool, mute: &'static str) -> Variant {
+    let tables = if stages {
+        format!("{mute}\n{}", FREQUENCY_STAGES.1)
+    } else {
+        mute.to_string()
+    };
+    (
+        if stages { "" } else { "iterations = 5" },
+        Box::leak(tables.into_boxed_str()),
+    )
+}
+
 /// The stages, the best of the first four variants for vs, with the receivers' side of the
 /// illumination estimated from eight runs at each stage's start.
 const STAGES_WITH_RECEIVERS_SIDE: Variant = ("receiver_runs = 8", FREQUENCY_STAGES.1);
@@ -176,6 +202,10 @@ fn the_variants_parse() {
         (L2, 1),
         (FREQUENCY_STAGES, 3),
         (STAGES_WITH_RECEIVERS_SIDE, 3),
+        (muted(false, SLOW_WAVES_MUTED), 1),
+        (muted(true, SLOW_WAVES_MUTED), 3),
+        (muted(false, SLOW_WAVES_DOWN_WEIGHTED), 1),
+        (muted(true, SLOW_WAVES_DOWN_WEIGHTED), 3),
         (TIME_SHIFTS_THEN_L2, 2),
         (PHASE_THEN_L2, 2),
         (("iterations = 0", ""), 1),
@@ -185,6 +215,9 @@ fn the_variants_parse() {
         assert_eq!(inversion.fixed_above, Some(500.0));
         let s = inversion.stages().unwrap();
         assert_eq!(s.len(), stages, "{variant:?}");
+        // The muted variants mute once, for every stage.
+        let mutes = usize::from(variant.1.contains("[[inversion.mute]]"));
+        assert_eq!(inversion.mutes.len(), mutes, "{variant:?}");
         let total: usize = s.iter().map(|s| s.iterations).sum();
         assert!(total == 5 || variant.0 == "iterations = 0", "{variant:?}");
     }
@@ -608,6 +641,39 @@ fn stages_with_receivers_side() {
     invert(
         "stages-with-receivers-side",
         &Case::central(STAGES_WITH_RECEIVERS_SIDE),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study muted_l2` (about 45 minutes)"]
+fn muted_l2() {
+    invert("muted-l2", &Case::central(muted(false, SLOW_WAVES_MUTED)));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study muted_stages` (about an hour)"]
+fn muted_stages() {
+    invert(
+        "muted-stages",
+        &Case::central(muted(true, SLOW_WAVES_MUTED)),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study down_weighted_l2` (about 45 minutes)"]
+fn down_weighted_l2() {
+    invert(
+        "down-weighted-l2",
+        &Case::central(muted(false, SLOW_WAVES_DOWN_WEIGHTED)),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study down_weighted_stages` (about an hour)"]
+fn down_weighted_stages() {
+    invert(
+        "down-weighted-stages",
+        &Case::central(muted(true, SLOW_WAVES_DOWN_WEIGHTED)),
     );
 }
 
