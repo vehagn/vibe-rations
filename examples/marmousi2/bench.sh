@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 here=examples/marmousi2
 out=out/marmousi2-bench
 mkdir -p "$out"
-[[ -f data/marmousi2/25m/vp.npy && -f data/marmousi2/25m-central-smooth/vp.npy ]] || {
+[[ -f $here/25m/vp.npy && -f $here/25m-central-smooth/vp.npy ]] || {
   echo "no model files: run \`just marmousi2\` first" >&2
   exit 1
 }
@@ -30,10 +30,11 @@ print(f"wall {wall:.1f} s, peak {peak:.0f} MiB", file=sys.stderr)
 sys.exit(code)' "$@" 2> "$log" || { cat "$log" >&2; exit 1; }
 }
 
-# The configuration at another order and without snapshots, beside the original's model
-# paths: out/marmousi2-bench lies as deep below the repository as examples/marmousi2.
+# The configuration at another order and without snapshots, its model files found from
+# out/marmousi2-bench, which lies as deep below the repository as examples/marmousi2.
 variant() { # config order name
-  sed -e '/^\[\[snapshot\]\]/,/^$/d' -e "s/^order = 8/order = $2/" "$1" > "$out/$3.toml"
+  sed -e '/^\[\[snapshot\]\]/,/^$/d' -e "s/^order = 8/order = $2/" \
+    -e "s#^\(vp\|vs\|rho\) = \"#&../../$here/#" "$1" > "$out/$3.toml"
   grep -q "^order = $2" "$out/$3.toml"
   echo "$out/$3.toml"
 }

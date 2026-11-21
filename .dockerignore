@@ -2,3 +2,7 @@
 target
 out
 web/dist
+# Downloaded models: images that need them fetch their own
+data
+# …and the model files made from them: the web image's marmousi2 stage makes its own
+examples/marmousi2/[0-9]*

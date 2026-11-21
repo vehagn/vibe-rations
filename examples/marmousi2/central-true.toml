@@ -27,9 +27,9 @@ order = 8
 optimised_for = 4.2  # the points per shortest wavelength of this model at 3 Hz
 
 [model.files]
-vp = "../../data/marmousi2/25m-central/vp.npy"
-vs = "../../data/marmousi2/25m-central/vs.npy"
-rho = "../../data/marmousi2/25m-central/rho.npy"
+vp = "25m-central/vp.npy"
+vs = "25m-central/vs.npy"
+rho = "25m-central/rho.npy"
 
 [[source]]
 position = [1000.0, 500.0, 50.0]

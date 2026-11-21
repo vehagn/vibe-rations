@@ -1,0 +1,47 @@
+# Marmousi2 (Martin, Wiley & Marfurt 2006), decimated: 17 km of a faulted margin under 450 m
+# of water, every 50 m. An air gun in the water fires into ocean-bottom nodes; the waves
+# reflect off the faults and layers, and slow Scholte waves crawl along the seafloor.
+#
+#   just marmousi2                       # once: fetches Marmousi2 and makes the model files
+#   just run examples/marmousi2-50m.toml
+#
+# The model is a section the same at every y (2.5D), in examples/marmousi2/50m/. The
+# sediments under the seafloor carry S waves as slow as 321 m/s, so 50 m holds only 1.5 Hz:
+# marmousi2-central.toml has a part of it at 25 m.
+
+[grid]
+points = [341, 41, 71]
+spacing = 50.0
+
+[time]
+duration = 8.0
+
+[boundary]
+pml_width = 16  # 41 nodes along y leave 9 outside the layers
+
+[model.files]  # relative to this file
+vp = "marmousi2/50m/vp.npy"
+vs = "marmousi2/50m/vs.npy"
+rho = "marmousi2/50m/rho.npy"
+
+[[source]]
+position = [8500.0, 1000.0, 100.0]  # in the water, 100 m down
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 0.6 }
+
+[receivers]
+components = ["vx", "vz"]
+
+[[receivers.line]]  # on the seafloor's first solid nodes
+from = [1000.0, 1000.0, 500.0]
+to = [16000.0, 1000.0, 500.0]
+count = 301
+
+[[snapshot]]
+field = "vz"
+plane = "xz"
+at = 1000.0
+interval = 1.0
+
+[output]
+dir = "out/marmousi2-50m"
