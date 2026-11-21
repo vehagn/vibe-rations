@@ -17,12 +17,13 @@ use serde::Serialize;
 
 use crate::config::{Config, PlaneKind};
 use crate::fd::Stencil;
-use crate::gradient::checkpoint_interval;
+use crate::gradient::{Strategy, checkpoint_interval, reconstruction_segment};
 use crate::grid::Grid;
 use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::receiver::Component;
 use crate::simulation::timing;
+use crate::solver::{Band, BandSize};
 
 /// One part of a run's memory.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -77,6 +78,9 @@ pub struct Plan {
     pub pressure_traces: usize,
     pub samples: usize,
     pub volume_snapshots: bool,
+    /// The nodes outside the absorbing layers along x, y and z.
+    pub interior: [std::ops::Range<usize>; 3],
+    pub free_surface: bool,
 }
 
 impl Plan {
@@ -103,6 +107,12 @@ impl Plan {
             },
             samples: steps.div_ceil(cfg.output.record_every.max(1)),
             volume_snapshots: cfg.snapshots.iter().any(|s| s.plane == PlaneKind::Volume),
+            interior: std::array::from_fn(|a| {
+                let n = grid.n[a];
+                let lo = if a == 2 && b.free_surface { 0 } else { w };
+                lo.min(n)..n.saturating_sub(w).max(lo.min(n))
+            }),
+            free_surface: b.free_surface,
         })
     }
 
@@ -197,11 +207,85 @@ impl Plan {
     /// A gradient run's parts, with `observed` traces.
     fn gradient_parts(&self, checkpoint_every: Option<usize>, observed: Part) -> Vec<Part> {
         let padded = self.grid.padded_len() as u64;
-        let interior = self.grid.interior_len() as u64;
         let every = checkpoint_interval(self.steps, checkpoint_every);
         let checkpoints = self.steps.div_ceil(every);
         // The segment holds the velocities before its first step and after each of the others.
         let segment = if self.steps == 0 { 0 } else { every + 1 };
+        let mut parts = self.adjoint_parts(observed);
+        parts.extend([
+            part(
+                format!(
+                    "checkpoints: {checkpoints}, every {every} steps, of the wavefield and \
+                     layers' memory"
+                ),
+                checkpoints as u64 * self.checkpoint_bytes(),
+            ),
+            part(
+                format!("a replayed segment: {segment} copies of the velocities"),
+                segment as u64 * 4 * 3 * padded,
+            ),
+        ]);
+        parts.extend(self.correlation_parts());
+        parts
+    }
+
+    /// The memory of a gradient run that rebuilds the forward wavefield backwards from the
+    /// band around the layers ([`Strategy::Reconstruct`] with `segment`, by default the
+    /// length that needs least), with the observed traces: instead of the checkpoints and a
+    /// replayed segment, a checkpoint at the start of every segment but the last, the band
+    /// for one segment's steps, and the velocities after the step being taken back.
+    pub fn reconstruction_memory(&self, segment: Option<usize>) -> Memory {
+        let padded = self.grid.padded_len() as u64;
+        let band = self.band();
+        let record = 4 * band.values as u64;
+        let k = reconstruction_segment(
+            self.steps,
+            self.checkpoint_bytes() as usize,
+            record as usize,
+            segment,
+        );
+        let checkpoints = self.steps.div_ceil(k).saturating_sub(1);
+        let mut parts = self.adjoint_parts(part("observed traces", self.trace_bytes()));
+        parts.extend([
+            part(
+                format!(
+                    "checkpoints: {checkpoints}, at the starts of segments of {k} steps, of the \
+                     wavefield and layers' memory"
+                ),
+                checkpoints as u64 * self.checkpoint_bytes(),
+            ),
+            part(
+                format!(
+                    "the band around the layers for {k} steps, {} values a step",
+                    band.values
+                ),
+                k as u64 * record,
+            ),
+            part("the band's index runs", band.runs_bytes() as u64),
+            part(
+                "the velocities after the step being taken back",
+                4 * 3 * padded,
+            ),
+        ]);
+        parts.extend(self.correlation_parts());
+        Memory::of(parts)
+    }
+
+    /// The memory of a gradient run that gets the forward wavefield back as `strategy` says.
+    pub fn strategy_memory(&self, strategy: Strategy) -> Memory {
+        match strategy {
+            Strategy::Checkpoints { every } => self.gradient_memory(every),
+            Strategy::Reconstruct { segment } => self.reconstruction_memory(segment),
+        }
+    }
+
+    /// The band a step back reads ([`Band`]), counted.
+    pub fn band(&self) -> BandSize {
+        Band::size(&self.interior, self.free_surface, self.grid.halo)
+    }
+
+    /// The forward run, the adjoint's solver, `observed` traces and the residuals.
+    fn adjoint_parts(&self, observed: Part) -> Vec<Part> {
         let mut parts = self.forward_parts();
         parts.extend([
             part("the adjoint's solver, the same again", self.solver_bytes()),
@@ -211,17 +295,15 @@ impl Plan {
                 "pressure residuals, as they enter the adjoint strain",
                 4 * (self.pressure_traces * self.samples) as u64,
             ),
-            part(
-                format!(
-                    "checkpoints: {checkpoints}, every {every} steps, of the wavefield and \
-                     layers' memory"
-                ),
-                checkpoints as u64 * 4 * (9 * padded + self.psi()),
-            ),
-            part(
-                format!("a replayed segment: {segment} copies of the velocities"),
-                segment as u64 * 4 * 3 * padded,
-            ),
+        ]);
+        parts
+    }
+
+    /// The correlation sums, the illumination and the forward and adjoint strains.
+    fn correlation_parts(&self) -> [Part; 3] {
+        let padded = self.grid.padded_len() as u64;
+        let interior = self.grid.interior_len() as u64;
+        [
             part(
                 "correlation sums: 8 per padded node, in double precision",
                 8 * 8 * padded,
@@ -234,8 +316,12 @@ impl Plan {
                 "forward and adjoint strains: 12 arrays on the padded grid",
                 4 * 12 * padded,
             ),
-        ]);
-        parts
+        ]
+    }
+
+    /// Bytes of a checkpoint ([`crate::solver::State`]): the wavefield and the CPML memory.
+    fn checkpoint_bytes(&self) -> u64 {
+        4 * (9 * self.grid.padded_len() as u64 + self.psi())
     }
 
     fn trace_bytes(&self) -> u64 {
@@ -308,6 +394,12 @@ pub fn estimate_gradient(
     checkpoint_every: Option<usize>,
 ) -> Result<Memory> {
     Ok(plan(cfg, base)?.gradient_memory(checkpoint_every))
+}
+
+/// The memory a gradient run of `cfg` that gets the forward wavefield back as `strategy`
+/// says would need ([`Plan::strategy_memory`]), worked out like [`estimate`].
+pub fn estimate_gradient_with(cfg: &Config, base: &Path, strategy: Strategy) -> Result<Memory> {
+    Ok(plan(cfg, base)?.strategy_memory(strategy))
 }
 
 /// The memory an inversion of `cfg` (`invert`) would need ([`Plan::inversion_memory`]),
@@ -593,6 +685,62 @@ mod tests {
             let forward = estimate(&cfg, Path::new(".")).unwrap();
             assert!(m.peak > 3 * forward.peak);
         }
+    }
+
+    /// A gradient run that rebuilds the forward wavefield is counted exactly too: with the
+    /// default segments, seven-step ones and the whole run as one; with layers all round
+    /// (a band above too) and at order 4.
+    #[test]
+    fn counts_what_a_rebuilding_gradient_run_allocates() {
+        use crate::gradient::{Strategy, gradient_with, l2_misfit};
+        let walls = BASE.replace("pml_width = 8", "pml_width = 8\nfree_surface = false");
+        for (text, segment) in [
+            (BASE.to_string(), None),
+            (BASE.to_string(), Some(7)),
+            (BASE.to_string(), Some(1 << 30)),
+            (walls, None),
+            (format!("{BASE}\n[scheme]\norder = 4"), Some(5)),
+        ] {
+            let strategy = Strategy::Reconstruct { segment };
+            let cfg = Config::from_toml(&text).unwrap();
+            let m = estimate_gradient_with(&cfg, Path::new("."), strategy).unwrap();
+            let mut s = sim(&text);
+            let observed = s.receivers.traces.clone();
+            let weights = vec![1.0; observed.len()];
+            let run = gradient_with(
+                &mut s,
+                |r| l2_misfit(&r.traces, &observed, &weights),
+                strategy,
+            )
+            .unwrap();
+            let held = run.memory_bytes + 4 * observed.iter().map(Vec::len).sum::<usize>();
+            assert_eq!(m.peak, held as u64, "{segment:?}\n{}", m.table());
+            let Strategy::Reconstruct { segment: Some(k) } = run.strategy else {
+                panic!("{:?}", run.strategy)
+            };
+            assert!(
+                m.table().contains(&format!("layers for {k} steps")),
+                "{}",
+                m.table()
+            );
+        }
+        // Saved for the whole run, the band of this small grid outweighs the checkpoints it
+        // spares; split into segments, it needs less than replaying from checkpoints.
+        let cfg = Config::from_toml(BASE).unwrap();
+        let plan = |s| {
+            estimate_gradient_with(&cfg, Path::new("."), s)
+                .unwrap()
+                .peak
+        };
+        let replay = plan(Strategy::Checkpoints { every: None });
+        let whole = plan(Strategy::Reconstruct {
+            segment: Some(1 << 30),
+        });
+        let segments = plan(Strategy::Reconstruct { segment: None });
+        assert!(
+            segments < replay && segments <= whole,
+            "{segments} {replay} {whole}"
+        );
     }
 
     /// An inversion's plan counts what it holds at its peak, a gradient run after a step with

@@ -33,13 +33,14 @@
 
 use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
+use serde::Serialize;
 
 use crate::adjoint::Adjoint;
 use crate::grid::Grid;
 use crate::model::Model;
 use crate::receiver::{Component, Receivers};
 use crate::simulation::Simulation;
-use crate::solver::{Field, Solver, State};
+use crate::solver::{Band, Field, Solver, State};
 
 /// ½ Σ_c w_c Σ (d - d_obs)² over every recorded sample, and its derivative with respect to
 /// each sample, w_c (d - d_obs): the adjoint source. Traces in the layout of
@@ -142,7 +143,7 @@ pub struct Run {
     pub gradient: Gradient,
     /// The misfit the adjoint source came from, as the closure returned it.
     pub misfit: f64,
-    /// Steps between checkpoints.
+    /// Steps between checkpoints (with [`Strategy::Reconstruct`], the segments' length).
     pub checkpoint_every: usize,
     /// The most memory the run held at once, counted from its arrays: the forward run, the
     /// adjoint run with its residuals, the checkpoints, one replayed segment's velocities, the
@@ -154,6 +155,51 @@ pub struct Run {
     /// source's wavefield reaches it, the diagonal of a source-side pseudo-Hessian (Shin et
     /// al. 2001) to precondition an inversion with.
     pub illumination: Vec<f64>,
+    /// How the forward wavefield was had back, with the interval or segment it used.
+    pub strategy: Strategy,
+}
+
+/// How a gradient run gets the forward wavefield back, step by step in reverse, to correlate
+/// with the adjoint's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Strategy {
+    /// Replay it a segment at a time from checkpoints `every` steps apart (by default
+    /// [`checkpoint_interval`]'s), keeping a segment's velocities: exact, bit for bit.
+    Checkpoints { every: Option<usize> },
+    /// Rebuild it backwards ([`Solver::step_back_with`]) from the band around the absorbing
+    /// layers ([`Band`]), saved for segments of `segment` steps: the last on the way forward,
+    /// the others while replaying them from a checkpoint at their start (by default the length
+    /// that needs least memory, [`reconstruction_segment`]). A segment as long as the run
+    /// needs neither checkpoints nor replays. Exact outside the layers up to single-precision
+    /// round-off, which accumulates over a segment; inside them it means nothing.
+    Reconstruct { segment: Option<usize> },
+}
+
+impl Default for Strategy {
+    fn default() -> Self {
+        Self::Checkpoints { every: None }
+    }
+}
+
+/// Steps per segment when the forward wavefield is rebuilt: `requested`, or by default the
+/// length k that needs least memory for ⌈N/k⌉ - 1 checkpoints of `checkpoint_bytes` each
+/// and k band records of `record_bytes`, about √(N C/B). Saving the band for the whole run
+/// (k = N) spares the replays, but needs more memory unless the band is small next to a
+/// checkpoint, as on large grids.
+pub fn reconstruction_segment(
+    steps: usize,
+    checkpoint_bytes: usize,
+    record_bytes: usize,
+    requested: Option<usize>,
+) -> usize {
+    let steps = steps.max(1);
+    match requested {
+        Some(k) => k.clamp(1, steps),
+        None => (1..=steps)
+            .min_by_key(|&k| (steps.div_ceil(k) - 1) * checkpoint_bytes + k * record_bytes)
+            .expect("at least one step"),
+    }
 }
 
 /// Steps between checkpoints: `requested`, or by default ⌈√(3N)⌉, which about minimises the
@@ -187,15 +233,62 @@ pub fn gradient(
     adjoint_source: impl FnOnce(&Receivers) -> Result<(f64, Vec<Vec<f32>>)>,
     checkpoint_every: Option<usize>,
 ) -> Result<Run> {
+    gradient_with(
+        sim,
+        adjoint_source,
+        Strategy::Checkpoints {
+            every: checkpoint_every,
+        },
+    )
+}
+
+/// [`gradient`], getting the forward wavefield back as `strategy` says. With
+/// [`Strategy::Reconstruct`] the gradient outside the layers is the replay's up to round-off
+/// (the band reaches the positions just outside the region that feed its first nodes), and
+/// inside them it means nothing; afterwards the solver holds the rebuilt state before the
+/// first step, and its CPML memory is stale.
+pub fn gradient_with(
+    sim: &mut Simulation,
+    adjoint_source: impl FnOnce(&Receivers) -> Result<(f64, Vec<Vec<f32>>)>,
+    strategy: Strategy,
+) -> Result<Run> {
     ensure!(sim.solver.step == 0, "the forward run must start at rest");
     let steps = sim.steps;
-    let every = checkpoint_interval(steps, checkpoint_every);
+    let band = matches!(strategy, Strategy::Reconstruct { .. }).then(|| sim.band());
+    let (every, strategy) = match strategy {
+        Strategy::Checkpoints { every } => {
+            let every = checkpoint_interval(steps, every);
+            (every, Strategy::Checkpoints { every: Some(every) })
+        }
+        Strategy::Reconstruct { segment } => {
+            let record = 4 * band.as_ref().map_or(0, Band::len);
+            let k = reconstruction_segment(steps, sim.solver.state_bytes(), record, segment);
+            (k, Strategy::Reconstruct { segment: Some(k) })
+        }
+    };
+    let rebuild = matches!(strategy, Strategy::Reconstruct { .. });
+    let segments = steps.div_ceil(every);
+    // The last segment rebuilt needs no checkpoint: its band is saved on the way forward.
+    let last = if rebuild {
+        segments.saturating_sub(1) * every
+    } else {
+        steps
+    };
+    let mut records = band
+        .as_ref()
+        .map_or(Vec::new(), |b| vec![0.0f32; every * b.len()]);
 
     // Forward, keeping the state at the start of every segment.
-    let mut checkpoints: Vec<State> = Vec::with_capacity(steps.div_ceil(every));
+    let mut checkpoints: Vec<State> = Vec::with_capacity(segments);
     for n in 0..steps {
-        if n.is_multiple_of(every) {
+        if n.is_multiple_of(every) && n < last {
             checkpoints.push(sim.solver.state());
+        }
+        if let Some(b) = &band
+            && n >= last
+        {
+            let r = (n - last) * b.len();
+            b.save(&sim.solver.fields, &mut records[r..r + b.len()]);
         }
         sim.advance();
         if (n.is_multiple_of(100) || n + 1 == steps) && !sim.solver.peak_velocity().is_finite() {
@@ -214,93 +307,175 @@ pub fn gradient(
         "the misfit or its derivative isn't finite; check the observed data"
     );
     let residuals = sim.recorded_residuals(residuals);
-    let pressure = PressureResiduals::new(sim, &residuals);
-    let mut adjoint = Adjoint::new(sim, residuals)?;
-
-    let g = sim.solver.grid;
-    let len = g.padded_len();
-    let mut sums: Sums = vec![[0.0; 8]; len];
-    let mut illumination = vec![0.0f64; g.interior_len()];
-    let mut strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
-    let mut adjoint_strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
-    pressure.add(&mut adjoint_strain, steps);
-
-    let mut segment: Vec<[Vec<f32>; 3]> = Vec::with_capacity(every + 1);
-    // Besides the checkpoints and the segment: both runs, the sums and the two strains.
-    let fixed = sim.memory_bytes()
-        + adjoint.memory_bytes()
-        + pressure.memory_bytes()
-        + std::mem::size_of_val(sums.as_slice())
-        + std::mem::size_of_val(illumination.as_slice())
-        + 4 * strain
-            .iter()
-            .chain(&adjoint_strain)
-            .map(Vec::len)
-            .sum::<usize>();
+    let mut c = Correlator::new(sim, residuals, steps)?;
+    let len = sim.solver.grid.padded_len();
+    // Besides the checkpoints and what holds the forward field: both runs, the sums, the
+    // illumination and the two strains.
+    let fixed = sim.memory_bytes() + c.memory_bytes();
+    let held_checkpoints = checkpoints.iter().map(State::memory_bytes).sum::<usize>();
     let mut peak_bytes = 0;
-    for (s, checkpoint) in checkpoints.iter().enumerate().rev() {
-        let start = s * every;
-        let end = (start + every).min(steps);
-        // The velocities before the segment's first step, then after each of its steps.
-        sim.solver.restore(checkpoint);
-        segment.clear();
-        segment.push(velocities(&sim.solver));
-        for _ in start..end {
-            sim.step();
-            segment.push(velocities(&sim.solver));
-        }
-        let held = fixed
-            + checkpoints.iter().map(State::memory_bytes).sum::<usize>()
-            + 4 * 3 * len * segment.len();
-        peak_bytes = peak_bytes.max(held);
 
-        for n in (start..end).rev() {
-            let (before, after) = (&segment[n - start], &segment[n - start + 1]);
-            // λ̂σ⁽ⁿ⁺¹⁾ = -W ε̃⁽ⁿ⁺¹⁾ with the forward strain rate at n + ½.
-            sim.solver
-                .strain_rate([&after[0], &after[1], &after[2]], &mut strain);
-            correlate_stiffness(&sim.solver, &mut sums, &adjoint_strain, &strain);
-            // ṽ⁽ⁿ⁺½⁾ with the forward velocity change over step n.
-            adjoint.step();
-            assert_eq!(
-                adjoint.forward_step(),
-                Some(n),
-                "adjoint and replay out of step"
-            );
-            correlate_density(&adjoint.solver, &mut sums, before, after);
-            illuminate(&g, &mut illumination, after);
-            // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
-            let f = &adjoint.solver.fields;
-            adjoint
-                .solver
-                .strain_rate([&f.vx, &f.vy, &f.vz], &mut strain);
-            adjoint_strain
-                .par_iter_mut()
-                .zip(&strain)
-                .for_each(|(a, e)| a.iter_mut().zip(e).for_each(|(a, e)| *a += e));
-            pressure.add(&mut adjoint_strain, n);
+    if let Some(band) = &band {
+        let blen = band.len();
+        // The velocities after the step being taken back, for the density term.
+        let mut after: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; len]);
+        peak_bytes = fixed
+            + held_checkpoints
+            + 4 * records.len()
+            + band.memory_bytes()
+            + 4 * after.iter().map(Vec::len).sum::<usize>();
+        for s in (0..segments).rev() {
+            let start = s * every;
+            let end = (start + every).min(steps);
+            if start < last {
+                // Replay the segment for its band; it ends where the next one started.
+                sim.solver.restore(&checkpoints[s]);
+                for n in start..end {
+                    let r = (n - start) * blen;
+                    band.save(&sim.solver.fields, &mut records[r..r + blen]);
+                    sim.step();
+                }
+            }
+            for n in (start..end).rev() {
+                let f = &sim.solver.fields;
+                for (a, v) in after.iter_mut().zip([&f.vx, &f.vy, &f.vz]) {
+                    a.copy_from_slice(v);
+                }
+                let r = (n - start) * blen;
+                sim.step_back(band, &records[r..r + blen]);
+                let f = &sim.solver.fields;
+                c.step(
+                    &sim.solver,
+                    n,
+                    [&f.vx, &f.vy, &f.vz],
+                    [&after[0], &after[1], &after[2]],
+                );
+            }
+            c.check()?;
         }
-        if !adjoint.solver.peak_velocity().is_finite() {
-            bail!("the adjoint wavefield blew up");
+    } else {
+        let mut segment: Vec<[Vec<f32>; 3]> = Vec::with_capacity(every + 1);
+        for (s, checkpoint) in checkpoints.iter().enumerate().rev() {
+            let start = s * every;
+            let end = (start + every).min(steps);
+            // The velocities before the segment's first step, then after each of its steps.
+            sim.solver.restore(checkpoint);
+            segment.clear();
+            segment.push(velocities(&sim.solver));
+            for _ in start..end {
+                sim.step();
+                segment.push(velocities(&sim.solver));
+            }
+            let held = fixed + held_checkpoints + 4 * 3 * len * segment.len();
+            peak_bytes = peak_bytes.max(held);
+
+            for n in (start..end).rev() {
+                let (before, after) = (&segment[n - start], &segment[n - start + 1]);
+                c.step(
+                    &sim.solver,
+                    n,
+                    [&before[0], &before[1], &before[2]],
+                    [&after[0], &after[1], &after[2]],
+                );
+            }
+            c.check()?;
         }
     }
 
-    // The gradient's own arrays mustn't come on top of the replay's.
-    drop((
-        checkpoints,
-        segment,
-        strain,
-        adjoint_strain,
-        adjoint,
-        pressure,
-    ));
+    // The gradient's own arrays mustn't come on top of the rest.
+    drop((checkpoints, records));
+    let (sums, illumination) = c.finish();
     Ok(Run {
         gradient: to_nodes(&sim.solver, &sums),
         misfit,
         checkpoint_every: every,
         memory_bytes: peak_bytes,
         illumination,
+        strategy,
     })
+}
+
+/// The adjoint run and what it is correlated into, a forward step at a time in reverse.
+struct Correlator {
+    adjoint: Adjoint,
+    pressure: PressureResiduals,
+    sums: Sums,
+    illumination: Vec<f64>,
+    strain: [Vec<f32>; 6],
+    adjoint_strain: [Vec<f32>; 6],
+}
+
+impl Correlator {
+    fn new(sim: &Simulation, residuals: Vec<Vec<f32>>, steps: usize) -> Result<Self> {
+        let pressure = PressureResiduals::new(sim, &residuals);
+        let adjoint = Adjoint::new(sim, residuals)?;
+        let g = sim.solver.grid;
+        let len = g.padded_len();
+        let mut adjoint_strain = std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]);
+        pressure.add(&mut adjoint_strain, steps);
+        Ok(Self {
+            adjoint,
+            pressure,
+            sums: vec![[0.0; 8]; len],
+            illumination: vec![0.0f64; g.interior_len()],
+            strain: std::array::from_fn::<_, 6, _>(|_| vec![0.0f32; len]),
+            adjoint_strain,
+        })
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.adjoint.memory_bytes()
+            + self.pressure.memory_bytes()
+            + std::mem::size_of_val(self.sums.as_slice())
+            + std::mem::size_of_val(self.illumination.as_slice())
+            + 4 * self
+                .strain
+                .iter()
+                .chain(&self.adjoint_strain)
+                .map(Vec::len)
+                .sum::<usize>()
+    }
+
+    /// Correlates forward step `n`, whose velocities were `before` and `after` it, with the
+    /// adjoint step that pairs with it, which it takes.
+    fn step(&mut self, forward: &Solver, n: usize, before: [&[f32]; 3], after: [&[f32]; 3]) {
+        let g = forward.grid;
+        // λ̂σ⁽ⁿ⁺¹⁾ = -W ε̃⁽ⁿ⁺¹⁾ with the forward strain rate at n + ½.
+        forward.strain_rate(after, &mut self.strain);
+        correlate_stiffness(forward, &mut self.sums, &self.adjoint_strain, &self.strain);
+        // ṽ⁽ⁿ⁺½⁾ with the forward velocity change over step n.
+        self.adjoint.step();
+        assert_eq!(
+            self.adjoint.forward_step(),
+            Some(n),
+            "adjoint and forward out of step"
+        );
+        correlate_density(&self.adjoint.solver, &mut self.sums, before, after);
+        illuminate(&g, &mut self.illumination, after);
+        // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
+        let f = &self.adjoint.solver.fields;
+        self.adjoint
+            .solver
+            .strain_rate([&f.vx, &f.vy, &f.vz], &mut self.strain);
+        self.adjoint_strain
+            .par_iter_mut()
+            .zip(&self.strain)
+            .for_each(|(a, e)| a.iter_mut().zip(e).for_each(|(a, e)| *a += e));
+        self.pressure.add(&mut self.adjoint_strain, n);
+    }
+
+    fn check(&self) -> Result<()> {
+        ensure!(
+            self.adjoint.solver.peak_velocity().is_finite(),
+            "the adjoint wavefield blew up"
+        );
+        Ok(())
+    }
+
+    /// The sums and the illumination, freeing the rest.
+    fn finish(self) -> (Sums, Vec<f64>) {
+        (self.sums, self.illumination)
+    }
 }
 
 fn velocities(s: &Solver) -> [Vec<f32>; 3] {
@@ -433,12 +608,7 @@ fn correlate_stiffness(
 
 /// Adds ṽ (v⁽ⁿ⁺½⁾ - v⁽ⁿ⁻½⁾), with ṽ the adjoint velocities `adjoint` holds now, for every
 /// velocity position. The weight and buoyancy come in when the sums go to the nodes.
-fn correlate_density(
-    adjoint: &Solver,
-    sums: &mut Sums,
-    before: &[Vec<f32>; 3],
-    after: &[Vec<f32>; 3],
-) {
+fn correlate_density(adjoint: &Solver, sums: &mut Sums, before: [&[f32]; 3], after: [&[f32]; 3]) {
     let g = adjoint.grid;
     let [nx, ny, nz] = g.n;
     let len = g.plane_len();
@@ -464,7 +634,7 @@ fn correlate_density(
 }
 
 /// Adds |v|² at every interior node, each component taken where it is stored.
-fn illuminate(g: &Grid, illumination: &mut [f64], v: &[Vec<f32>; 3]) {
+fn illuminate(g: &Grid, illumination: &mut [f64], v: [&[f32]; 3]) {
     let [nx, ny, _] = g.n;
     illumination
         .par_chunks_mut(nx * ny)
@@ -586,8 +756,60 @@ mod tests {
     /// one longer than the run.
     #[test]
     fn checkpoint_intervals_give_identical_gradients() {
-        use crate::config::Config;
-        let cfg = Config::from_toml(
+        let (steps, reference) = small_gradient(Strategy::Checkpoints { every: Some(1) });
+        assert!(steps > 20 && steps % 9 != 0, "{steps} steps");
+        assert!(reference.misfit > 0.0);
+        assert!(reference.gradient.mu.iter().any(|&g| g != 0.0));
+        for every in [Some(9), None, Some(steps), Some(1 << 40)] {
+            let (_, r) = small_gradient(Strategy::Checkpoints { every });
+            assert!(r.checkpoint_every <= steps, "{every:?}");
+            assert_eq!(r.misfit, reference.misfit, "{every:?}");
+            assert_eq!(r.gradient.rho, reference.gradient.rho, "{every:?}");
+            assert_eq!(r.gradient.lambda, reference.gradient.lambda, "{every:?}");
+            assert_eq!(r.gradient.mu, reference.gradient.mu, "{every:?}");
+        }
+    }
+
+    /// Rebuilt backwards from the band, the forward wavefield gives the replay's gradient at
+    /// every node outside the layers to round-off, however long the segments: with one step
+    /// each, most of them replayed; seven; the default; and the whole run, none replayed.
+    #[test]
+    fn rebuilt_gradients_match_the_replay() {
+        let (steps, reference) = small_gradient(Strategy::Checkpoints { every: None });
+        let sim = Simulation::new(&small_config(), std::path::Path::new(".")).unwrap();
+        let [x, y, z] = sim.solver.interior();
+        let g = sim.solver.grid;
+        let nodes: Vec<usize> = z
+            .flat_map(|k| {
+                let x = x.clone();
+                y.clone()
+                    .flat_map(move |j| x.clone().map(move |i| g.interior_idx(i, j, k)))
+            })
+            .collect();
+        for segment in [Some(1), Some(7), None, Some(steps)] {
+            let (_, r) = small_gradient(Strategy::Reconstruct { segment });
+            assert_eq!(r.misfit, reference.misfit, "{segment:?}");
+            assert!(matches!(
+                r.strategy,
+                Strategy::Reconstruct { segment: Some(_) }
+            ));
+            for (name, a, b) in [
+                ("rho", &r.gradient.rho, &reference.gradient.rho),
+                ("lambda", &r.gradient.lambda, &reference.gradient.lambda),
+                ("mu", &r.gradient.mu, &reference.gradient.mu),
+            ] {
+                let scale = nodes.iter().fold(0.0f64, |m, &n| m.max(b[n].abs()));
+                let worst = nodes
+                    .iter()
+                    .fold(0.0f64, |m, &n| m.max((a[n] - b[n]).abs() / scale));
+                println!("rebuilt, segment {segment:?}, {name}: off by {worst:.1e} of the largest");
+                assert!(scale > 0.0 && worst < 1e-4, "{segment:?}, {name}: {worst}");
+            }
+        }
+    }
+
+    fn small_config() -> crate::config::Config {
+        crate::config::Config::from_toml(
             r#"
             [grid]
             points = [20, 18, 16]
@@ -620,32 +842,28 @@ mod tests {
             record_every = 3
             "#,
         )
+        .unwrap()
+    }
+
+    /// A gradient of a small run with two layers, a force and three components, against
+    /// silent observed traces.
+    fn small_gradient(strategy: Strategy) -> (usize, Run) {
+        let mut sim = Simulation::new(&small_config(), std::path::Path::new(".")).unwrap();
+        let steps = sim.steps;
+        let zeros: Vec<Vec<f32>> = sim
+            .receivers
+            .traces
+            .iter()
+            .map(|t| vec![0.0; t.len()])
+            .collect();
+        let weights = [1.0, 1.0, 1e-18];
+        let r = gradient_with(
+            &mut sim,
+            |r| l2_misfit(&r.traces, &zeros, &weights),
+            strategy,
+        )
         .unwrap();
-        let run = |every: Option<usize>| {
-            let mut sim = Simulation::new(&cfg, std::path::Path::new(".")).unwrap();
-            let steps = sim.steps;
-            let zeros: Vec<Vec<f32>> = sim
-                .receivers
-                .traces
-                .iter()
-                .map(|t| vec![0.0; t.len()])
-                .collect();
-            let weights = [1.0, 1.0, 1e-18];
-            let r = gradient(&mut sim, |r| l2_misfit(&r.traces, &zeros, &weights), every).unwrap();
-            (steps, r)
-        };
-        let (steps, reference) = run(Some(1));
-        assert!(steps > 20 && steps % 9 != 0, "{steps} steps");
-        assert!(reference.misfit > 0.0);
-        assert!(reference.gradient.mu.iter().any(|&g| g != 0.0));
-        for every in [Some(9), None, Some(steps), Some(1 << 40)] {
-            let (_, r) = run(every);
-            assert!(r.checkpoint_every <= steps, "{every:?}");
-            assert_eq!(r.misfit, reference.misfit, "{every:?}");
-            assert_eq!(r.gradient.rho, reference.gradient.rho, "{every:?}");
-            assert_eq!(r.gradient.lambda, reference.gradient.lambda, "{every:?}");
-            assert_eq!(r.gradient.mu, reference.gradient.mu, "{every:?}");
-        }
+        (steps, r)
     }
 
     #[test]

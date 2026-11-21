@@ -865,6 +865,185 @@ $10^{-5}$ off at one step, scan $h$ before suspecting the gradient.
 
 **Reproduce:** `just physics inversion`; `just unit counts_what_an_inversion_allocates`.
 
+## 2026-11-20 — Rebuilding the forward wavefield backwards
+
+**Question.** A gradient run replays the forward wavefield from checkpoints and keeps a
+segment's velocities, about $42\sqrt N$ bytes per padded node: 3.64 GiB for
+`examples/layered.toml`, 25 times its forward run. The interior scheme is reversible, so the
+field could instead be rebuilt backwards from the final state and values saved around the
+absorbing layers [@dussaud2008; @aaker2020; @nguyen2015 compare such schemes in 2D]. How much
+does that save, where does it lose, and how far does single precision let it drift? The
+alternative it competes with is checkpointing [@griewank2000; @symes2007].
+
+**Step 1: a step back** (`Solver::step_back_with`, `Band`). A forward step is: velocity
+update, forces, velocity mirror, stress update (plane-stress moduli and $\sigma_{zz} = 0$ on
+the free surface), moments, sponge, stress mirror. The step back undoes these in reverse
+order: moments, the stress update, then the band's stresses and the stress mirror, forces,
+the velocity update, then the band's velocities and the velocity mirror. Each increment is
+computed from the same values as forward and subtracted: the kernels take a sign of $\pm 1$,
+which leaves the forward step bit for bit as it was, and a source withdraws exactly what it
+added. The CPML and the sponge act only in the layers, which the step back doesn't rebuild,
+and $\sigma_{zz}$ on the surface was zero before the step as after it. So in exact
+arithmetic the region outside the layers, $I$, comes back exactly, given what the stencils
+read from outside it: values within $L$ nodes of $I$ along an axis ($L$ the stencil's
+half-length). The band keeps the velocities on that whole shell, edges included, and each
+stress only on the faces across which the velocity update differentiates it (6 values per face
+node). The velocities on the edges are there for the gradient: the strain rates at positions
+just outside $I$ that feed its first nodes (the shear moduli's harmonic means, the density's
+arithmetic means) read velocities along the faces. Above a free surface the mirrors rebuild
+everything. Records are taken before each forward step, so the step back from $n + 1$ to $n$
+reads the record of state $n$. Stepping back 80 steps from the end of a run with a force and an
+explosion on a $30^3$ grid, 5-node layers, retraced $I$ to $1.5 \times 10^{-6}$ of each array's
+peak, with a free surface and with layers all round alike
+(`simulation::tests::steps_back_inside_the_band`).
+
+**Step 2: in the gradient** (`gradient_with`, `Strategy::Reconstruct`). The forward field is
+needed in reverse order: the stiffness term pairs $\tilde\varepsilon^{n+1}$ with the strain
+rate of $v^{n+\frac12}$, the density term uses $v^{n+\frac12} - v^{n-\frac12}$. So each
+backward step copies $v^{n+\frac12}$, steps back, and correlates with the copy and the rebuilt
+$v^{n-\frac12}$. Saving the band for the whole run is one way; the other, which the memory
+below argues for, saves it for segments of $k$ steps, replaying each segment but the last
+from a checkpoint at its start (the last is saved on the way forward) and rebuilding it from
+its end, which the replay reaches bit for bit. The error then accumulates over a segment, not
+the run, at the cost of one more pass of the solver for all but the last segment. On the
+small run of the gradient's unit tests (21 steps, two layers, a force; free surface; 4-node
+layers) the rebuilt gradient at every node of $I$ matches the replay's to
+$7.4 \times 10^{-8}$ (segments of 1 step), $3.5 \times 10^{-7}$ (7), $5.7 \times 10^{-7}$ (the
+default) and $4.0 \times 10^{-6}$ (the whole run) of its largest value
+(`gradient::tests::rebuilt_gradients_match_the_replay`). Inside the layers the rebuilt field,
+and the gradient, mean nothing; the inversion only updates nodes in $I$.
+
+**Step 3: memory.** A band record holds $3\,|\text{shell}| + 3\,\Sigma\,\text{faces}$ values,
+about $6L$ per node of $I$'s surface; a checkpoint 9 arrays and the CPML memory. With
+segments of $k$ steps the reconstruction holds $\lceil N/k\rceil - 1$ checkpoints and $k$
+records, least at $k \approx \sqrt{N C / B}$ (`reconstruction_segment`); the plan counts it
+exactly (`counts_what_a_rebuilding_gradient_run_allocates`). The gradient's peak:
+
+| Grid | Checkpoints | Rebuilt, segments | Rebuilt, whole run |
+|---|---|---|---|
+| `examples/layered.toml`, $129 \times 129 \times 81$, 1,611 steps | 3.64 GiB | 1.68 GiB ($k = 202$) | 5.67 GiB |
+| the same on $1001 \times 1001 \times 401$ | 798 GiB | 245 GiB ($k = 323$) | 466 GiB |
+
+A record of `layered.toml` is 862,968 values (3.3 MiB), against 60 MiB for a checkpoint and
+19 MiB for a step of the replayed segment. Saving the band for the whole run loses on the
+small grid, where its surface is large next to its volume ($B N$ grows as $N$, the
+checkpoints as $\sqrt N$), and wins on the large one; segments win on both, by 54% and 69%,
+for one more pass.
+
+**Decision so far.** Offer it as `gradient --reconstruct [--segment N]` beside the default,
+checkpoints, which stay the default (also in the inversion) until the drift is measured.
+
+**Step 4: checks** (`tests/physics.rs`). The rebuilt field against the run it retraces, its
+largest difference outside the layers over the run relative to each array's peak: order 4
+(251 steps) $7.5 \times 10^{-7}$ along a free surface and $6.3 \times 10^{-7}$ with layers all
+round; order 8 (283 steps) $6.2 \times 10^{-7}$ and $1.2 \times 10^{-6}$; water under the
+surface with rigid walls (213 steps) $9.6 \times 10^{-7}$
+(`the_rebuilt_wavefield_follows_the_run`, tolerance $5 \times 10^{-6}$). The rebuilt gradient
+against the replay's on the same models: $2.9$–$7.1 \times 10^{-7}$ of each parameter's
+largest value, default segments or the whole run (`rebuilt_gradients_match_the_replay`,
+$3 \times 10^{-6}$). The finite-difference checks on the reconstruction path give the replay's
+numbers within noise (rebuilt, then replayed): order 4 $v_p$ $2.6 \times 10^{-4}$ /
+$2.8 \times 10^{-4}$, $v_s$ $2.1 \times 10^{-5}$ / same, $\rho$ $4.4 \times 10^{-5}$ / same;
+order 8 $v_p$ $1.4 \times 10^{-6}$ / $3.9 \times 10^{-6}$, $v_s$ $1.0 \times 10^{-5}$, $\rho$
+$1.6 \times 10^{-5}$; walls and water $v_p$ $6.3 / 6.4 \times 10^{-5}$, $v_s$
+$1.2 \times 10^{-5}$, $\rho$ $1.6 \times 10^{-4}$
+(`the_gradient_matches_finite_differences_when_rebuilt`). The other baselines are unchanged:
+the forward step is bit for bit what it was.
+
+**Step 5: drift** (`just drift`, `tests/reconstruction.rs`). A $48 \times 40 \times 36$ model
+(10 m; two layers, a sphere, a force and an explosion at 14 Hz; 8-node layers;
+`optimised_for = 4`), the drift relative to each array's peak over the run after stepping
+back the given number of steps from the end. By run length (order 8, $C = 0.85$, free
+surface, 3.6 s, 2,905 steps):
+
+| Steps back | 1 | 10 | 100 | 1000 | 2000 | 2905 (to the start) |
+|---|---|---|---|---|---|---|
+| Drift | $3.3 \times 10^{-12}$ | $4.5 \times 10^{-12}$ | $1.3 \times 10^{-11}$ | $3.5 \times 10^{-11}$ | $9.8 \times 10^{-11}$ | $3.3 \times 10^{-7}$ |
+
+It grows where the field is loud, not with the number of steps. By forward step, with the
+field's own largest value on the same scale:
+
+| Step | 1000 | 500 | 300 | 200 | 100 | 50 | 0 |
+|---|---|---|---|---|---|---|---|
+| Drift | $6.8 \times 10^{-11}$ | $8.4 \times 10^{-10}$ | $5.8 \times 10^{-8}$ | $1.3 \times 10^{-7}$ | $4.8 \times 10^{-7}$ | $3.7 \times 10^{-7}$ | $3.3 \times 10^{-7}$ |
+| Field | $3.5 \times 10^{-5}$ | $2.4 \times 10^{-3}$ | $6.7 \times 10^{-2}$ | $0.15$ | $0.81$ | $0.29$ | 0 |
+
+One step back from the exact final state: $6.4 \times 10^{-13}$. The drift rises from
+$6 \times 10^{-8}$ to $5 \times 10^{-7}$ while the rebuilt field passes through its loudest
+200 steps, about ten units of single-precision round-off ($6 \times 10^{-8}$) at that
+amplitude, and stays as an absolute error once the field is quiet again. By stencil order and
+Courant fraction, 1.2 s, all the way back: order 4 $7.0 \times 10^{-7}$ (860 steps), 8
+$6.2 \times 10^{-7}$ (969), 12 $8.1 \times 10^{-7}$ (1,006), 16 $6.7 \times 10^{-7}$ (1,027);
+order 8 at $C = 0.5$ $1.1 \times 10^{-6}$ (1,646 steps) and at $C = 0.3$ $7.6 \times 10^{-7}$
+(2,743). Neither matters beyond a factor of two; three times the steps through the same loud
+phase add little. By boundary, order 8, 969 steps (100 and 300 steps back, then all the way):
+
+| Boundary | 100 | 300 | All the way |
+|---|---|---|---|
+| Layers, free surface | $4.2 \times 10^{-11}$ | $1.6 \times 10^{-10}$ | $6.2 \times 10^{-7}$ |
+| Layers all round | $9.8 \times 10^{-12}$ | $2.1 \times 10^{-11}$ | $4.7 \times 10^{-7}$ |
+| Rigid walls, no layers | $4.6 \times 10^{-8}$ | $7.4 \times 10^{-8}$ | $6.7 \times 10^{-7}$ |
+| Rigid walls, free surface | $5.3 \times 10^{-8}$ | $9.4 \times 10^{-8}$ | $8.0 \times 10^{-7}$ |
+| Layers, 60 m of water at the surface | $2.7 \times 10^{-9}$ | $9.0 \times 10^{-9}$ | $3.5 \times 10^{-6}$ |
+
+With rigid walls the band is the halo, always zero, and no layers or sponge are involved, so
+their drift is the scheme's round-off alone: it is the same at the start as with layers and a
+free surface. It is larger at 100–300 steps back only because the walls keep the field loud
+throughout. So the layers and the free surface add nothing measurable: in exact arithmetic
+the band makes the rebuilt field exact, and the whole drift is single precision. Water is the
+exception at five times the rest, $3.5 \times 10^{-6}$, which we haven't traced; in a fluid
+the stresses are pressure alone and the velocities large, which changes how round-off in each
+array weighs.
+
+**Step 6: in the gradient, and cost.** The rebuilt gradient against the replay's, outside the
+layers, on the same model (969 and 2,905 steps), with memory and time on the container's 4
+cores:
+
+| | 969 steps | | | 2,905 steps | | |
+|---|---|---|---|---|---|---|
+| | off by | memory | time | off by | memory | time |
+| Checkpoints | | 208 MiB | 4.3 s | | 335 MiB | 9.6 s |
+| Segments of 10 | $1.7 \times 10^{-7}$ | 574 MiB | 5.0 s | $8.1 \times 10^{-8}$ | 1.62 GiB | 12.7 s |
+| Segments of 100 | $1.8 \times 10^{-7}$ | 125 MiB | 4.9 s | $1.7 \times 10^{-7}$ | 237 MiB | 12.0 s |
+| Default (108; 194) | $2.4 \times 10^{-7}$ | 123 MiB | 4.8 s | $2.4 \times 10^{-7}$ | 191 MiB | 12.1 s |
+| Whole run | $1.4 \times 10^{-6}$ | 424 MiB | 4.0 s | $1.3 \times 10^{-6}$ | 1.17 GiB | 10.2 s |
+
+(Times from a second run of the study; the first gave 3.5 s for checkpoints, 4.0 s for the
+default segments and 3.3 s for the whole run at 969 steps, and 10.2, 12.2 and 10.3 s at 2,905:
+on a grid this small they vary by about 20%.) Segments reset the drift at each checkpoint, so the gradient's error is set by one
+segment's loudest stretch: $2 \times 10^{-7}$ with the default against $1.4 \times 10^{-6}$ for
+the whole run. On `examples/layered.toml` ($129 \times 129 \times 81$, 1,611 steps, a gradient
+for the upper crust's $v_s$ lowered from 2600 to 2500 m/s; `gradient --reconstruct`):
+
+| Strategy | Memory | Time | $v_p$ | $v_s$ | $\rho$ |
+|---|---|---|---|---|---|
+| Checkpoints, every 70 | 3.64 GiB | 70.2 s | | | |
+| Rebuilt, segments of 202 | 1.68 GiB | 80.2 s | $2.6 \times 10^{-6}$ | $4.9 \times 10^{-7}$ | $5.7 \times 10^{-7}$ |
+| Rebuilt, the whole run | 5.67 GiB | 72.3 s | $3.9 \times 10^{-6}$ | $8.9 \times 10^{-7}$ | $6.9 \times 10^{-7}$ |
+
+The last three columns are the largest difference from the replay's gradient outside the
+layers, relative to its largest value (from the written single-precision arrays). The
+misfits agree to every printed digit. Segments cost 14% more time here (one more pass over
+all but the last segment), the whole run 3% (a step back is a little cheaper than a step:
+no CPML), and on the small grid above 12–26% and -7 to +6%.
+
+**Decision.** Keep checkpoints the default everywhere, the inversion included; the
+reconstruction is an option (`gradient --reconstruct`), not bit-exact. Its error is
+single-precision round-off, $10^{-7}$–$10^{-6}$ of the gradient's largest value, set by how
+loud the field gets within a segment, not by run length, order, time step, layers or free
+surface; for an inversion that is far below the finite differences' own resolution and
+the forward modelling's error. Use segments (the default) to halve the gradient's memory on
+grids like `examples/layered.toml`, and to cut it by two thirds on large ones, at about 15%
+more time; save the band for the whole run only on large grids, where it needs less memory
+than checkpoints and no extra pass. Switching the default is a separate decision, once the
+inversion has been run both ways.
+
+**Reproduce:** `just physics rebuilt` (the checks); `just drift` (steps 5 and 6); `just memory
+examples/layered.toml --gradient [--reconstruct [--segment 100000]]` (step 3); for the last
+table, `just run examples/layered.toml --out out/rebuild/observed`, then `just gradient
+guess.toml out/rebuild/observed [--reconstruct [--segment 100000]]` with `guess.toml` the
+example with the upper crust's `vs = 2500.0`, and compare the `grad_*.npy`.
+
 ## 2026-11-20 — Misfits beyond L2: filtered traces, time shifts and phases
 
 **Question.** Roadmap step 5: the L2 waveform misfit is the only one, and it cycle-skips once
@@ -1344,7 +1523,10 @@ filter as unpadded (it was, at the time; the padding entry follows it).
   precision; the non-reversible layers [@dussaud2008; @aaker2020]), and their effect on
   gradients and inversions [@tromp2005; @fichtner2006; @fichtner2011]. Settled: adjoint
   consistency (the dot-product entry) and the gradient of the discrete run against finite
-  differences (the gradient entry), with an exactly replayed forward field. Still to
-  measure: the reconstruction error of a boundary-value reconstruction against that replay,
-  and the accuracy study repeated for gradients (against the gradient of the exact wave
+  differences (the gradient entry), with an exactly replayed forward field, and the error of
+  rebuilding it backwards from the band (2026-11-20: single-precision round-off,
+  $10^{-7}$–$10^{-6}$ of the gradient, set by the field's loudest stretch in a segment; the
+  layers and the free surface add nothing). Still open there: why a water layer drifts five
+  times more, and whether that drift moves an inversion. Still to measure: the accuracy study
+  repeated for gradients (against the gradient of the exact wave
   equation, e.g. a fine-grid reference) as a function of stencil order, $C$ and ppw.

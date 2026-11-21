@@ -111,3 +111,81 @@ pub fn force_velocity(w: &Wavelet, f: f64, d: [f64; 3], t: f64) -> [f64; 3] {
                 - (gg - delta) / (VS * VS * r) * w.derivative(t - r / VS))
     })
 }
+
+/// How far a rebuilt wavefield drifts from the run it retraces: runs `sim` forward, saving
+/// its band before every step and its whole state every `every` steps, then steps back to the
+/// start. For each saved state, (its step, the largest difference at the nodes outside the
+/// layers in any of the nine arrays, relative to that array's largest value there over the
+/// run, and the state's own largest value there on the same scale).
+pub fn rebuild_drift(sim: Simulation, every: usize) -> Vec<(usize, f64, f64)> {
+    rebuild_drift_where(sim, |n| n % every == 0)
+}
+
+/// [`rebuild_drift`], saving the states before the steps `keep` picks.
+pub fn rebuild_drift_where(
+    mut sim: Simulation,
+    keep: impl Fn(usize) -> bool,
+) -> Vec<(usize, f64, f64)> {
+    use vibe_rations::solver::Fields;
+    let band = sim.band();
+    let len = band.len();
+    let steps = sim.steps;
+    let [x, y, z] = sim.solver.interior();
+    let g = sim.solver.grid;
+    let nodes: Vec<usize> = z
+        .flat_map(|k| {
+            let x = x.clone();
+            y.clone()
+                .flat_map(move |j| x.clone().map(move |i| g.idx(i, j, k)))
+        })
+        .collect();
+    let arrays = |f: &Fields| -> [Vec<f32>; 9] {
+        [
+            &f.vx, &f.vy, &f.vz, &f.sxx, &f.syy, &f.szz, &f.sxy, &f.sxz, &f.syz,
+        ]
+        .map(|a| nodes.iter().map(|&p| a[p]).collect())
+    };
+    let mut records = vec![0.0f32; steps * len];
+    let mut saved: Vec<(usize, Fields)> = Vec::new();
+    let mut scale = [0.0f32; 9];
+    for n in 0..=steps {
+        for (s, a) in scale.iter_mut().zip(arrays(&sim.solver.fields)) {
+            *s = a.iter().fold(*s, |m, v| m.max(v.abs()));
+        }
+        if n == steps {
+            break;
+        }
+        if keep(n) {
+            saved.push((n, sim.solver.fields.clone()));
+        }
+        band.save(&sim.solver.fields, &mut records[n * len..(n + 1) * len]);
+        sim.step();
+    }
+    let mut drift = Vec::with_capacity(saved.len());
+    for n in (0..steps).rev() {
+        sim.step_back(&band, &records[n * len..(n + 1) * len]);
+        if let Some((_, f)) = saved.iter().find(|(m, _)| *m == n) {
+            let (now, then) = (arrays(&sim.solver.fields), arrays(f));
+            let worst = (0..9)
+                .filter(|&c| scale[c] > 0.0)
+                .map(|c| {
+                    now[c]
+                        .iter()
+                        .zip(&then[c])
+                        .fold(0.0f64, |m, (a, b)| m.max(((a - b).abs() / scale[c]) as f64))
+                })
+                .fold(0.0, f64::max);
+            let level = (0..9)
+                .filter(|&c| scale[c] > 0.0)
+                .map(|c| {
+                    then[c]
+                        .iter()
+                        .fold(0.0f64, |m, v| m.max((v.abs() / scale[c]) as f64))
+                })
+                .fold(0.0, f64::max);
+            drift.push((n, worst, level));
+        }
+    }
+    drift.reverse();
+    drift
+}

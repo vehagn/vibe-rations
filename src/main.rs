@@ -5,7 +5,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
 use vibe_rations::config::{Config, shot_dir};
-use vibe_rations::gradient::{balancing_weights, gradient, l2_misfit};
+use vibe_rations::gradient::{Strategy, balancing_weights, gradient_with, l2_misfit};
 use vibe_rations::inversion::Inversion;
 use vibe_rations::npy;
 use vibe_rations::simulation::{self, Simulation};
@@ -115,6 +115,8 @@ enum Command {
         /// alike.
         #[arg(long)]
         balance: bool,
+        #[command(flatten)]
+        strategy: StrategyArgs,
     },
     /// Work out the memory a simulation needs, part by part, without setting it up.
     Memory {
@@ -128,7 +130,36 @@ enum Command {
         /// traces, and L-BFGS's memory.
         #[arg(long)]
         invert: bool,
+        #[command(flatten)]
+        strategy: StrategyArgs,
     },
+}
+
+/// How a gradient run gets the forward wavefield back.
+#[derive(clap::Args)]
+struct StrategyArgs {
+    /// Rebuild the forward wavefield backwards from the band around the absorbing layers
+    /// instead of replaying it from checkpoints: less memory, one more pass, and exact only up
+    /// to single-precision round-off.
+    #[arg(long)]
+    reconstruct: bool,
+    /// With --reconstruct: steps per segment, each but the last replayed from a checkpoint to
+    /// save its band (by default the length that needs least memory; the run's length or more
+    /// saves the band for the whole run and replays nothing).
+    #[arg(long, requires = "reconstruct")]
+    segment: Option<usize>,
+}
+
+impl StrategyArgs {
+    fn strategy(&self) -> Strategy {
+        if self.reconstruct {
+            Strategy::Reconstruct {
+                segment: self.segment,
+            }
+        } else {
+            Strategy::Checkpoints { every: None }
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -321,15 +352,32 @@ fn run() -> Result<()> {
             config,
             gradient,
             invert,
+            strategy,
         } => {
             let cfg = Config::load(&config)?;
             let kind = match (gradient, invert) {
-                (true, _) => Kind::Gradient,
+                (true, _) => Kind::Gradient(strategy.strategy()),
                 (_, true) => Kind::Invert,
                 _ => Kind::Run,
             };
             let m = plan(&cfg, &config, kind)?;
             println!("{}", m.table());
+            if gradient {
+                // The other way to get the forward field back, for comparison.
+                let (other, flag) = if strategy.reconstruct {
+                    (
+                        Strategy::Checkpoints { every: None },
+                        "without --reconstruct",
+                    )
+                } else {
+                    (
+                        Strategy::Reconstruct { segment: None },
+                        "with --reconstruct",
+                    )
+                };
+                let o = plan(&cfg, &config, Kind::Gradient(other))?;
+                println!("  {:>10}  at most {flag}", memory::human(o.peak));
+            }
             if let Some(free) = memory::available() {
                 println!("  {:>10}  available now", memory::human(free));
             }
@@ -411,13 +459,19 @@ fn run() -> Result<()> {
             observed,
             out,
             balance,
+            strategy,
         } => {
-            let (cfg, mut sim, planned) = load(&config, Kind::Gradient)?;
+            let strategy = strategy.strategy();
+            let (cfg, mut sim, planned) = load(&config, Kind::Gradient(strategy))?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
+            let (how, flag) = match strategy {
+                Strategy::Checkpoints { .. } => ("the checkpoints", ""),
+                Strategy::Reconstruct { .. } => ("the band around the layers", " --reconstruct"),
+            };
             eprintln!(
-                "gradient  {} at most, with the checkpoints and the adjoint run; \
-                 `vibe-rations memory --gradient` itemises it",
+                "gradient  {} at most, with {how} and the adjoint run; \
+                 `vibe-rations memory --gradient{flag}` itemises it",
                 memory::human(planned.peak)
             );
             let next_to_layers = sim.receivers_next_to_layers();
@@ -453,7 +507,11 @@ fn run() -> Result<()> {
                 vec![1.0; data.len()]
             };
             eprintln!("running forward, then the adjoint back with the forward run replayed");
-            let run = gradient(&mut sim, |r| l2_misfit(&r.traces, &data, &weights), None)?;
+            let run = gradient_with(
+                &mut sim,
+                |r| l2_misfit(&r.traces, &data, &weights),
+                strategy,
+            )?;
             sim.write_outputs(&out)?;
             let g = sim.solver.grid;
             let shape = [g.n[2], g.n[1], g.n[0]];
@@ -468,6 +526,7 @@ fn run() -> Result<()> {
                 "misfit": run.misfit,
                 "weights": weights,
                 "checkpoint_every": run.checkpoint_every,
+                "strategy": run.strategy,
                 "memory_bytes": held,
                 "receivers_next_to_layers": next_to_layers,
             });
@@ -475,8 +534,12 @@ fn run() -> Result<()> {
                 out.join("gradient.json"),
                 serde_json::to_string_pretty(&summary)? + "\n",
             )?;
+            let how = match run.strategy {
+                Strategy::Checkpoints { .. } => "checkpoints every",
+                Strategy::Reconstruct { .. } => "rebuilt in segments of",
+            };
             eprintln!(
-                "misfit {:.6e}; checkpoints every {} steps; {} at most",
+                "misfit {:.6e}; {how} {} steps; {} at most",
                 run.misfit,
                 run.checkpoint_every,
                 memory::human(held as u64)
@@ -510,7 +573,7 @@ fn base(path: &Path) -> &Path {
 #[derive(Clone, Copy)]
 enum Kind {
     Run,
-    Gradient,
+    Gradient(Strategy),
     Invert,
 }
 
@@ -518,7 +581,7 @@ enum Kind {
 fn plan(cfg: &Config, path: &Path, kind: Kind) -> Result<memory::Memory> {
     let m = match kind {
         Kind::Run => memory::estimate(cfg, base(path)),
-        Kind::Gradient => memory::estimate_gradient(cfg, base(path), None),
+        Kind::Gradient(strategy) => memory::estimate_gradient_with(cfg, base(path), strategy),
         Kind::Invert => memory::estimate_inversion(cfg, base(path)),
     };
     m.with_context(|| format!("planning {}", path.display()))

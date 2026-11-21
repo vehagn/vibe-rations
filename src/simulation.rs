@@ -20,7 +20,7 @@ use crate::model::Model;
 use crate::npy;
 use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
-use crate::solver::Solver;
+use crate::solver::{Band, Solver};
 use crate::source::{Mechanism, Source, Wavelet};
 use crate::tdt::Warp;
 
@@ -486,6 +486,41 @@ impl Simulation {
             .count()
     }
 
+    /// The band a step back reads ([`Band`]): around the nodes outside the absorbing layers,
+    /// as deep as the stencil reaches.
+    pub fn band(&self) -> Band {
+        let s = &self.solver;
+        Band::new(
+            &s.grid,
+            &s.interior(),
+            s.free_surface,
+            s.stencil.half_length(),
+        )
+    }
+
+    /// Takes the last step back ([`Solver::step_back_with`]), withdrawing what the sources
+    /// added during it; `before` is `band`'s record of the state before that step.
+    pub fn step_back(&mut self, band: &Band, before: &[f32]) {
+        let sources = &self.sources;
+        let n = self.solver.step.saturating_sub(1);
+        self.solver.step_back_with(
+            band,
+            before,
+            |f, t| {
+                sources
+                    .iter()
+                    .filter(|s| s.is_force())
+                    .for_each(|s| s.withdraw(f, n, t))
+            },
+            |f, t| {
+                sources
+                    .iter()
+                    .filter(|s| !s.is_force())
+                    .for_each(|s| s.withdraw(f, n, t))
+            },
+        );
+    }
+
     /// Advances the wavefield one step, with the sources, without recording anything.
     pub fn step(&mut self) {
         let sources = &self.sources;
@@ -834,6 +869,7 @@ mod tests {
     }
 
     use crate::config::Config;
+    use crate::solver::Band;
 
     const BASE: &str = r#"
         [grid]
@@ -863,6 +899,99 @@ mod tests {
 
     fn error(text: &str) -> String {
         format!("{:#}", setup(text).err().expect("an error"))
+    }
+
+    /// The largest difference between `a` and `b` at the nodes `interior` holds, in each
+    /// array relative to the largest value it has in `scale`.
+    fn interior_error(
+        g: &Grid,
+        interior: &[std::ops::Range<usize>; 3],
+        a: &crate::solver::Fields,
+        b: &crate::solver::Fields,
+        scale: &[f32; 9],
+    ) -> f64 {
+        use crate::solver::Field::*;
+        let mut worst = 0.0f64;
+        for (c, f) in [Vx, Vy, Vz, Sxx, Syy, Szz, Sxy, Sxz, Syz]
+            .into_iter()
+            .enumerate()
+        {
+            let (a, b) = (a.get(f), b.get(f));
+            for k in interior[2].clone() {
+                for j in interior[1].clone() {
+                    for i in interior[0].clone() {
+                        let p = g.idx(i, j, k);
+                        worst = worst.max(((a[p] - b[p]).abs() / scale[c]) as f64);
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    /// Stepping back from the final state, with the band saved on the way forward, retraces
+    /// the run outside the layers: sources, free surface and all, to round-off.
+    #[test]
+    fn steps_back_inside_the_band() {
+        let text = BASE
+            .replace("pml_width = 8", "pml_width = 5")
+            .replace("duration = 0.05", "duration = 0.15")
+            .replace(
+                "[receivers]",
+                "[[source]]\nposition = [120.0, 160.0, 50.0]\nforce = [1e9, 0.0, 5e8]\n\
+                 wavelet = { kind = \"ricker\", frequency = 8.0 }\n[receivers]",
+            );
+        for (label, text) in [
+            ("free surface", text.clone()),
+            (
+                "layers all round",
+                text.replace("pml_width = 5", "pml_width = 5\nfree_surface = false"),
+            ),
+        ] {
+            let mut sim = setup(&text).unwrap();
+            let band = sim.band();
+            let interior = sim.solver.interior();
+            let free = sim.solver.free_surface;
+            let size = Band::size(&interior, free, sim.solver.stencil.half_length());
+            assert_eq!(
+                (band.len(), band.memory_bytes()),
+                (size.values, size.runs_bytes())
+            );
+            let len = band.len();
+            let steps = sim.steps;
+            let mut records = vec![0.0; steps * len];
+            let mut states = Vec::with_capacity(steps);
+            for n in 0..steps {
+                band.save(&sim.solver.fields, &mut records[n * len..(n + 1) * len]);
+                states.push(sim.solver.fields.clone());
+                sim.step();
+            }
+            let mut scale = [0.0f32; 9];
+            for f in &states {
+                use crate::solver::Field::*;
+                for (c, a) in [Vx, Vy, Vz, Sxx, Syy, Szz, Sxy, Sxz, Syz]
+                    .into_iter()
+                    .enumerate()
+                {
+                    scale[c] = f.get(a).iter().fold(scale[c], |m, v| m.max(v.abs()));
+                }
+            }
+            let mut worst = 0.0f64;
+            for n in (0..steps).rev() {
+                sim.step_back(&band, &records[n * len..(n + 1) * len]);
+                assert_eq!(sim.solver.step, n);
+                let e = interior_error(
+                    &sim.solver.grid,
+                    &interior,
+                    &sim.solver.fields,
+                    &states[n],
+                    &scale,
+                );
+                worst = worst.max(e);
+            }
+            println!("{label}: {steps} steps back, at most {worst:.1e} of each array's peak");
+            assert!(worst < 1e-4, "{label}: {worst}");
+        }
     }
 
     #[test]
