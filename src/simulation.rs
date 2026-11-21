@@ -635,7 +635,9 @@ impl Simulation {
         {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        let start = Instant::now();
+        // The clock only for the reports: WebAssembly has none, and the browser and the run
+        // server's inversions run quietly.
+        let start = progress.then(Instant::now);
         let mut last_report = start;
         let cells = self.solver.grid.interior_len() as f64;
         for n in 0..self.steps {
@@ -644,9 +646,13 @@ impl Simulation {
                 None => self.advance(),
             }
             let done = n + 1;
-            let now = Instant::now();
-            let report =
-                progress && (now - last_report >= Duration::from_secs(2) || done == self.steps);
+            let now = start.map(|_| Instant::now());
+            let report = match (now, last_report) {
+                (Some(now), Some(last)) => {
+                    now - last >= Duration::from_secs(2) || done == self.steps
+                }
+                _ => false,
+            };
             if report || done % 100 == 0 || done == self.steps {
                 let peak = self.solver.peak_velocity();
                 if !peak.is_finite() {
@@ -654,8 +660,8 @@ impl Simulation {
                         "the wavefield blew up by step {done}; check the model, or lower dt or courant"
                     );
                 }
-                if report {
-                    last_report = now;
+                if let (true, Some(now), Some(start)) = (report, now, start) {
+                    last_report = Some(now);
                     let elapsed = (now - start).as_secs_f64();
                     let eta = elapsed / done as f64 * (self.steps - done) as f64;
                     eprintln!(
