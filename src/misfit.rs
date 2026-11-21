@@ -3,20 +3,25 @@
 //!
 //! Every misfit here is a function of the sampled traces with its exact derivative, so the
 //! gradient stays that of the discrete run and finite differences check it. The traces can be
-//! low-pass filtered first, both synthetic and observed, for frequency continuation (Bunks et
-//! al. 1995; Fichtner et al. 2013): the misfit is then χ(F s, F d) and its derivative Fᵀ ∂χ.
+//! muted, both synthetic and observed: weighted by time and offset with weights fixed by the
+//! survey (`[[inversion.mute]]`), a diagonal M; and then low-pass filtered, for frequency
+//! continuation (Bunks et al. 1995; Fichtner et al. 2013). The misfit is then
+//! χ(F M s, F M d) and its derivative Mᵀ Fᵀ ∂χ = M F ∂χ.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use rayon::prelude::*;
 
-use crate::config::{Config, InversionConfig, MisfitKind, StageConfig};
+use crate::config::{
+    Config, InversionConfig, MisfitKind, MuteConfig, MuteShape, MuteSide, StageConfig,
+};
 use crate::gradient::{balancing_weights, l2_misfit};
 use crate::receiver::Component;
+use crate::simulation::Simulation;
 
 /// How a stage measures the misfit.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Measure {
     pub kind: MisfitKind,
     /// The low-pass filter's corner, Hz, if the traces are filtered.
@@ -28,6 +33,8 @@ pub struct Measure {
     pub balance: bool,
     /// For `phase`: the data's dominant frequency, Hz, which sets the time–frequency cells.
     pub dominant_frequency: Option<f64>,
+    /// Mutes, applied before the filter: the inversion's and the stage's.
+    pub mutes: Vec<MuteConfig>,
 }
 
 impl Measure {
@@ -42,6 +49,7 @@ impl Measure {
             max_shift: settings.max_shift,
             balance: settings.balance,
             dominant_frequency: Some(stage.max_frequency.unwrap_or(source_frequency)),
+            mutes: settings.mutes.iter().chain(&stage.mutes).cloned().collect(),
         }
     }
 
@@ -66,8 +74,63 @@ impl Measure {
             max_shift: None,
             balance,
             dominant_frequency: None,
+            mutes: Vec::new(),
         }
     }
+}
+
+/// The weight `mute` gives a sample at `t` seconds of a trace `offset` metres from its
+/// source: 1 on the side it keeps, its `weight` on the other, a half cosine between them over
+/// its `taper` (or an exponential of that time constant), beginning at the line
+/// t = offset / velocity + delay.
+pub fn mute_weight(mute: &MuteConfig, t: f64, offset: f64) -> f64 {
+    let line = mute.velocity.map_or(0.0, |v| offset / v) + mute.delay;
+    // How far past the line towards the muted side.
+    let past = match mute.keep {
+        MuteSide::Before => t - line,
+        MuteSide::After => line - t,
+    };
+    let kept = if past <= 0.0 {
+        1.0
+    } else {
+        match mute.shape {
+            MuteShape::Exponential => (-past / mute.taper).exp(),
+            MuteShape::Cosine if past >= mute.taper => 0.0,
+            MuteShape::Cosine => 0.5 * (1.0 + (std::f64::consts::PI * past / mute.taper).cos()),
+        }
+    };
+    mute.weight + (1.0 - mute.weight) * kept
+}
+
+/// Each receiver's horizontal distance from `cfg`'s source, both snapped to the nodes as a run
+/// snaps them: the offsets the mutes go by. Horizontal, not slant: slow waves along the
+/// seafloor travel at the same offset whatever the source's depth. One source only (a shot).
+pub fn offsets(cfg: &Config) -> Result<Vec<f64>> {
+    ensure!(
+        cfg.sources.len() == 1,
+        "mutes go by one source's offsets, and this run has {} sources",
+        cfg.sources.len()
+    );
+    let grid = Simulation::grid(cfg)?;
+    let at = |p: [f64; 3]| -> Result<[f64; 2]> {
+        let n = grid
+            .nearest_node(p)
+            .with_context(|| format!("{p:?} is off the grid"))?;
+        Ok([n[0] as f64 * grid.h[0], n[1] as f64 * grid.h[1]])
+    };
+    let source = at(cfg
+        .sources
+        .first()
+        .context("the configuration has no [[source]]")?
+        .position)?;
+    cfg.receivers
+        .positions()?
+        .into_iter()
+        .map(|p| {
+            let r = at(p)?;
+            Ok((r[0] - source[0]).hypot(r[1] - source[1]))
+        })
+        .collect()
 }
 
 /// A digital Butterworth low-pass (Butterworth 1930) applied forwards, then backwards, with
@@ -207,6 +270,8 @@ pub struct Misfit {
     max_lag: usize,
     /// `phase`: the time–frequency cells.
     gabor: Option<Gabor>,
+    /// With mutes, each receiver's offset from the source.
+    offsets: Vec<f64>,
 }
 
 /// Velocity traces quieter than this fraction of the loudest velocity trace's energy (and
@@ -216,13 +281,15 @@ const QUIET: f64 = 1e-4;
 
 impl Misfit {
     /// Prepares `measure` of synthetic traces against `observed` ones, sampled every
-    /// `interval` seconds, `samples` per trace, of `components`.
+    /// `interval` seconds from the run's start, `samples` per trace, of `components`, at
+    /// receivers `offsets` metres from the source ([`offsets`]; only mutes need them).
     pub fn new(
         measure: Measure,
         observed: &Arc<Vec<Vec<f32>>>,
         components: &[Component],
         samples: usize,
         interval: f64,
+        offsets: &[f64],
     ) -> Result<Self> {
         ensure!(
             observed.len() == components.len(),
@@ -243,25 +310,67 @@ impl Misfit {
             .max_frequency
             .map(|f| Lowpass::butterworth(f, interval, measure.filter_order))
             .transpose()?;
-        let observed = match &filter {
-            Some(f) => Arc::new(
+        let offsets = if measure.mutes.is_empty() {
+            Vec::new()
+        } else {
+            for m in &measure.mutes {
+                ensure!(
+                    m.velocity.is_none_or(|v| v.is_finite() && v > 0.0),
+                    "a mute's velocity must be positive"
+                );
+                ensure!(
+                    m.taper.is_finite() && m.taper > 0.0,
+                    "a mute's taper must be positive"
+                );
+                ensure!(m.delay.is_finite(), "a mute's delay must be finite");
+                ensure!(
+                    (0.0..=1.0).contains(&m.weight),
+                    "a mute's weight must lie between 0 and 1"
+                );
+            }
+            let receivers = observed.first().map_or(0, |o| o.len() / samples);
+            ensure!(
+                offsets.len() == receivers,
+                "{} offsets for {receivers} receivers",
+                offsets.len()
+            );
+            offsets.to_vec()
+        };
+        let mut this = Self {
+            measure,
+            filter,
+            samples,
+            interval,
+            observed: Arc::clone(observed),
+            weights: Vec::new(),
+            max_lag: 0,
+            gabor: None,
+            offsets,
+        };
+        // The observed traces as the synthetic ones will be compared: muted, then filtered.
+        if this.transforms() {
+            this.observed = Arc::new(
                 observed
                     .iter()
                     .map(|o| {
-                        f.apply_traces(o, samples)
-                            .into_iter()
-                            .map(|v| v as f32)
-                            .collect()
+                        let mut out: Vec<f32> = Vec::with_capacity(o.len());
+                        for (r, trace) in o.chunks(samples).enumerate() {
+                            let mut t: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
+                            this.transform(&mut t, r);
+                            out.extend(t.into_iter().map(|v| v as f32));
+                        }
+                        out
                     })
                     .collect(),
-            ),
-            None => Arc::clone(observed),
-        };
+            );
+        }
+        let observed = &this.observed;
+        let measure = &this.measure;
         let weights = match measure.kind {
-            MisfitKind::L2 if measure.balance => balancing_weights(&observed, components),
+            MisfitKind::L2 if measure.balance => balancing_weights(observed, components),
             MisfitKind::L2 => vec![1.0; observed.len()],
             MisfitKind::Traveltime | MisfitKind::Phase => {
-                trace_weights(&observed, components, samples)
+                trace_weights(observed, components, samples)
             }
         };
         if let Some(shift) = measure.max_shift {
@@ -292,16 +401,61 @@ impl Misfit {
             }
             _ => None,
         };
-        Ok(Self {
-            measure,
-            filter,
-            samples,
-            interval,
-            observed,
-            weights,
-            max_lag,
-            gabor,
-        })
+        this.weights = weights;
+        this.max_lag = max_lag;
+        this.gabor = gabor;
+        Ok(this)
+    }
+
+    /// Whether traces are filtered or muted before they are compared.
+    fn transforms(&self) -> bool {
+        self.filter.is_some() || !self.measure.mutes.is_empty()
+    }
+
+    /// Each sample's mute weight on the trace of `receiver`, if there are mutes: the product
+    /// of every mute's.
+    fn mute(&self, receiver: usize) -> Option<Vec<f64>> {
+        if self.measure.mutes.is_empty() {
+            return None;
+        }
+        let x = self.offsets[receiver];
+        Some(
+            (0..self.samples)
+                .map(|m| {
+                    let t = m as f64 * self.interval;
+                    self.measure
+                        .mutes
+                        .iter()
+                        .map(|mute| mute_weight(mute, t, x))
+                        .product()
+                })
+                .collect(),
+        )
+    }
+
+    /// F M applied to a trace of `receiver`: muted, then filtered. Muting first keeps what it
+    /// removes out of what is compared: filtering first would smear a muted arrival across
+    /// the line (by about a period of the corner, both ways, the filter having zero phase),
+    /// where the mute can no longer reach it, and would lengthen a kept arrival into the
+    /// taper, which then clips it.
+    fn transform(&self, trace: &mut [f64], receiver: usize) {
+        if let Some(w) = self.mute(receiver) {
+            trace.iter_mut().zip(w).for_each(|(v, w)| *v *= w);
+        }
+        if let Some(f) = &self.filter {
+            f.apply(trace);
+        }
+    }
+
+    /// (F M)ᵀ = M F applied to a derivative with respect to the transformed trace of
+    /// `receiver`, F being symmetric and M diagonal.
+    fn transform_transpose(&self, trace: &mut [f64], receiver: usize) {
+        if let Some(f) = &self.filter {
+            f.apply(trace);
+        }
+        if let Some(w) = self.mute(receiver) {
+            trace.iter_mut().zip(w).for_each(|(v, w)| *v *= w);
+        }
     }
 
     pub fn measure(&self) -> &Measure {
@@ -375,12 +529,14 @@ impl Misfit {
     /// Bytes it holds besides the observed traces it shares with the caller: the filtered
     /// observed traces if it filters, the weights, and the phase misfit's kernels.
     pub fn memory_bytes(&self) -> usize {
-        let filtered = if self.filter.is_some() {
+        let transformed = if self.transforms() {
             4 * self.observed.iter().map(Vec::len).sum::<usize>()
         } else {
             0
         };
-        filtered + 8 * self.weights.len() + self.gabor.as_ref().map_or(0, Gabor::memory_bytes)
+        transformed
+            + 8 * (self.weights.len() + self.offsets.len())
+            + self.gabor.as_ref().map_or(0, Gabor::memory_bytes)
     }
 
     /// [`Misfit::memory_bytes`] of a misfit `measure` would set up for one shot of
@@ -394,8 +550,9 @@ impl Misfit {
         interval: f64,
     ) -> Result<usize> {
         let traces = receivers * components;
-        let filtered = if measure.max_frequency.is_some() {
-            4 * traces * samples
+        let muted = !measure.mutes.is_empty();
+        let filtered = if measure.max_frequency.is_some() || muted {
+            4 * traces * samples + if muted { 8 * receivers } else { 0 }
         } else {
             0
         };
@@ -430,7 +587,7 @@ impl Misfit {
                 o.len()
             );
         }
-        if self.measure.kind == MisfitKind::L2 && self.filter.is_none() {
+        if self.measure.kind == MisfitKind::L2 && !self.transforms() {
             return l2_misfit(synthetic, &self.observed, &self.weights);
         }
         let n = self.samples;
@@ -454,9 +611,7 @@ impl Misfit {
                     if w == 0.0 {
                         return (0.0, vec![0.0; if derivative { n } else { 0 }], 0.0);
                     }
-                    if let Some(f) = &self.filter {
-                        f.apply(&mut s);
-                    }
+                    self.transform(&mut s, r);
                     let (m, mut g, cells) = match (self.measure.kind, &self.gabor) {
                         (MisfitKind::Traveltime, _) => {
                             let (m, g) =
@@ -471,9 +626,7 @@ impl Misfit {
                     };
                     if derivative {
                         g.iter_mut().for_each(|v| *v *= w);
-                        if let Some(f) = &self.filter {
-                            f.apply(&mut g);
-                        }
+                        self.transform_transpose(&mut g, r);
                     }
                     (w * m, g, w * cells)
                 })
@@ -981,8 +1134,31 @@ mod tests {
         }
     }
 
-    /// Through a [`Misfit`]: the filter, the weights and the f32 traces, for every kind, with
-    /// and without filtering.
+    /// A window: the mutes keeping what comes after one line and before another, the second
+    /// down-weighting rather than removing.
+    fn window() -> Vec<MuteConfig> {
+        vec![
+            MuteConfig {
+                keep: MuteSide::After,
+                velocity: Some(2000.0),
+                delay: 0.12,
+                taper: 0.04,
+                weight: 0.0,
+                shape: MuteShape::Cosine,
+            },
+            MuteConfig {
+                keep: MuteSide::Before,
+                velocity: Some(1000.0),
+                delay: 0.25,
+                taper: 0.05,
+                weight: 0.1,
+                shape: MuteShape::Exponential,
+            },
+        ]
+    }
+
+    /// Through a [`Misfit`]: the filter, the mutes, the weights and the f32 traces, for every
+    /// kind, with and without filtering and a window.
     #[test]
     fn misfits_differentiate_their_traces() {
         let dt = 2e-3;
@@ -1003,8 +1179,14 @@ mod tests {
             to_f32(&[trace(11.0, 0.205, 1.1e-3), trace(12.5, 0.252, 7e-4)].concat()),
             to_f32(&[trace(12.0, 0.214, 1.2e3), trace(11.5, 0.266, 9.5e2)].concat()),
         ];
-        for kind in [MisfitKind::L2, MisfitKind::Traveltime, MisfitKind::Phase] {
-            for max_frequency in [None, Some(15.0)] {
+        for (kind, max_frequency, mutes) in
+            [MisfitKind::L2, MisfitKind::Traveltime, MisfitKind::Phase]
+                .into_iter()
+                .flat_map(|k| [None, Some(15.0)].map(|f| (k, f)))
+                .flat_map(|(k, f)| [Vec::new(), window()].map(|m| (k, f, m)))
+        {
+            {
+                let windowed = !mutes.is_empty();
                 let measure = Measure {
                     kind,
                     max_frequency,
@@ -1012,8 +1194,10 @@ mod tests {
                     max_shift: Some(0.03),
                     balance: true,
                     dominant_frequency: Some(max_frequency.unwrap_or(12.0)),
+                    mutes,
                 };
-                let m = Misfit::new(measure, &obs, &components, n, dt).unwrap();
+                let m = Misfit::new(measure.clone(), &obs, &components, n, dt, &[100.0, 200.0])
+                    .unwrap();
                 let (value, g) = m.evaluate(&syn).unwrap();
                 assert_eq!(value, m.value(&syn).unwrap());
                 // Down the gradient, scaled per component to its traces' size.
@@ -1045,7 +1229,7 @@ mod tests {
                 let fd = (at(h) - at(-h)) / (2.0 * h as f64);
                 assert!(
                     (fd - predicted).abs() < 2e-3 * predicted.abs(),
-                    "{kind:?}, {max_frequency:?}: {fd} vs {predicted}"
+                    "{kind:?}, {max_frequency:?}, windowed {windowed}: {fd} vs {predicted}"
                 );
             }
         }
@@ -1110,7 +1294,7 @@ mod tests {
     fn without_a_filter_l2_is_the_plain_misfit() {
         let obs = Arc::new(vec![vec![1.0f32, 2.0, 0.5, 0.0]]);
         let syn = vec![vec![0.5f32, 2.5, 0.0, 1.0]];
-        let m = Misfit::new(Measure::l2(true), &obs, &[Component::Vz], 2, 1e-3).unwrap();
+        let m = Misfit::new(Measure::l2(true), &obs, &[Component::Vz], 2, 1e-3, &[]).unwrap();
         let weights = balancing_weights(&obs, &[Component::Vz]);
         assert_eq!(
             m.evaluate(&syn).unwrap(),
@@ -1351,8 +1535,9 @@ mod tests {
                 max_shift: None,
                 balance: true,
                 dominant_frequency: Some(12.0),
+                mutes: Vec::new(),
             };
-            let w = Misfit::new(measure, &obs, &components, n, dt)
+            let w = Misfit::new(measure, &obs, &components, n, dt, &[])
                 .unwrap()
                 .receiver_weights();
             match kind {
@@ -1383,10 +1568,216 @@ mod tests {
                 max_shift: Some(0.01),
                 balance: true,
                 dominant_frequency: Some(10.0),
+                mutes: Vec::new(),
             };
-            let m = Misfit::new(measure, &obs, &[Component::Vz], 1, 1e-3);
+            let m = Misfit::new(measure, &obs, &[Component::Vz], 1, 1e-3, &[]);
             assert_eq!(m.is_ok(), kind == MisfitKind::L2, "{kind:?}");
         }
+    }
+
+    /// One on the side kept, the weight on the other, a half cosine between, from the line.
+    #[test]
+    fn mutes_weigh_by_time_and_offset() {
+        let before = MuteConfig {
+            keep: MuteSide::Before,
+            velocity: Some(500.0),
+            delay: 0.1,
+            taper: 0.2,
+            weight: 0.0,
+            shape: MuteShape::Cosine,
+        };
+        // At 1000 m the line is at 2.1 s.
+        assert_eq!(mute_weight(&before, 2.0, 1000.0), 1.0);
+        assert_eq!(mute_weight(&before, 2.1, 1000.0), 1.0);
+        assert!((mute_weight(&before, 2.2, 1000.0) - 0.5).abs() < 1e-12);
+        assert_eq!(mute_weight(&before, 2.3, 1000.0), 0.0);
+        assert_eq!(mute_weight(&before, 5.0, 1000.0), 0.0);
+        // Nearer, the line comes earlier.
+        assert_eq!(mute_weight(&before, 2.0, 500.0), 0.0);
+        let after = MuteConfig {
+            keep: MuteSide::After,
+            weight: 0.25,
+            velocity: None,
+            ..before.clone()
+        };
+        // Flat at 0.1 s; what comes before is down-weighted to a quarter.
+        assert_eq!(mute_weight(&after, 0.1, 3000.0), 1.0);
+        assert!((mute_weight(&after, 0.0, 3000.0) - 0.625).abs() < 1e-12);
+        assert_eq!(mute_weight(&after, -0.2, 0.0), 0.25);
+        // Exponential: e⁻¹ of the way down a time constant past the line, never quite there.
+        let damped = MuteConfig {
+            shape: MuteShape::Exponential,
+            weight: 0.1,
+            ..before.clone()
+        };
+        let e = (-1.0f64).exp();
+        assert!((mute_weight(&damped, 2.3, 1000.0) - (0.1 + 0.9 * e)).abs() < 1e-12);
+        assert!(mute_weight(&damped, 9.0, 1000.0) > 0.1);
+        // Continuous across the taper's ends, monotone between.
+        let mut last = 1.0;
+        for i in 0..=400 {
+            let w = mute_weight(&before, 2.0 + 0.001 * i as f64, 1000.0);
+            assert!(w <= last && last - w < 0.01, "{w} after {last}");
+            last = w;
+        }
+    }
+
+    /// What a mute removes no longer counts: changing a synthetic only where it is muted
+    /// changes neither the misfit nor its adjoint source; where it is down-weighted, a misfit
+    /// there counts by the weight squared.
+    #[test]
+    fn muted_samples_do_not_count() {
+        let dt = 2e-3;
+        let n = 300;
+        let obs = Arc::new(vec![to_f32(&ricker(12.0, 0.2, dt, n))]);
+        let syn = vec![to_f32(&ricker(12.0, 0.21, dt, n))];
+        let mute = |weight: f64| MuteConfig {
+            keep: MuteSide::Before,
+            velocity: None,
+            delay: 0.35,
+            taper: 0.05,
+            weight,
+            shape: MuteShape::Cosine,
+        };
+        let measure = |weight| Measure {
+            mutes: vec![mute(weight)],
+            ..Measure::l2(false)
+        };
+        let m = Misfit::new(measure(0.0), &obs, &[Component::Vz], n, dt, &[0.0]).unwrap();
+        let (value, g) = m.evaluate(&syn).unwrap();
+        let mut late = syn.clone();
+        late[0][250] += 1.0; // 0.5 s, past the taper
+        let (late_value, late_g) = m.evaluate(&late).unwrap();
+        assert_eq!((value, &g), (late_value, &late_g));
+        assert!(g[0][200..].iter().all(|&v| v == 0.0));
+        // With a filter too, muting first: the filter can't smear the muted part back.
+        let filtered = Measure {
+            max_frequency: Some(15.0),
+            ..measure(0.0)
+        };
+        let f = Misfit::new(filtered, &obs, &[Component::Vz], n, dt, &[0.0]).unwrap();
+        assert_eq!(f.evaluate(&syn).unwrap(), f.evaluate(&late).unwrap());
+        // Down-weighted to a half: a late difference counts a quarter.
+        let half = Misfit::new(measure(0.5), &obs, &[Component::Vz], n, dt, &[0.0]).unwrap();
+        let added = half.value(&late).unwrap() - half.value(&syn).unwrap();
+        assert!((added - 0.25 * 0.5).abs() < 1e-6, "{added}");
+        // Mutes need the offsets, and sensible settings.
+        assert!(Misfit::new(measure(0.0), &obs, &[Component::Vz], n, dt, &[]).is_err());
+        for bad in [
+            MuteConfig {
+                taper: 0.0,
+                ..mute(0.0)
+            },
+            MuteConfig {
+                weight: 1.5,
+                ..mute(0.0)
+            },
+            MuteConfig {
+                velocity: Some(-1.0),
+                ..mute(0.0)
+            },
+        ] {
+            let measure = Measure {
+                mutes: vec![bad],
+                ..Measure::l2(false)
+            };
+            assert!(Misfit::new(measure, &obs, &[Component::Vz], n, dt, &[0.0]).is_err());
+        }
+    }
+
+    /// The mutes and the filter together are transposed exactly: ⟨F M x, y⟩ = ⟨x, M F y⟩.
+    #[test]
+    fn muting_then_filtering_is_transposed_exactly() {
+        let dt = 2e-3;
+        let n = 300;
+        let obs = Arc::new(vec![vec![0.0f32; 2 * n]]);
+        let measure = Measure {
+            max_frequency: Some(15.0),
+            mutes: window(),
+            ..Measure::l2(false)
+        };
+        let m = Misfit::new(measure, &obs, &[Component::Vz], n, dt, &[100.0, 200.0]).unwrap();
+        let x: Vec<f64> = (0..n).map(|i| ((i * 7919) % 101) as f64 - 50.0).collect();
+        let y: Vec<f64> = (0..n).map(|i| ((i * 104729) % 97) as f64 - 48.0).collect();
+        for receiver in 0..2 {
+            let (mut mx, mut my) = (x.clone(), y.clone());
+            m.transform(&mut mx, receiver);
+            m.transform_transpose(&mut my, receiver);
+            let a: f64 = mx.iter().zip(&y).map(|(a, b)| a * b).sum();
+            let b: f64 = x.iter().zip(&my).map(|(a, b)| a * b).sum();
+            assert!((a - b).abs() <= 1e-12 * a.abs().max(b.abs()), "{a} {b}");
+        }
+    }
+
+    /// A stage's mutes add to the inversion's.
+    #[test]
+    fn stage_mutes_add_to_the_inversions() {
+        let settings: InversionConfig = toml::from_str(
+            r#"
+            observed = "observed"
+            [[mute]]
+            keep = "before"
+            velocity = 400.0
+            taper = 0.5
+            [[stage]]
+            iterations = 2
+            [[stage]]
+            iterations = 2
+            [[stage.mute]]
+            keep = "after"
+            delay = 0.3
+            taper = 0.2
+            weight = 0.5
+            "#,
+        )
+        .unwrap();
+        let stages = settings.stages().unwrap();
+        let first = Measure::of(&stages[0], &settings, 10.0);
+        let second = Measure::of(&stages[1], &settings, 10.0);
+        assert_eq!(first.mutes, settings.mutes);
+        assert_eq!(second.mutes.len(), 2);
+        assert_eq!(second.mutes[1].keep, MuteSide::After);
+        assert!(
+            toml::from_str::<InversionConfig>("observed = \"o\"\n[[mute]]\nkeep = \"before\"")
+                .is_err()
+        );
+    }
+
+    /// Offsets are horizontal, between the nodes source and receivers snap to.
+    #[test]
+    fn offsets_are_horizontal_between_nodes() {
+        let cfg = Config::from_toml(
+            r#"
+            [grid]
+            points = [30, 20, 20]
+            spacing = 10.0
+            [time]
+            duration = 0.01
+            [[model.layer]]
+            top = 0.0
+            vp = 2000.0
+            vs = 1000.0
+            rho = 2000.0
+            [[source]]
+            position = [52.0, 100.0, 30.0]
+            explosion = 1e9
+            wavelet = { kind = "ricker", frequency = 10.0 }
+            [receivers]
+            components = ["vz"]
+            [[receivers.point]]
+            position = [50.0, 100.0, 0.0]
+            [[receivers.point]]
+            position = [131.0, 100.0, 140.0]
+            [[receivers.point]]
+            position = [80.0, 140.0, 0.0]
+            "#,
+        )
+        .unwrap();
+        let x = offsets(&cfg).unwrap();
+        assert_eq!(x.len(), 3);
+        assert_eq!(x[0], 0.0);
+        assert!((x[1] - 80.0).abs() < 1e-12, "{}", x[1]);
+        assert!((x[2] - 50.0).abs() < 1e-12, "{}", x[2]);
     }
 
     /// What a misfit holds is what [`Misfit::held_bytes`] works out beforehand.
@@ -1396,7 +1787,12 @@ mod tests {
         let obs = Arc::new(vec![vec![0.5f32; 4 * samples], vec![1.0f32; 4 * samples]]);
         let components = [Component::Vx, Component::P];
         for kind in [MisfitKind::L2, MisfitKind::Traveltime, MisfitKind::Phase] {
-            for max_frequency in [None, Some(20.0)] {
+            for (max_frequency, mutes) in [
+                (None, Vec::new()),
+                (Some(20.0), Vec::new()),
+                (None, window()),
+                (Some(20.0), window()),
+            ] {
                 let measure = Measure {
                     kind,
                     max_frequency,
@@ -1404,10 +1800,13 @@ mod tests {
                     max_shift: None,
                     balance: true,
                     dominant_frequency: Some(12.0),
+                    mutes,
                 };
-                let m = Misfit::new(measure, &obs, &components, samples, 1e-3).unwrap();
+                let offsets = [10.0, 20.0, 30.0, 40.0];
+                let m = Misfit::new(measure.clone(), &obs, &components, samples, 1e-3, &offsets)
+                    .unwrap();
                 let planned = Misfit::held_bytes(&measure, 4, 2, samples, 1e-3).unwrap();
-                assert_eq!(m.memory_bytes(), planned, "{kind:?} {max_frequency:?}");
+                assert_eq!(m.memory_bytes(), planned, "{kind:?} {measure:?}");
             }
         }
     }

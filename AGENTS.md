@@ -58,7 +58,8 @@ src/
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay or the field
                  rebuilt backwards (Strategy), correlations
   inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search, stages
-  misfit.rs      misfits and their exact derivatives: L2, time shifts, phase; zero-phase low-pass
+  misfit.rs      misfits and their exact derivatives: L2, time shifts, phase; zero-phase low-pass,
+                 mutes and windows
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
@@ -135,6 +136,22 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Mutes and windows** (`[[inversion.mute]]`, `[[inversion.stage.mute]]`,
+  `misfit::mute_weight`, `misfit::offsets`). A mute is a fixed diagonal weight by time and
+  horizontal offset, applied before the filter to observed and synthetic traces alike, so the
+  misfit is $\chi(FMs, FMd)$ and the adjoint source $MF\,\partial\chi$ (a unit test checks the
+  pair transposes to $10^{-12}$). Before, not after, as the codes a research agent read do it
+  (DENISE, SeisFlows, LASIF filter first): filtering first smears a muted arrival back across
+  the line by about a period of the corner, and in its prototype turned a kept arrival's
+  +0.100 s shift into -0.095 s; muting first leaked nothing. Offsets are between the nodes source and receivers snap to,
+  worked out from the configuration (`offsets`) only when a stage mutes, and a misfit keeps
+  them and its muted copy of the observed traces (both in `Misfit::held_bytes`). Weights and
+  quiet traces are judged on the muted traces, so a window that removes a trace's arrivals
+  drops the trace. Two mutes make a window; the stage's add to the inversion's. The
+  exponential shape is time damping from a line rather than from first-arrival picks, which
+  would depend on picking. Times are
+  $m\,\Delta$ from the run's start, not the recorded fields' half-step times: a taper hides
+  the difference.
 - **The misfits meet the web page** (merged 2026-11-21). `InversionConfig.iterations` is now
   an `Option` (stages give their own), so ask `InversionConfig::stages()` how many iterations
   run, never the field. `view::InversionView` runs the stages: a later stage's start

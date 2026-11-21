@@ -496,8 +496,15 @@ impl Inversion {
             let observed = Arc::new(observed.traces);
             let (components, samples) = (r.components.clone(), r.samples);
             let interval = sim.info.sample_interval;
-            let misfit = Misfit::new(measure, &observed, &components, samples, interval)
-                .with_context(|| format!("shot {s}"))?;
+            let misfit = shot_misfit(
+                measure.clone(),
+                &config,
+                &observed,
+                &components,
+                samples,
+                interval,
+            )
+            .with_context(|| format!("shot {s}"))?;
             shots.push(Shot {
                 config,
                 observed,
@@ -510,8 +517,9 @@ impl Inversion {
         // Every stage's filter must suit the traces before the first one starts.
         for stage in &stages[1..] {
             let shot = &shots[0];
-            Misfit::new(
+            shot_misfit(
                 Measure::of(stage, settings, source_frequency),
+                &shot.config,
                 &shot.observed,
                 &shot.components,
                 shot.samples,
@@ -685,8 +693,9 @@ impl Inversion {
         );
         let measure = Measure::of(&self.stages[s], &self.settings, self.source_frequency);
         for shot in &mut self.shots {
-            shot.misfit = Misfit::new(
-                measure,
+            shot.misfit = shot_misfit(
+                measure.clone(),
+                &shot.config,
                 &shot.observed,
                 &shot.components,
                 shot.samples,
@@ -1080,6 +1089,24 @@ impl Inversion {
         self.history.push(it.clone());
         Ok(Some(it))
     }
+}
+
+/// The misfit `measure` sets up for one shot, run as `config` says, with the receivers'
+/// offsets from its source if it mutes.
+fn shot_misfit(
+    measure: Measure,
+    config: &Config,
+    observed: &Arc<Vec<Vec<f32>>>,
+    components: &[crate::receiver::Component],
+    samples: usize,
+    interval: f64,
+) -> Result<Misfit> {
+    let offsets = if measure.mutes.is_empty() {
+        Vec::new()
+    } else {
+        crate::misfit::offsets(config)?
+    };
+    Misfit::new(measure, observed, components, samples, interval, &offsets)
 }
 
 /// Adds |v|² at every interior node, each component taken where it is stored.
@@ -1749,6 +1776,7 @@ mod tests {
             &shot.components,
             shot.samples,
             shot.interval,
+            &[],
         )
         .unwrap();
         let mut sim = Simulation::with_model(&shot.config, inv.model.clone()).unwrap();
@@ -1770,6 +1798,7 @@ mod tests {
             &inv.shots[0].components,
             inv.shots[0].samples,
             inv.shots[0].interval,
+            &[],
         )
         .unwrap();
         assert_eq!(inv.misfit_of(&inv.model).unwrap(), inv.misfit());

@@ -808,13 +808,15 @@ mod tests {
             })
             .collect();
         // As recorded; with a stage that filters (and so keeps filtered copies); with the
-        // receivers' side of the illumination and a scale; and with the phase misfit's kernels,
-        // largest in its unfiltered stage.
+        // receivers' side of the illumination and a scale; with the phase misfit's kernels,
+        // largest in its unfiltered stage; and with a mute (a muted copy and the offsets).
         let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
         let receivers = "receiver_runs = 1\n[inversion.scale]\nvp = 0.5";
         let phase = "misfit = \"phase\"\n[[inversion.stage]]\niterations = 2\n\
                      [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1";
-        for stages in ["", filtering, receivers, phase] {
+        let muted = "[[inversion.mute]]\nkeep = \"before\"\nvelocity = 1000.0\ndelay = 0.1\n\
+                     taper = 0.02";
+        for stages in ["", filtering, receivers, phase, muted] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

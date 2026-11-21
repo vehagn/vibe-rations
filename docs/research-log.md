@@ -1661,14 +1661,85 @@ data; its licence (SEG wiki) could not be read, so that is the maintainer's call
 `http://localhost:8088/?example=marmousi2-50m` (or `marmousi2-central`) and Run; the page
 shows speed and steps. `just in unit runs_model_files_it_is_given`.
 
+## 2026-11-21 — Mutes and windows
+
+**Question.** Marmousi2's five L2 iterations lowered the misfit without approaching the model,
+and the suspects are the slow waves along the seafloor (2026-11-20, "Marmousi2"); the time
+shifts need single arrivals, which whole traces with several don't give (2026-11-21, open
+questions). Can the inversion weigh the data by time and offset, mute or window, and keep its
+gradient exact?
+
+**Literature** (two research agents; Crossref for every reference, the papers read where
+noted in the bibliography). Mutes and time windows before the misfit are old practice: Shipp &
+Singh muted multiples behind a line in offset and windowed by offset and time stage by stage
+[@shipp2002]. For ocean-bottom data, Warner et al. muted the Scholte waves at short offsets
+with "a simple mute because that allows us to be certain that we apply identical processes to
+field and synthetic data" [@warner2013]; Prieux et al. saw Scholte waves slower than 350 m/s on
+every component of Valhall's data and left them unmodelled [@prieux2013b]. Frequency-domain
+codes, which can't window, damp: $e^{-(t - t_0)/\tau}$ from the first arrival
+[@brenders2007; @brossier2009; @prieux2013], which "limits the offset range over which surface
+waves are seen" [@brossier2009], relaxed over the stages to bring surface waves back in
+[@romdhane2011]. Adjoint tomography windows single arrivals automatically, but on the
+synthetic and anew for each model [@maggi2009], and leaves the processing's transpose
+implicit [@liu2006]. A second agent read DENISE, SeisFlows, LASIF and Pyadjoint: all filter
+first and window afterwards, and none carries both through the adjoint source exactly
+(DENISE injects $W r$ where its misfit has $W^2$).
+
+**Method** (`[[inversion.mute]]`, `[[inversion.stage.mute]]`, `misfit::mute_weight`). A mute
+keeps one side of a line $t = x / v + t_0$, $x$ the horizontal offset between the nodes source
+and receiver snap to, multiplies the other by a floor $w$ (0 removes it), and goes from one to
+the other over a taper, a half cosine or an exponential $e^{-\tau/T}$ (the time damping above,
+from a line instead of picks); several multiply, and two make a window. The weights $M$ are
+fixed by the survey and applied to observed and synthetic traces alike, so the misfit is
+$\chi(F M s, F M d)$ with $F$ the stage's filter, and its adjoint source is
+$M F\, \partial\chi$. Horizontal offset, not slant distance: in the second agent's runs of this solver the slow
+seafloor wave from a source 400 m deep and one 50 m deep lined up in horizontal offset (lags
+$-0.11$ to $+0.09$ s at 0.2–1.3 km) where slant distance predicted 0.22–0.85 s. Weights and
+quiet traces are judged on the muted traces, from the observed ones only.
+
+*The order.* As first written, the mute came after the filter, as in every code read. The
+second agent's prototype (a 1.2 Hz Ricker kept, a ten times stronger arrival behind the line,
+a 0.6 Hz corner) found that order leaks: the zero-phase filter smears the strong arrival back
+across the line, where the mute can't reach it, and the kept arrival's time shift of
+$+0.100$ s came out $-0.095$; filtering also lengthens the kept arrival into the taper, which
+clips it (4.9% against $5 \times 10^{-10}$). Muting first leaked nothing, so mutes come first.
+
+**Results.**
+
+- $\langle F M x, y\rangle = \langle x, M F y\rangle$ to $10^{-12}$
+  (`muting_then_filtering_is_transposed_exactly`); a change of the synthetic where it is muted, with or
+  without a filter, changes neither the misfit nor the adjoint source, and where it is
+  down-weighted to $w$ it counts $w^2$ (`muted_samples_do_not_count`); every misfit, filtered
+  or not, with a window, agrees with finite differences through `Misfit`.
+- Through the inversion (`the_mutes_keep_the_gradient_exact`, the model of the earlier checks):
+  filtered L2 with the late arrivals down-weighted to a fifth, $8.7 \times 10^{-7}$ at
+  $h = 10^{-2}$ (with the mute after the filter it had been $1.5 \times 10^{-5}$, and up to
+  $3.8 \times 10^{-5}$ at smaller steps); time shifts in a window, $2.6 \times 10^{-5}$ at
+  $h = 10^{-3}$, their round-off floor. The window changes what they measure: the change
+  predicted down the gradient is $-9.47 \times 10^{-5}$ against $-1.41 \times 10^{-4}$ without.
+- The memory plan counts the muted copy of the observed traces and the offsets
+  (`Misfit::held_bytes`), and still equals what an inversion holds with a mute.
+
+**Decision.** Mutes before the filter, fixed by the configuration, horizontal offsets; the
+taper at least half the dominant period (the agent's prototype: a time shift of 0.100 s came
+out 0.050 with no taper, 0.088 with half a period, 0.097 with a whole one, for an arrival on
+the line); `delay` includes the wavelet's own (1.2/$f_0$ for a Ricker). For the time shifts, a
+floor must stay far below the kept arrival's amplitude over the muted one's: at 0.1 against a
+ten times stronger arrival the prototype's shift locked onto the muted one. Windows picked on
+the synthetics, as FLEXWIN's, would make the misfit jump between models; picked on the
+observed data, or fixed per stage, they would not, which is what these mutes are. Next: the
+local session tries them on Marmousi2's seafloor waves.
+
+**Reproduce:** `just unit misfit`; `just physics mutes_keep`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
   untouched with every misfit in 8 iterations; a survey with more wavelengths to the targets,
   more iterations and the near-surface held (or the receivers' side of the illumination) is
   needed to show whether time shifts, phases or frequency continuation widen the basin here
-  [@bunks1995; @luo1991; @fichtner2008]. Windowing single arrivals, which the time shift
-  assumes for traces with several, is still to come.
+  [@bunks1995; @luo1991; @fichtner2008]. Windows for single arrivals are now mutes
+  (2026-11-21, "Mutes and windows"); choosing them per trace from the observed data is not.
 - **Smoother time shifts.** The parabola's shift is continuous but its derivative jumps
   where the correlation's peak changes lag, which limits the finite-difference check to
   $10^{-4}$; Newton's method on the correlation's band-limited interpolant would be smooth and

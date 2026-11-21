@@ -139,6 +139,7 @@ a free surface $z = 0$ is the surface.
 | `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, bounds `vp_range`, `vs_range`, `rho_range` |
 | `[inversion.scale]` | Relative factors on the inverted parameters' steps: `vp`, `vs`, `rho` (1 by default; only their ratios matter) |
 | `[[inversion.stage]]` | Frequency continuation: `max_frequency` (low-pass corner, Hz), `iterations`, `misfit` |
+| `[[inversion.mute]]` | A mute or one side of a window, in every stage (`[[inversion.stage.mute]]`: one stage's): `keep` (`before` or `after` the line $t = x/$`velocity`$ + $`delay`, $x$ the horizontal offset), `taper` (s), `weight` on the other side (0 by default), `shape` (`cosine`, or `exponential` damping with `taper` its time constant) |
 
 The wavelet is the moment rate of a moment-tensor source and the force of a force source. A
 Ricker wavelet peaks at 1, so its amplitude is a peak rate; a Gaussian has unit area, so its
@@ -229,6 +230,35 @@ iterations = 5
 max_frequency = 10.0
 misfit = "l2"
 iterations = 5
+```
+
+Mutes weigh the traces by time and offset, observed and synthetic alike, before the filter:
+each keeps one side of a line $t = x / v + t_0$ ($x$ the receiver's horizontal distance from
+the shot, between the nodes both snap to), multiplies the other by `weight` (0 removes it),
+and goes from one to the other with a half cosine over `taper` seconds, starting at the line,
+or with `shape = "exponential"` as $e^{-\tau/\text{taper}}$, $\tau$ the time past the line: the
+time damping that frequency-domain FWI applies from the first arrivals (Brossier et al.
+2009).
+The misfit becomes $\chi(F M s, F M d)$ and its adjoint source $M F\, \partial\chi$: still
+exact, since the weights are fixed. Muting before filtering keeps a removed arrival from being
+smeared back across the line by the filter. Times count from the run's start, so `delay`
+includes the wavelet's own (1.2/$f_0$ for a Ricker); the taper should be at least half the
+dominant period. One mute can leave out slow surface waves; two make a
+window, e.g. around the P arrivals for the time shifts:
+
+```toml
+[[inversion.mute]]   # what comes before the P waves
+keep = "after"
+velocity = 3000.0
+delay = -0.1
+taper = 0.1
+
+[[inversion.mute]]   # what comes after them, down to a tenth
+keep = "before"
+velocity = 2000.0
+delay = 0.3
+taper = 0.2
+weight = 0.1
 ```
 
 
@@ -670,8 +700,10 @@ Planned next, following Fichtner (2011), ch. 7–11:
    function of the samples; the inversion's gradient matches finite differences to
    $4.4 \times 10^{-7}$ (filtered L2) and $4.2 \times 10^{-6}$ (phase), and the time shifts to
    $1.3 \times 10^{-4}$, round-off in their single-precision traces (their derivative jumps
-   where a correlation's peak moves to the next lag). Still to come: windowing of single
-   arrivals.
+   where a correlation's peak moves to the next lag). Mutes and windows by time and offset
+   (`[[inversion.mute]]`), fixed weights on observed and synthetic traces alike, keep the
+   gradient exact ($8.7 \times 10^{-7}$ for muted, filtered L2; $2.6 \times 10^{-5}$ for
+   windowed time shifts).
 6. **Optimisation** (L-BFGS and frequency continuation done: `src/inversion.rs`).
    Preconditioned L-BFGS (Nocedal 1980; Liu & Nocedal 1989) on relative model changes, with
    bounds and an Armijo line search; each source a shot; the illumination (Shin et al. 2001)

@@ -66,7 +66,7 @@ fn study(
                     let interval = sim.info.sample_interval;
                     let measure = Measure::l2(true);
                     let obs = Arc::clone(&shot.observed);
-                    Misfit::new(measure, &obs, &r.components, r.samples, interval)
+                    Misfit::new(measure, &obs, &r.components, r.samples, interval, &[])
                         .unwrap()
                         .value(&r.traces)
                         .unwrap()

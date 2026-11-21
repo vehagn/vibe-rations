@@ -1186,6 +1186,42 @@ fn the_misfits_gradients_match_finite_differences() {
     }
 }
 
+/// Mutes keep the gradient exact: they weigh observed and synthetic traces alike, before the
+/// filter, so the adjoint source goes back through the filter and them in turn. L2 of
+/// low-passed traces with the late arrivals down-weighted to a fifth, and the time shifts of
+/// one window (which changes what they measure: the predicted change down the gradient is
+/// -9.47e-5 against -1.41e-4 without it).
+///
+/// Measured (extrapolated): muted, filtered L2 8.7e-7 (h = 1e-2); windowed time shifts 2.6e-5
+/// (h = 1e-3; 1.0e-5 at 2e-3, 1.4e-4 at 5e-4, the shifts' round-off floor as without a window,
+/// 3.0e-5 to 9.9e-5). With the mute after the filter, as first written, the L2 check gave
+/// 1.5e-5 at h = 1e-2 and 2.2e-5 to 3.8e-5 at smaller steps; both orders transpose exactly
+/// (a unit test), and why the order changed the check's noise was not traced.
+#[test]
+fn the_mutes_keep_the_gradient_exact() {
+    for (label, settings, h, tolerance) in [
+        (
+            "filtered l2, late arrivals down-weighted",
+            "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 1\n\
+             [[inversion.mute]]\nkeep = \"before\"\nvelocity = 1300.0\ndelay = 0.15\n\
+             taper = 0.03\nweight = 0.2",
+            1e-2,
+            3e-5,
+        ),
+        (
+            "windowed time shifts",
+            "misfit = \"traveltime\"\nmax_shift = 0.05\n\
+             [[inversion.mute]]\nkeep = \"after\"\nvelocity = 3000.0\ndelay = 0.06\ntaper = 0.02\n\
+             [[inversion.mute]]\nkeep = \"before\"\nvelocity = 1500.0\ndelay = 0.12\ntaper = 0.02",
+            1e-3,
+            5e-4,
+        ),
+    ] {
+        let e = inversion_gradient_check(label, settings, h);
+        assert!(e < tolerance, "{label}: {e}");
+    }
+}
+
 /// The relative error of the extrapolated central difference of the inversion's misfit down
 /// its gradient, at steps `h` and `h`/2, with `settings` added to its [inversion] section.
 fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {

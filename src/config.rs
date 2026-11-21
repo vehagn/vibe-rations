@@ -503,6 +503,60 @@ impl MisfitKind {
     }
 }
 
+/// Which side of a mute's line a trace keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MuteSide {
+    /// What arrives before the line: muting what comes later, e.g. slow surface waves.
+    Before,
+    /// What arrives after it: muting what comes earlier, e.g. direct waves.
+    After,
+}
+
+/// How a mute goes from the side it keeps to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MuteShape {
+    /// A half cosine over `taper` seconds, then `weight`.
+    #[default]
+    Cosine,
+    /// exp(-τ/taper), τ the time past the line, falling towards `weight`: the time damping
+    /// of frequency-domain FWI, applied from a line instead of a first-arrival pick.
+    Exponential,
+}
+
+/// A mute: a weight on every trace's samples, set by the time t from the run's start and
+/// the receiver's horizontal offset x from the shot's source, the same for observed and
+/// synthetic traces (`crate::misfit::mute_weight`). It keeps one side of the line
+/// t = x / velocity + delay, multiplies the other by `weight`, and goes from one to the other
+/// beginning at the line, over `taper` seconds with a half cosine or with an exponential of
+/// that time constant (`shape`). A mute keeping what comes after one line and another keeping
+/// what comes before a later one make a window.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MuteConfig {
+    pub keep: MuteSide,
+    /// The line's speed, m/s; without one the line is flat, t = delay.
+    pub velocity: Option<f64>,
+    /// The line's time at zero offset, s: including the wavelet's own delay (1.2/f₀ for a
+    /// Ricker by default), since times count from the run's start.
+    #[serde(default)]
+    pub delay: f64,
+    /// The taper's length, s: at least half the traces' dominant period and better a whole
+    /// one, so the mute adds little at frequencies the data don't have and doesn't bias the
+    /// time shift of an arrival near the line.
+    pub taper: f64,
+    /// What the muted side is multiplied by: 0 (the default) removes it, between 0 and 1
+    /// down-weights it. The L2 misfit counts it squared; for the time shifts a strong arrival
+    /// down-weighted by less than its amplitude over the kept one's can still win the
+    /// correlation.
+    #[serde(default)]
+    pub weight: f64,
+    /// `cosine` (the default) or `exponential`.
+    #[serde(default)]
+    pub shape: MuteShape,
+}
+
 /// One stage of an inversion: its iterations, on traces low-pass filtered up to
 /// `max_frequency`, with its own misfit if it names one.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -514,6 +568,9 @@ pub struct StageConfig {
     pub iterations: usize,
     /// The stage's misfit, instead of the inversion's.
     pub misfit: Option<MisfitKind>,
+    /// The stage's mutes (`[[inversion.stage.mute]]`), besides the inversion's.
+    #[serde(default, rename = "mute", skip_serializing_if = "Vec::is_empty")]
+    pub mutes: Vec<MuteConfig>,
 }
 
 /// An L-BFGS inversion of the observed traces for the model (`invert`).
@@ -542,6 +599,11 @@ pub struct InversionConfig {
     /// one stage of `iterations` on the traces as recorded.
     #[serde(default, rename = "stage")]
     pub stages: Vec<StageConfig>,
+    /// Mutes applied in every stage (`[[inversion.mute]]`): weights by time and offset on
+    /// observed and synthetic traces alike, before the stage's filter, e.g. to leave out slow
+    /// surface waves, or, two together, to window one arrival for the time shifts.
+    #[serde(default, rename = "mute", skip_serializing_if = "Vec::is_empty")]
+    pub mutes: Vec<MuteConfig>,
     /// Model changes and gradient changes L-BFGS remembers.
     #[serde(default = "default_memory")]
     pub memory: usize,
@@ -638,6 +700,7 @@ impl InversionConfig {
                 max_frequency: None,
                 iterations: self.iterations.unwrap_or(10),
                 misfit: Some(self.misfit),
+                mutes: Vec::new(),
             }]);
         }
         ensure!(
