@@ -1199,6 +1199,58 @@ Choosing them is the trade-off-curve exercise of Kamei & Pratt.
 **Reproduce:** `just study sphere_with_density` (about 5 minutes); the unit tests
 `preconditioner_factors_change_variables` and `scale_multiplies_each_parameters_preconditioner`.
 
+## 2026-11-21 — The receivers' side of the illumination
+
+**Question.** The preconditioner divides by the sources' side of the illumination, the
+forward wavefield's energy $I_s$ at each node [@shin2001], which leaves out the receivers'
+Green's functions; without fixing the near-surface, the updates still pile up around the
+receivers (the L-BFGS entry). Can the receivers' side be added cheaply, and does it help?
+
+**Method** (`receiver_runs`, `Inversion::receiver_energy`). In the Born approximation the
+Gauss–Newton Hessian's diagonal is $\sum_s \sum_a w_a \sum_t (\partial d_{s,a} / \partial m)^2$,
+which for pulses of similar spectra is about $I_s(n)\, I_r(n)$ with
+$I_r(n) = \sum_a w_a \sum_t |G_a(n, t)|^2$, $G_a$ the waves sent from receiver component $a$
+[@plessix2004, whose "type 1" weights, assuming $I_r$ constant, are Shin et al.'s]. Sending
+from every component at once with random signs $\varepsilon_a = \pm 1$, as encoded simultaneous
+sources [@krebs2009], gives $|\sum_a \varepsilon_a \sqrt{w_a} G_a|^2$, whose expectation is
+$I_r$: the cross terms average out. Each run injects the first shot's wavelet through
+`Solver::adjoint_op`, as the adjoint run injects residuals, so velocity and pressure
+receivers weigh as in the gradient, with $w_a$ each component's weight in the misfit
+relative to the largest, averaged over the shots; signs come from SplitMix64 [@steele2014],
+seeded by the stage. The estimate, averaged over `receiver_runs` runs, is made at each
+stage's start in the model as it stands and held; the preconditioner becomes
+$w_c / (I_s I_r / \max + \epsilon)$. Each run costs a forward run, so 8 runs cost about two
+fifths of an iteration of this two-shot survey, and less with more shots. A unit test checks
+the estimator: with the signs of a 4 × 4 Hadamard matrix's rows, four runs average to the
+sum of the four components sent alone to $10^{-5}$ of the largest. A research agent compared
+the estimate with the exact sum of 150 single-receiver runs: the log-standard deviation over
+the free nodes was 0.36 for 1 run, 0.215 for 4 and 0.099 for 16 in a homogeneous model, and
+an analytic $\sum_r 1 / r^2$ missed the depth decay of a layered one by about twofold over
+100 m.
+
+**Experiment** (`just study receivers_side`). The sphere survey ($v_p$, $v_s$), 5 iterations:
+
+| | L2 left | $v_s$ error | $v_p$ error |
+|---|---|---|---|
+| nothing fixed, sources' side | 14.1% | 92.3% | 100.5% |
+| nothing fixed, both sides, 2 runs | 8.8% | 87.3% | 100.7% |
+| nothing fixed, both sides, 8 runs | 9.5% | 88.6% | 100.7% |
+| top 60 m fixed, sources' side | 6.5% | 82.8% | 100.9% |
+| top 60 m fixed, both sides, 8 runs | 6.7% | 82.2% | 101.1% |
+
+With nothing fixed, the receivers' side takes over part of what fixing the top does: a third
+less misfit and a better $v_s$ anomaly. The estimate's accuracy hardly matters (2 and 8 runs
+alike; the research agent found the exact sum and an analytic one within 0.2% of misfit of
+each other). With the top fixed, where the receivers' factor varies only 4–8-fold over the
+free nodes, it changes nothing beyond noise. The source side is still recomputed every
+iteration and the receiver side once per stage.
+
+**Decision.** An option, off by default (`receiver_runs = 0`) so the baselines stand; use it
+when the near-surface can't be fixed. 2–8 runs are enough.
+
+**Reproduce:** `just study receivers_side` (about 4 minutes); the unit test
+`the_receivers_side_adds_each_receivers_energy`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

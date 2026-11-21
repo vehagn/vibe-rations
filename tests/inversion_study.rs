@@ -250,6 +250,46 @@ fn sphere_with_density() {
     }
 }
 
+/// The sphere with nothing held fixed, where the sources' and receivers' surroundings would
+/// take the updates: preconditioned by the sources' side of the illumination alone, then by
+/// both sides, estimated from 2 and 8 runs; and with the top fixed, by both.
+#[test]
+#[ignore]
+fn receivers_side() {
+    let anomaly = "[[model.sphere]]\ncenter = [175.0, 155.0, 115.0]\nradius = 40.0\n\
+                   vp = 2700.0\nvs = 1500.0\nrho = 2100.0";
+    let (observed, truth) = record(&Config::from_toml(&sphere_survey(anomaly, "")).unwrap());
+    study(
+        "receivers' side",
+        &|settings| {
+            let fixed = settings.contains("fixed");
+            let text = sphere_survey("", &settings.replace("fixed", ""));
+            if fixed {
+                text
+            } else {
+                text.replace("fixed_above = 60.0", "")
+            }
+        },
+        &observed,
+        &truth,
+        &|start| {
+            (0..truth.vs.len())
+                .filter(|&n| truth.vs[n] != start.vs[n])
+                .collect()
+        },
+        &[
+            ("sources' side", "iterations = 5"),
+            ("both sides, 2 runs", "iterations = 5\nreceiver_runs = 2"),
+            ("both sides, 8 runs", "iterations = 5\nreceiver_runs = 8"),
+            ("top fixed, sources' side", "iterations = 5\n# fixed"),
+            (
+                "top fixed, both sides, 8 runs",
+                "iterations = 5\nreceiver_runs = 8\n# fixed",
+            ),
+        ],
+    );
+}
+
 fn slow_survey(vs: f64, vp: f64, inversion: &str) -> String {
     format!(
         r#"

@@ -53,6 +53,8 @@ pub struct InversionSize {
     pub precondition: bool,
     /// Whether a stage low-pass filters the traces, holding a filtered copy of the observed.
     pub filtered: bool,
+    /// Whether it estimates the receivers' side of the illumination, held between stages.
+    pub receiver_side: bool,
 }
 
 /// What decides a run's memory.
@@ -173,6 +175,14 @@ impl Plan {
                 std::mem::size_of::<usize>() as u64 * n,
             ),
         ]);
+        if inversion.receiver_side {
+            // Before the free nodes' indices, which a test expects last.
+            let at = parts.len() - 1;
+            parts.insert(
+                at,
+                part("the receivers' side of the illumination", 8 * interior),
+            );
+        }
         Memory::of(parts)
     }
 
@@ -309,6 +319,7 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         memory: settings.memory,
         precondition: settings.precondition || !settings.scale.is_unit(),
         filtered: settings.stages()?.iter().any(|s| s.max_frequency.is_some()),
+        receiver_side: settings.precondition && settings.receiver_runs > 0,
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
 }
@@ -593,10 +604,11 @@ mod tests {
                 sim.receivers.traces.into()
             })
             .collect();
-        // As recorded, and with a stage that filters (and so keeps filtered copies).
+        // As recorded, with a stage that filters (and so keeps filtered copies), and with the
+        // receivers' side of the illumination and a scale.
         let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
-        let scaled = "[inversion.scale]\nvp = 0.5";
-        for stages in ["", filtering, scaled] {
+        let receivers = "receiver_runs = 1\n[inversion.scale]\nvp = 0.5";
+        for stages in ["", filtering, receivers] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

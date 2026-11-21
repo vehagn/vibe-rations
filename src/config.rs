@@ -566,6 +566,12 @@ pub struct InversionConfig {
     /// The fraction of the largest energy added to every node's before dividing by it.
     #[serde(default = "default_water_level")]
     pub water_level: f64,
+    /// Also divide by the receivers' side of the illumination: the energy, at each node, of
+    /// waves sent out from every receiver at once with random signs, averaged over this many
+    /// runs at the start of each stage (a receiver-side pseudo-Hessian). 0, the default, for
+    /// the source side alone.
+    #[serde(default)]
+    pub receiver_runs: usize,
     /// Factors on the preconditioner for each inverted parameter: a change of variables that
     /// scales that parameter's steps, e.g. `rho = 0.3` where density takes up what the
     /// velocities should explain. 1 by default.

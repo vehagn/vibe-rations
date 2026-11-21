@@ -125,6 +125,15 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The receivers' side of the illumination** (`receiver_runs`, `Inversion::receiver_energy`).
+  The runs inject through `Solver::adjoint_op`, exactly as the adjoint injects residuals, so
+  velocity and pressure receivers weigh as they do in the gradient, and a run needs no
+  sources in the configuration; it steps the solver itself. With a Hadamard matrix's signs
+  the cross terms cancel exactly (a unit test); with random ones only on average, which is
+  enough for a preconditioner. Off by default: with the top fixed it changed little; with
+  nothing fixed it helped (the log). The estimate is made at each stage's start and held
+  (8 bytes per node, in the memory plan); the source side is still recomputed every
+  iteration.
 - **Scaling the parameters** (`[inversion.scale]`). A factor $w$ per parameter on the
   preconditioner is exactly a change of variables ($x = Dz$, $D^2 = w$), so it leaves the
   L-BFGS pairs, the Armijo test and the bounds valid; 1 keeps every result bit for bit. Don't

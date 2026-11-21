@@ -286,6 +286,15 @@ impl Misfit {
         self.compute(synthetic, true)
     }
 
+    /// Each component's weight in the misfit: the L2 misfit's; 1 for the trace-by-trace
+    /// misfits, which weigh traces, not components.
+    pub fn component_weights(&self) -> Vec<f64> {
+        match self.measure.kind {
+            MisfitKind::L2 => self.weights.clone(),
+            _ => vec![1.0; self.observed.len()],
+        }
+    }
+
     /// Bytes it holds besides what it shares with the caller: the filtered observed traces.
     pub fn memory_bytes(&self) -> usize {
         if self.filter.is_some() {
