@@ -2064,8 +2064,8 @@ trial. 2,769 s in all, as L2 (the mute costs nothing measurable).
 - *Muting stops the damage.* $v_s$ below 750 m no longer moves away (1.004 and 1.001 against
   1.095 and 1.070); its cosines there are about zero (−0.05), so it barely moves at all, which
   says the waves left (P, and S waves faster than 600 m/s) see little $v_s$ at these depths.
-- *$v_p$ gains.* At 750–1000 m it moves as the phase misfit made it (0.971, cosine +0.35, against
-  L2's 0.994), and at 1000–1500 m it no longer turns away (0.999, +0.05, against 1.020, −0.15):
+- *$v_p$ gains.* At 750–1000 m it moves towards the truth as the phase misfit's did (0.971,
+  cosine +0.35; the phase misfit's 0.951, L2's 0.994), and at 1000–1500 m it no longer turns away (0.999, +0.05, against 1.020, −0.15):
   the first variant whose $v_p$ is nearer the truth over every free node. The top band is a
   little behind L2's (0.916 against 0.900); the deepest band's cosine is negative in every
   variant (−0.24 to −0.29), a change of 0.1%.
