@@ -734,7 +734,8 @@ Planned next, following Fichtner (2011), ch. 7–11:
    replayed from a checkpoint at its start, it halves a gradient's memory on
    `examples/layered.toml` (1.68 against 3.64 GiB) and cuts it by two thirds on a
    $1001 \times 1001 \times 401$ grid, for about 15% more time. It isn't bit-exact, so
-   checkpoints stay the default.
+   checkpoints stay the default; an inversion rebuilds with `[inversion] reconstruct = true`
+   (2.44 against 4.41 GiB for `examples/marmousi2/central.toml`).
 4. **Error propagation.** How numerical error in the forward field (dispersion, the
    interface, free-surface and boundary errors above) and in the reconstruction carries into
    the adjoint field, the gradient and the inversion. The reconstruction's part is measured
