@@ -1893,6 +1893,49 @@ phase misfit, which this survey's overlapping arrivals at near offsets don't sui
 **Reproduce:** `just in marmousi2-study l2`, `just in marmousi2-study frequency_stages` (44
 and 58 minutes on four cores); each stage's model in `out/marmousi2/study/<variant>/`.
 
+## 2026-11-21 — Marmousi2: time shifts, then L2
+
+**Question.** Cross-correlation time shifts measure a phase delay rather than a waveform
+difference, so they don't cycle-skip as long as the shift is within the correlation's main
+lobe [@luo1991]. Do three iterations of them, then two of L2, get further than L2 alone?
+
+**Method** (`tests/marmousi2_study.rs`, `time_shifts_then_l2`). As in the previous entry, with
+`misfit = "traveltime"` and `max_shift = 0.8` s (about a period of the 1.2 Hz Ricker) for three
+iterations, then L2 for two.
+
+**Results.**
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| time shifts (3) | 99.7% | $v_p$ | 0.997, +0.26 | 0.998, +0.37 | 1.000, −0.17 | 1.000, −0.07 | 1.000, −0.01 |
+| | | $v_s$ | 1.001, −0.14 | 1.000, −0.03 | 1.000, +0.01 | 1.000, +0.10 | 1.000, +0.06 |
+| then L2 (2) | 83.5% | $v_p$ | 0.958, +0.44 | 0.996, +0.10 | 1.005, −0.18 | 1.000, −0.05 | 1.001, −0.21 |
+| | | $v_s$ | 0.990, +0.14 | 1.018, −0.13 | 1.016, −0.17 | 1.000, +0.02 | 1.000, +0.15 |
+
+The time shifts' first iteration took the capped 2% step; in the next two their misfit fell
+from 14.611 to 14.596 (0.1%), the line search cutting each step to 0.02 and 0.03 of the
+L-BFGS direction after three trials (largest change 0.0% and 0.1%). The two L2 iterations
+afterwards behave like L2's first two (83.5% here, 83.7% there, the same signs by band). 3,363 s
+in all.
+
+- *The time shifts barely move the model.* Their misfit, $\tfrac12 \sum \tau^2$ over 2,010
+  traces, is 14.6, an RMS shift of 0.12 s, and its gradient predicts it only over tiny steps:
+  each trace's shift is the parabola through its correlation's peak, continuous but with a
+  derivative that jumps when the peak moves to another lag (2026-11-20, "Choosing the misfit,
+  and frequency continuation"), and near offsets here hold several arrivals of similar size,
+  the slow waves among them, whose correlation peaks trade places as the model changes.
+- *Their direction is wrong where it matters for $v_s$*: −0.14 in the top band, where L2 and the
+  stages go the right way.
+- The shift assumes one arrival per trace [@luo1991]; at near offsets, where four fifths of the
+  L2 misfit is, these traces have several. Windowing single arrivals (`feat/mutes`'s windows)
+  is what the measure needs here.
+
+**Decision.** Time shifts on whole traces don't help on this survey; don't spend iterations on
+them before the windows exist. The prediction (2026-11-21, "Where Marmousi2's misfit lies") that
+they would do least of the three holds so far; the phase misfit is next.
+
+**Reproduce:** `just in marmousi2-study time_shifts_then_l2` (56 minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
