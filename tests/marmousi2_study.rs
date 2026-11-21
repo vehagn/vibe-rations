@@ -9,6 +9,10 @@
 //! - `misfit_by_arrival`: the start's balanced L2 misfit split by arrival time (before and
 //!   after lines t = |Δx|/v + t₀), by component and by offset, and its gradient split at one
 //!   of the lines: each part's norm and its cosine with the true update by depth band.
+//! - `misfit_by_mute`: what the mutes of the muted and down-weighted variants keep of that
+//!   misfit and of its gradient, by component, by depth band.
+//! - `l2_rebuilt`: `l2` with the forward wavefields rebuilt backwards instead of replayed
+//!   from checkpoints, and how far its model lies from `l2`'s.
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
 //!   `stages_with_receivers_side`, and `muted_l2`, `muted_stages`, `down_weighted_l2` and
 //!   `down_weighted_stages` with the seafloor's slow waves muted or down-weighted: inversions
@@ -19,9 +23,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use vibe_rations::config::Config;
+use vibe_rations::config::{Config, MuteConfig};
 use vibe_rations::gradient::{Strategy, balancing_weights, gradient_with, l2_misfit};
 use vibe_rations::inversion::{Inversion, Observed};
+use vibe_rations::misfit::{mute_weight, offsets};
 use vibe_rations::model::Model;
 use vibe_rations::receiver::Receivers;
 use vibe_rations::simulation::Simulation;
@@ -166,17 +171,69 @@ const SLOW_WAVES_MUTED: &str = "[[inversion.mute]]\nkeep = \"before\"\nvelocity 
 const SLOW_WAVES_DOWN_WEIGHTED: &str = "[[inversion.mute]]\nkeep = \"before\"\n\
                                         velocity = 600.0\ndelay = 0.87\ntaper = 0.42\n\
                                         weight = 0.1";
-/// L2 with the slow waves muted, and with them down-weighted; the same with the stages. The
-/// tables are put together at the test's start (`Variant` holds `&'static str`s).
+/// L2 with the slow waves muted, and with them down-weighted; the same with the stages.
 fn muted(stages: bool, mute: &'static str) -> Variant {
+    muted_with(if stages { "" } else { "iterations = 5" }, stages, mute)
+}
+
+/// [`muted`] with other keys in `[inversion]`.
+fn muted_with(keys: &'static str, stages: bool, mute: &str) -> Variant {
     let tables = if stages {
         format!("{mute}\n{}", FREQUENCY_STAGES.1)
     } else {
         mute.to_string()
     };
+    (keys, leak(tables))
+}
+
+/// `Variant` holds `&'static str`s; the tables put together at a test's start live on.
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// Muted L2 with the receivers' side of the illumination from eight runs: set aside on the
+/// stages (`stages_with_receivers_side`) because it moved the deep model further the wrong
+/// way, which the mute stopped.
+fn muted_l2_with_receivers_side_variant() -> Variant {
+    muted_with("iterations = 5\nreceiver_runs = 8", false, SLOW_WAVES_MUTED)
+}
+
+/// Muted L2 for twenty iterations, the model reported every five: does it keep approaching
+/// the truth, or stall?
+fn muted_l2_longer_variant() -> Variant {
+    muted_with("iterations = 20", false, SLOW_WAVES_MUTED)
+}
+
+/// The stages with the slow waves muted from the second stage on (`[[inversion.stage.mute]]`):
+/// at 0.6 Hz, unmuted, they turned vs towards the truth down to 1 km (`frequency_stages`), and
+/// muted they didn't (`muted_stages`).
+fn stages_muted_after_the_first_variant() -> Variant {
+    let mute = SLOW_WAVES_MUTED.replacen("[[inversion.mute]]", "[[inversion.stage.mute]]", 1);
     (
-        if stages { "" } else { "iterations = 5" },
-        Box::leak(tables.into_boxed_str()),
+        "",
+        leak(format!(
+            "[[inversion.stage]]\nmax_frequency = 0.6\niterations = 2\n\
+             [[inversion.stage]]\nmax_frequency = 1.0\niterations = 2\n{mute}\n\
+             [[inversion.stage]]\niterations = 1\n{mute}"
+        )),
+    )
+}
+
+/// The leading edge of a window around the early arrivals: kept after a line ahead of the
+/// first arrival, faster than any wave in these models (4.7 km/s) from the Ricker's onset (0.2
+/// s). On these noise-free traces it removes nothing; with the slow waves' mute it makes the
+/// window the time shifts measure in.
+const BEFORE_THE_FIRST_ARRIVALS: &str = "[[inversion.mute]]\nkeep = \"after\"\n\
+                                         velocity = 4700.0\ndelay = 0.2\ntaper = 0.42";
+
+/// Time shifts in that window for three iterations, then L2 in it for two.
+fn windowed_time_shifts_then_l2_variant() -> Variant {
+    (
+        "max_shift = 0.8",
+        leak(format!(
+            "{SLOW_WAVES_MUTED}\n{BEFORE_THE_FIRST_ARRIVALS}\n{}",
+            TIME_SHIFTS_THEN_L2.1
+        )),
     )
 }
 
@@ -194,32 +251,41 @@ const PHASE_THEN_L2: Variant = (
      [[inversion.stage]]\niterations = 2",
 );
 
-/// Every variant's configuration parses and has the stages it means, each with five
-/// iterations in all.
+/// L2 with each shot's forward wavefield rebuilt backwards from the band around the layers
+/// instead of replayed from checkpoints.
+const L2_REBUILT: Variant = ("iterations = 5\nreconstruct = true", "");
+
+/// Every variant's configuration parses and has the stages, mutes (the inversion's and each
+/// stage's) and iterations it means.
 #[test]
 fn the_variants_parse() {
-    for (variant, stages) in [
-        (L2, 1),
-        (FREQUENCY_STAGES, 3),
-        (STAGES_WITH_RECEIVERS_SIDE, 3),
-        (muted(false, SLOW_WAVES_MUTED), 1),
-        (muted(true, SLOW_WAVES_MUTED), 3),
-        (muted(false, SLOW_WAVES_DOWN_WEIGHTED), 1),
-        (muted(true, SLOW_WAVES_DOWN_WEIGHTED), 3),
-        (TIME_SHIFTS_THEN_L2, 2),
-        (PHASE_THEN_L2, 2),
-        (("iterations = 0", ""), 1),
+    for (variant, stages, mutes, stage_mutes, iterations) in [
+        (L2, 1, 0, 0, 5),
+        (L2_REBUILT, 1, 0, 0, 5),
+        (FREQUENCY_STAGES, 3, 0, 0, 5),
+        (STAGES_WITH_RECEIVERS_SIDE, 3, 0, 0, 5),
+        (muted(false, SLOW_WAVES_MUTED), 1, 1, 0, 5),
+        (muted(true, SLOW_WAVES_MUTED), 3, 1, 0, 5),
+        (muted(false, SLOW_WAVES_DOWN_WEIGHTED), 1, 1, 0, 5),
+        (muted(true, SLOW_WAVES_DOWN_WEIGHTED), 3, 1, 0, 5),
+        (muted_l2_with_receivers_side_variant(), 1, 1, 0, 5),
+        (muted_l2_longer_variant(), 1, 1, 0, 20),
+        (stages_muted_after_the_first_variant(), 3, 0, 2, 5),
+        (windowed_time_shifts_then_l2_variant(), 2, 2, 0, 5),
+        (TIME_SHIFTS_THEN_L2, 2, 0, 0, 5),
+        (PHASE_THEN_L2, 2, 0, 0, 5),
+        (("iterations = 0", ""), 1, 0, 0, 0),
     ] {
         let cfg = Config::from_toml(&central_text(variant)).unwrap();
         let inversion = cfg.inversion.unwrap();
         assert_eq!(inversion.fixed_above, Some(500.0));
         let s = inversion.stages().unwrap();
         assert_eq!(s.len(), stages, "{variant:?}");
-        // The muted variants mute once, for every stage.
-        let mutes = usize::from(variant.1.contains("[[inversion.mute]]"));
         assert_eq!(inversion.mutes.len(), mutes, "{variant:?}");
+        let muted_stages = s.iter().filter(|s| !s.mutes.is_empty()).count();
+        assert_eq!(muted_stages, stage_mutes, "{variant:?}");
         let total: usize = s.iter().map(|s| s.iterations).sum();
-        assert!(total == 5 || variant.0 == "iterations = 0", "{variant:?}");
+        assert_eq!(total, iterations, "{variant:?}");
     }
 }
 
@@ -516,6 +582,231 @@ fn split_by_arrival(
     sum
 }
 
+/// The product of `mutes`' weights on one shot's traces at `offsets`, receiver-major like the
+/// traces, at t = m Δ from the run's start, as the inversion's misfits apply them.
+fn mute_weights(mutes: &[MuteConfig], offsets: &[f64], samples: usize, interval: f64) -> Vec<f64> {
+    let mut weights = Vec::with_capacity(offsets.len() * samples);
+    for &x in offsets {
+        for m in 0..samples {
+            let t = m as f64 * interval;
+            weights.push(mutes.iter().map(|mute| mute_weight(mute, t, x)).product());
+        }
+    }
+    weights
+}
+
+/// For each depth band (`bands`, free nodes), the norm of the relative gradient m₀ ∂χ/∂m and
+/// the cosines of its descent direction with the true update m_true / m₀ - 1, as it is and
+/// multiplied by the preconditioner `p` (one value per interior node).
+fn gradient_cells(g: &[f64], m0: &[f32], truth: &[f32], p: &[f64], bands: &[Vec<usize>]) -> String {
+    let cos = |dot: f64, a: f64, b: f64| dot / (a * b).sqrt().max(f64::MIN_POSITIVE);
+    bands
+        .iter()
+        .map(|nodes| {
+            let (mut norm, mut dot, mut norm_p, mut dot_p, mut du) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for &n in nodes {
+                let rel = g[n] * m0[n] as f64;
+                let true_rel = truth[n] as f64 / m0[n] as f64 - 1.0;
+                norm += rel * rel;
+                dot -= rel * true_rel;
+                norm_p += (p[n] * rel).powi(2);
+                dot_p -= p[n] * rel * true_rel;
+                du += true_rel * true_rel;
+            }
+            format!(
+                "{:9.2e} {:+5.2} {:+5.2}",
+                norm.sqrt(),
+                cos(dot, norm, du),
+                cos(dot_p, norm_p, du)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// What each set of mutes in `sets` (named; a set's weights M multiply) keeps of the start's
+/// balanced L2 misfit and of its gradient. The misfit kept is ½ Σ_c w_c Σ (M r)², r = d -
+/// d_obs, with the balance w_c of the traces as recorded, so that the shares compare with
+/// `misfit_by_arrival`'s; the inversion weighs by w'_c from the muted observed traces instead,
+/// and that measure is printed too. Its gradient (residuals w_c M² r) for each component
+/// alone, both together, both with the inversion's balance, and the part the mutes remove
+/// (the whole less the part kept): by depth band, the norm of m₀ ∂χ/∂m and the cosines of its
+/// descent direction with the true update, raw and divided by the source-side illumination
+/// with the inversion's water level, as its preconditioner divides. A set without mutes gives
+/// the whole misfit and gradient, by component; it must come first.
+fn split_by_mute(case: &Case, sets: &[(&str, Vec<MuteConfig>)]) {
+    assert!(sets[0].1.is_empty(), "the first set keeps everything");
+    let t = Instant::now();
+    let observed = case.record();
+    let start = case.model(&case.start);
+    let truth = case.model(&case.truth);
+    println!(
+        "observed {} shot(s) in {:.0} s",
+        observed.len(),
+        t.elapsed().as_secs_f64()
+    );
+    let n = start.grid.interior_len();
+    let names: Vec<&str> = case
+        .start
+        .receivers
+        .components
+        .iter()
+        .map(|c| c.name())
+        .collect();
+    let zero = || [vec![0.0f64; n], vec![0.0; n]];
+    // Each set's kept gradient (vp, vs) by component and with the inversion's balance, and
+    // its kept misfit by component and as the inversion measures it.
+    let mut kept: Vec<Vec<[Vec<f64>; 2]>> = sets
+        .iter()
+        .map(|_| names.iter().map(|_| zero()).collect())
+        .collect();
+    let mut own: Vec<[Vec<f64>; 2]> = sets.iter().map(|_| zero()).collect();
+    let mut kept_misfit = vec![vec![0.0f64; names.len()]; sets.len()];
+    let mut own_misfit = vec![0.0f64; sets.len()];
+    let mut illumination = vec![0.0f64; n];
+    let add = |sum: &mut [Vec<f64>; 2], g: &[Vec<f64>], factor: f64| {
+        for (s, g) in sum.iter_mut().zip(g) {
+            s.iter_mut().zip(g).for_each(|(a, b)| *a += factor * b);
+        }
+    };
+    for (s, obs) in observed.iter().enumerate() {
+        let shot = case.start.shot(s).unwrap();
+        let x = offsets(&shot).unwrap();
+        let components = &shot.receivers.components;
+        let w = balancing_weights(&obs.traces, components);
+        for (k, (_, mutes)) in sets.iter().enumerate() {
+            for c in 0..names.len() {
+                let mut sim = Simulation::with_model(&shot, start.clone()).unwrap();
+                let m = mute_weights(mutes, &x, sim.receivers.samples, sim.info.sample_interval);
+                let muted: Vec<Vec<f32>> = obs
+                    .traces
+                    .iter()
+                    .map(|o| {
+                        o.iter()
+                            .zip(&m)
+                            .map(|(&v, &m)| (v as f64 * m) as f32)
+                            .collect()
+                    })
+                    .collect();
+                let own_w = balancing_weights(&muted, components);
+                let mut energy = 0.0;
+                let run = gradient_with(
+                    &mut sim,
+                    |r| {
+                        // Component c's kept part alone.
+                        let residuals = r
+                            .traces
+                            .iter()
+                            .enumerate()
+                            .map(|(d, syn)| {
+                                if d != c {
+                                    return vec![0.0; syn.len()];
+                                }
+                                syn.iter()
+                                    .zip(&obs.traces[c])
+                                    .zip(&m)
+                                    .map(|((&a, &b), &m)| {
+                                        let r = m * (a as f64 - b as f64);
+                                        energy += r * r;
+                                        (w[c] * m * r) as f32
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        Ok((0.5 * w[c] * energy, residuals))
+                    },
+                    Strategy::default(),
+                )
+                .unwrap();
+                kept_misfit[k][c] += run.misfit;
+                own_misfit[k] += 0.5 * own_w[c] * energy;
+                let g = run.gradient.velocities(&start);
+                add(&mut kept[k][c], &g, 1.0);
+                if w[c] > 0.0 {
+                    add(&mut own[k], &g, own_w[c] / w[c]);
+                }
+                if k == 0 && c == 0 {
+                    illumination
+                        .iter_mut()
+                        .zip(&run.illumination)
+                        .for_each(|(a, b)| *a += b);
+                }
+            }
+        }
+        println!(
+            "shot {s} at x = {} m done, {:.0} s",
+            shot.sources[0].position[0],
+            t.elapsed().as_secs_f64()
+        );
+    }
+
+    // The inversion's preconditioner: 1 / (I / I_max + water level), I_max over the free nodes.
+    let bands = case.banded(&start);
+    let free = case.free(&start);
+    let peak = free.iter().map(|&n| illumination[n]).fold(0.0, f64::max);
+    let level = case.start.inversion.as_ref().unwrap().water_level;
+    let p: Vec<f64> = illumination
+        .iter()
+        .map(|&i| 1.0 / (i / peak + level))
+        .collect();
+    let sum = |parts: &[[Vec<f64>; 2]]| -> [Vec<f64>; 2] {
+        let mut total = zero();
+        for part in parts {
+            add(&mut total, part, 1.0);
+        }
+        total
+    };
+    let whole = sum(&kept[0]);
+    let all: f64 = kept_misfit[0].iter().sum();
+    println!(
+        "misfit {all:.4e} in all; by depth band {:?} m, the norm of m₀ ∂χ/∂m, the cosine of -∇ \
+         with the true update, and the same divided by the illumination",
+        case.bands
+    );
+    let row = |label: &str, g: &[Vec<f64>; 2]| {
+        for (p_name, (g, m0, mt)) in [
+            ("vp", (&g[0], &start.vp, &truth.vp)),
+            ("vs", (&g[1], &start.vs, &truth.vs)),
+        ] {
+            println!(
+                "  {label:>22} {p_name}: {}",
+                gradient_cells(g, m0, mt, &p, &bands)
+            );
+        }
+    };
+    for (k, (name, _)) in sets.iter().enumerate() {
+        let kept_all: f64 = kept_misfit[k].iter().sum();
+        let by_component: Vec<String> = names
+            .iter()
+            .zip(&kept_misfit[k])
+            .map(|(c, e)| format!("{c} {:.1}%", 100.0 * e / all))
+            .collect();
+        println!(
+            "{name}: keeps {:.1}% of the misfit ({}); as the inversion measures it, {:.4e}",
+            100.0 * kept_all / all,
+            by_component.join(", "),
+            own_misfit[k]
+        );
+        let together = sum(&kept[k]);
+        row(&format!("{name}, kept"), &together);
+        for (c, g) in names.iter().zip(&kept[k]) {
+            row(&format!("{name}, kept {c}"), g);
+        }
+        if k > 0 {
+            row(&format!("{name}, inversion's balance"), &own[k]);
+            let removed = [0, 1].map(|i| {
+                whole[i]
+                    .iter()
+                    .zip(&together[i])
+                    .map(|(a, b)| a - b)
+                    .collect::<Vec<f64>>()
+            });
+            row(&format!("{name}, removed"), &removed);
+        }
+    }
+    println!("{:.0} s in all", t.elapsed().as_secs_f64());
+}
+
 /// Inverts `case` from its start, printing after each stage the balanced L2 misfit of all
 /// the data relative to the start's and the model's error and cosine by depth band, and
 /// writing the model after each stage to `out/marmousi2/study/<name>`.
@@ -554,7 +845,7 @@ fn invert(name: &str, case: &Case) {
         if s > 0 {
             inv.begin_stage(s).unwrap();
         }
-        for _ in 0..stage.iterations {
+        for i in 1..=stage.iterations {
             match inv.iterate().unwrap() {
                 Some(it) => {
                     iterations += 1;
@@ -568,6 +859,14 @@ fn invert(name: &str, case: &Case) {
                         100.0 * it.largest_change,
                         t.elapsed().as_secs_f64()
                     );
+                    // In a long stage, how it goes every five iterations.
+                    if i % 5 == 0 && i < stage.iterations {
+                        println!(
+                            "{name}: after iteration {iterations}: L2 {:.1}% of the start's",
+                            100.0 * l2(&inv.model) / first
+                        );
+                        print_bands(name, case, &inv.model, &start, &truth);
+                    }
                 }
                 None => {
                     println!("{name}: no step lowers stage {s}'s misfit");
@@ -593,6 +892,49 @@ fn invert(name: &str, case: &Case) {
         write_model(&out.join(format!("stage-{s}")), &inv.model);
     }
     println!("{name}: {:.0} s in all", t.elapsed().as_secs_f64());
+}
+
+/// How far variant `b`'s model after `stage` lies from variant `a`'s, both as `invert` wrote
+/// them: by depth band, ‖m_b - m_a‖ / ‖m_a - m₀‖ (against a's update) and the largest
+/// |m_b - m_a| / m_a, for vp and vs.
+fn compare_variants(case: &Case, a: &str, b: &str, stage: usize) {
+    let path = |name: &str, p: &str| {
+        PathBuf::from("out/marmousi2/study")
+            .join(name)
+            .join(format!("stage-{stage}/{p}.npy"))
+    };
+    if !path(a, "vp").is_file() {
+        println!(
+            "no {} to compare with: run `{a}` first",
+            path(a, "vp").display()
+        );
+        return;
+    }
+    let start = case.model(&case.start);
+    let bands = case.banded(&start);
+    println!(
+        "{b} against {a} after stage {stage}: by depth band {:?} m, ‖m_b - m_a‖ / ‖m_a - m₀‖ and \
+         the largest |m_b - m_a| / m_a",
+        case.bands
+    );
+    for (p, m0) in [("vp", &start.vp), ("vs", &start.vs)] {
+        let read = |name: &str| vibe_rations::npy::read(&path(name, p)).unwrap().1;
+        let (ma, mb) = (read(a), read(b));
+        let cells: Vec<String> = bands
+            .iter()
+            .map(|nodes| {
+                let (mut diff, mut update, mut largest) = (0.0f64, 0.0f64, 0.0f64);
+                for &n in nodes {
+                    let (a, b, m0) = (ma[n] as f64, mb[n] as f64, m0[n] as f64);
+                    diff += (b - a).powi(2);
+                    update += (a - m0).powi(2);
+                    largest = largest.max(((b - a) / a).abs());
+                }
+                format!("{:9.2e} {largest:9.2e}", (diff / update).sqrt())
+            })
+            .collect();
+        println!("  {p}: {}", cells.join("  "));
+    }
 }
 
 fn write_model(dir: &Path, m: &Model) {
@@ -623,10 +965,43 @@ fn misfit_by_arrival() {
     split_by_arrival(&case, &lines, &CENTRAL_OFFSETS, Some(lines[1]));
 }
 
+/// The mutes of a variant's `[inversion]`.
+fn mutes_of(variant: Variant) -> Vec<MuteConfig> {
+    Config::from_toml(&central_text(variant))
+        .unwrap()
+        .inversion
+        .unwrap()
+        .mutes
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study misfit_by_mute` (about 35 minutes)"]
+fn misfit_by_mute() {
+    split_by_mute(
+        &Case::central(("iterations = 0", "")),
+        &[
+            ("all", Vec::new()),
+            ("muted", mutes_of(muted(false, SLOW_WAVES_MUTED))),
+            (
+                "down-weighted",
+                mutes_of(muted(false, SLOW_WAVES_DOWN_WEIGHTED)),
+            ),
+        ],
+    );
+}
+
 #[test]
 #[ignore = "a study: `just marmousi2-study l2` (about 40 minutes)"]
 fn l2() {
     invert("l2", &Case::central(L2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study l2_rebuilt` (about 40 minutes, after `l2`)"]
+fn l2_rebuilt() {
+    let case = Case::central(L2_REBUILT);
+    invert("l2-rebuilt", &case);
+    compare_variants(&case, "l2", "l2-rebuilt", 0);
 }
 
 #[test]
@@ -674,6 +1049,39 @@ fn down_weighted_stages() {
     invert(
         "down-weighted-stages",
         &Case::central(muted(true, SLOW_WAVES_DOWN_WEIGHTED)),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study muted_l2_with_receivers_side` (about 50 minutes)"]
+fn muted_l2_with_receivers_side() {
+    invert(
+        "muted-l2-with-receivers-side",
+        &Case::central(muted_l2_with_receivers_side_variant()),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study muted_l2_longer` (about 2.5 hours)"]
+fn muted_l2_longer() {
+    invert("muted-l2-longer", &Case::central(muted_l2_longer_variant()));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study stages_muted_after_the_first` (about an hour)"]
+fn stages_muted_after_the_first() {
+    invert(
+        "stages-muted-after-the-first",
+        &Case::central(stages_muted_after_the_first_variant()),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study windowed_time_shifts_then_l2` (about 55 minutes)"]
+fn windowed_time_shifts_then_l2() {
+    invert(
+        "windowed-time-shifts-then-l2",
+        &Case::central(windowed_time_shifts_then_l2_variant()),
     );
 }
 
