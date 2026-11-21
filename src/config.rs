@@ -692,6 +692,18 @@ fn one() -> f64 {
 }
 
 impl InversionConfig {
+    /// As the page's Gradient asks for it, `iterations = 0` beside stages: the first stage
+    /// alone, with no iterations, so the gradient is that stage's, as it measures the misfit.
+    /// Anything else as it is.
+    pub fn gradient_only(mut self) -> Self {
+        if self.iterations == Some(0) && !self.stages.is_empty() {
+            self.stages.truncate(1);
+            self.stages[0].iterations = 0;
+            self.iterations = None;
+        }
+        self
+    }
+
     /// The stages to run, each with its misfit: the configured ones, or one of `iterations`
     /// (10 by default) on the traces as recorded.
     pub fn stages(&self) -> Result<Vec<StageConfig>> {

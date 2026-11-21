@@ -447,17 +447,12 @@ impl InversionView {
     /// `truth` the same survey with the true model. Both must be sampled alike (the same time
     /// step: `settings::synthetic` in the web crate pins it for both).
     pub fn new(cfg: &Config, truth: &Config, base: &Path) -> Result<Self> {
-        let mut settings = cfg
+        // No iterations (the page's Gradient): the gradient at the start of the first stage.
+        let settings = cfg
             .inversion
             .clone()
-            .context("the configuration has no [inversion] section")?;
-        if settings.iterations == Some(0) && !settings.stages.is_empty() {
-            // No iterations (the page's Gradient): the gradient at the start of the first
-            // stage, as it measures the misfit.
-            settings.stages.truncate(1);
-            settings.stages[0].iterations = 0;
-            settings.iterations = None;
-        }
+            .context("the configuration has no [inversion] section")?
+            .gradient_only();
         let stages = settings.stages()?;
         ensure!(
             truth.sources.len() == cfg.sources.len(),
@@ -934,6 +929,9 @@ mod tests {
         let (mut start, truth) =
             staged("[[stage]]\nmax_frequency = 10.0\niterations = 3\n[[stage]]\niterations = 2");
         start.inversion.as_mut().unwrap().iterations = Some(0);
+        // The page plans the memory first, which must take it the same way (it refused the
+        // iterations beside the stages once).
+        crate::memory::estimate_synthetic_inversion(&start, base).unwrap();
         let mut v = InversionView::new(&start, &truth, base).unwrap();
         assert_eq!(v.units(), 3);
         while v.advance().unwrap() {}

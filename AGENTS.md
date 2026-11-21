@@ -158,9 +158,10 @@ doesn't show.
   (`Inversion::begin_stage`: its filtered misfits, L-BFGS afresh, the receivers' side
   re-estimated) is a unit of its own (`Stage::Staging`), `Stage::Iterating` counts iterations
   over every stage, and a stage that finds no step ends that stage, not the inversion. The
-  page's Gradient asks for `iterations = 0`; with stages that would be refused, so the view
-  turns it into the first stage with no iterations (the gradient as that stage measures the
-  misfit). The FWI tab chooses the misfit; stages are written in the TOML, and the
+  page's Gradient asks for `iterations = 0`; with stages that would be refused, so
+  `InversionConfig::gradient_only` turns it into the first stage with no iterations (the
+  gradient as that stage measures the misfit), in the view and in
+  `memory::estimate_synthetic_inversion` alike (the estimate, made first, refused it once). The FWI tab chooses the misfit; stages are written in the TOML, and the
   Iterations field steps aside when there are any.
 - **The web page edits, inverts and explains** (2026-11-21). The TOML stays the source of
   truth: the Settings form reads it (`settings::settings`, defaults filled in from `Config`) and

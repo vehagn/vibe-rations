@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::config::{Config, PlaneKind};
+use crate::config::{Config, InversionConfig, PlaneKind};
 use crate::fd::Stencil;
 use crate::gradient::{Strategy, checkpoint_interval, reconstruction_segment};
 use crate::grid::Grid;
@@ -454,6 +454,10 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
 /// hold the start and the true model, and the model as it stands with its gradient. The true
 /// model's forward runs come first and need less: they are the inversion's forward runs.
 pub fn estimate_synthetic_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
+    // As `InversionView::new` takes it: the page's Gradient with stages is their first.
+    let mut cfg = cfg.clone();
+    cfg.inversion = cfg.inversion.map(InversionConfig::gradient_only);
+    let cfg = &cfg;
     let m = estimate_inversion(cfg, base)?;
     let interior = cfg.grid.grid()?.interior_len() as u64;
     let parameters = cfg.inversion.as_ref().map_or(0, |i| i.parameters.len()) as u64;
