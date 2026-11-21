@@ -2,11 +2,167 @@
 
 use std::path::Path;
 
+use std::f64::consts::PI;
+use std::sync::OnceLock;
+
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::config::ModelConfig;
+use crate::config::{Interfaces, LayerConfig, ModelConfig};
 use crate::grid::Grid;
 use crate::npy;
+
+/// How far either side of an interface its band-limited step reaches, in nodes. Measured with
+/// plane waves at an interface (`just interfaces`): ±2 doubles the error of ±4, ±8 barely
+/// improves on it.
+pub const BAND_HALF_WIDTH: f64 = 4.0;
+
+/// The most band-limiting may stiffen a modulus beyond the stiffer layer's, as a factor. The
+/// band-limited step overshoots by 7.3%, which across a contrast of r in compliance takes the
+/// stiffer side's compliance c to c(1 - 0.073(r - 1)): tiny or negative for r near 14.7 (a soft
+/// sediment on rock, water on rock), and stiff enough to cut the time step long before. An
+/// interface whose contrast would stiffen beyond this, r above 3.7, is cell-averaged instead
+/// (`band_limits`), which never overshoots and still puts it where it lies. Measured with
+/// plane waves (`just interfaces`): at a contrast of 48 in shear modulus, cell averages
+/// reflected S within 2.4–9.1% where a sinc step clamped to keep the moduli in range was
+/// off by 6.1–11.9%; at 2.8 in P modulus, the sinc's 1.2% (P) and 12.6% (S) beat cell
+/// averages' 2.9–4.2% and 18–22%.
+const MAX_STIFFENING: f64 = 1.25;
+
+/// The unit step at u = 0 (u in nodes), band-limited to the grid's Nyquist wavenumber: the
+/// integral of a sinc tapered by a Hann window over ±[`BAND_HALF_WIDTH`] nodes, normalised.
+/// 0 below -w and 1 above w, ½ + (½ - f(-u)) between, and it overshoots by 7.3% a node either
+/// side of the interface. Band-limiting the model to the grid this way is Mittet's (2017)
+/// remedy for interfaces between nodes; the taper and its width are ours.
+pub fn band_limited_step(u: f64) -> f64 {
+    let w = BAND_HALF_WIDTH;
+    if u <= -w {
+        return 0.0;
+    }
+    if u >= w {
+        return 1.0;
+    }
+    static TOTAL: OnceLock<f64> = OnceLock::new();
+    let total = *TOTAL.get_or_init(|| 2.0 * kernel_integral(w));
+    0.5 + u.signum() * kernel_integral(u.abs()) / total
+}
+
+/// ∫ from 0 to `a` of the tapered sinc, by Simpson's rule on 64 intervals or more per node.
+fn kernel_integral(a: f64) -> f64 {
+    let w = BAND_HALF_WIDTH;
+    let kernel = |x: f64| {
+        let sinc = if x == 0.0 {
+            1.0
+        } else {
+            (PI * x).sin() / (PI * x)
+        };
+        sinc * (0.5 + 0.5 * (PI * x / w).cos())
+    };
+    let n = 2 * ((32.0 * a).ceil() as usize).max(1);
+    let h = a / n as f64;
+    let inner: f64 = (1..n)
+        .map(|m| kernel(m as f64 * h) * if m % 2 == 1 { 4.0 } else { 2.0 })
+        .sum();
+    (kernel(0.0) + kernel(a) + inner) * h / 3.0
+}
+
+/// Whether the interface between `above` and `below` takes the band-limited step: unless
+/// the largest ratio of the compliances it averages (P, and S between two solids) would let
+/// the step's overshoot stiffen a modulus by more than [`MAX_STIFFENING`].
+fn band_limits(above: &LayerConfig, below: &LayerConfig) -> bool {
+    let ratio = |a: f64, b: f64| a.max(b) / a.min(b);
+    let p = |l: &LayerConfig| l.rho * l.vp * l.vp;
+    let s = |l: &LayerConfig| l.rho * l.vs * l.vs;
+    let mut r = ratio(p(above), p(below));
+    if above.vs > 0.0 && below.vs > 0.0 {
+        r = r.max(ratio(s(above), s(below)));
+    }
+    let overshoot = band_limited_step(1.0) - 1.0;
+    1.0 - overshoot * (r - 1.0) >= 1.0 / MAX_STIFFENING
+}
+
+/// [vp, vs, ρ] at each depth of nodes, k = 0 to nz - 1, of the layers `cfg` describes.
+///
+/// Band-limited, each layer weighs the difference of the steps at its top and its bottom
+/// ([`band_limited_step`], or the cell's share where the contrast is too large for its
+/// overshoot: [`MAX_STIFFENING`]), so the weights sum to one; density is their weighted mean
+/// and so is each compliance, the average that puts an interface where it lies (moduli or
+/// their logarithms leave it off by up to 0.13 node). A fluid stays where node sampling puts it: a node is fluid if the layer
+/// it lies in is. A solid node takes the S compliance of the solids alone, since a fluid's is
+/// infinite, and near a fluid at most half its P modulus as shear modulus, so that its bulk
+/// modulus stays positive (λ ≥ 0) where the fluid's P compliance softens it.
+fn layer_profile(grid: Grid, cfg: &ModelConfig) -> Result<Vec<[f64; 3]>> {
+    let mut layers = cfg.layers.clone();
+    layers.sort_by(|a, b| a.top.total_cmp(&b.top));
+    ensure!(
+        layers[0].top <= 0.0,
+        "the shallowest layer must start at depth 0 or above"
+    );
+    let h = grid.h[2];
+    // The deepest layer whose top is at or above depth z; a node exactly on an interface
+    // takes the layer below it.
+    let lies_in = |z: f64| {
+        layers
+            .iter()
+            .rposition(|l| l.top <= z + 1e-6 * h)
+            .expect("the first layer starts at the surface")
+    };
+    let depths = (0..grid.n[2]).map(|k| k as f64 * h);
+    if cfg.interfaces == Interfaces::Nodes {
+        return Ok(depths
+            .map(|z| {
+                let l = &layers[lies_in(z)];
+                [l.vp, l.vs, l.rho]
+            })
+            .collect());
+    }
+    let sinc: Vec<bool> = layers
+        .windows(2)
+        .map(|pair| band_limits(&pair[0], &pair[1]))
+        .collect();
+    let profile = depths
+        .map(|z| {
+            // The step at layer j's top, j ≥ 1; the first layer reaches up forever.
+            let step = |j: usize| -> f64 {
+                if j == 0 {
+                    return 1.0;
+                }
+                if j == layers.len() {
+                    return 0.0;
+                }
+                let u = (z - layers[j].top) / h;
+                if sinc[j - 1] {
+                    band_limited_step(u)
+                } else {
+                    // The cell's share below the interface: a node on it is half each.
+                    (u + 0.5).clamp(0.0, 1.0)
+                }
+            };
+            let weights: Vec<f64> = (0..layers.len()).map(|j| step(j) - step(j + 1)).collect();
+            let sum = |f: &dyn Fn(&LayerConfig) -> f64, solid_only: bool| -> f64 {
+                layers
+                    .iter()
+                    .zip(&weights)
+                    .filter(|(l, _)| !solid_only || l.vs > 0.0)
+                    .map(|(l, w)| w * f(l))
+                    .sum()
+            };
+            let rho = sum(&|l| l.rho, false);
+            let p_modulus = 1.0 / sum(&|l| 1.0 / (l.rho * l.vp * l.vp), false);
+            let vs = if layers[lies_in(z)].vs == 0.0 {
+                0.0
+            } else {
+                let solid = sum(&|_| 1.0, true);
+                let mut mu = solid / sum(&|l| 1.0 / (l.rho * l.vs * l.vs), true);
+                if solid != 1.0 && layers.iter().any(|l| l.vs == 0.0) {
+                    mu = mu.min(0.5 * p_modulus);
+                }
+                (mu / rho).sqrt()
+            };
+            [(p_modulus / rho).sqrt(), vs, rho]
+        })
+        .collect();
+    Ok(profile)
+}
 
 /// Where a configuration's `[model.files]` come from: the disk, relative to a directory, or
 /// bytes held in memory under the names the configuration gives them, as in a browser, which
@@ -143,20 +299,9 @@ impl Model {
             (Some(_), false) => bail!("the model takes either layers or files, not both"),
             (None, true) => bail!("the model needs [[model.layer]]s or [model.files]"),
             (None, false) => {
-                let mut layers = cfg.layers.clone();
-                layers.sort_by(|a, b| a.top.total_cmp(&b.top));
-                ensure!(
-                    layers[0].top <= 0.0,
-                    "the shallowest layer must start at depth 0 or above"
-                );
-                for k in 0..grid.n[2] {
-                    let z = k as f64 * grid.h[2];
-                    let layer = layers
-                        .iter()
-                        .rev()
-                        .find(|l| l.top <= z + 1e-6 * grid.h[2])
-                        .expect("the first layer starts at the surface");
-                    take(layer.vp, layer.vs);
+                for [vp, vs, _] in layer_profile(grid, cfg)? {
+                    // As the model stores them.
+                    take(vp as f32 as f64, vs as f32 as f64);
                 }
             }
             // A section's values are the grid's, so its extremes are too.
@@ -222,27 +367,13 @@ impl Model {
     }
 
     fn layered(grid: Grid, cfg: &ModelConfig) -> Result<Self> {
-        let mut layers = cfg.layers.clone();
-        layers.sort_by(|a, b| a.top.total_cmp(&b.top));
-        ensure!(
-            layers[0].top <= 0.0,
-            "the shallowest layer must start at depth 0 or above"
-        );
         let mut model = Self::homogeneous(grid, 0.0, 0.0, 0.0);
-        for k in 0..grid.n[2] {
-            let z = k as f64 * grid.h[2];
-            // The deepest layer whose top is at or above this node; a node exactly on an
-            // interface takes the layer below it.
-            let layer = layers
-                .iter()
-                .rev()
-                .find(|l| l.top <= z + 1e-6 * grid.h[2])
-                .expect("the first layer starts at the surface");
-            let plane = grid.n[0] * grid.n[1];
+        let plane = grid.n[0] * grid.n[1];
+        for (k, [vp, vs, rho]) in layer_profile(grid, cfg)?.into_iter().enumerate() {
             let range = k * plane..(k + 1) * plane;
-            model.vp[range.clone()].fill(layer.vp as f32);
-            model.vs[range.clone()].fill(layer.vs as f32);
-            model.rho[range].fill(layer.rho as f32);
+            model.vp[range.clone()].fill(vp as f32);
+            model.vs[range.clone()].fill(vs as f32);
+            model.rho[range].fill(rho as f32);
         }
         Ok(model)
     }
@@ -329,7 +460,7 @@ fn range(v: &[f32]) -> [f64; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LayerConfig, SphereConfig};
+    use crate::config::{Interfaces, LayerConfig, SphereConfig};
 
     fn layer(top: f64, vp: f64) -> LayerConfig {
         LayerConfig {
@@ -348,6 +479,7 @@ mod tests {
             layers: vec![layer(30.0, 3000.0), layer(0.0, 2000.0)],
             files: None,
             spheres: vec![],
+            interfaces: Interfaces::Nodes,
         };
         let m = Model::from_config(g, &cfg, Path::new(".")).unwrap();
         assert_eq!(m.vp[g.interior_idx(0, 0, 2)], 2000.0);
@@ -355,6 +487,144 @@ mod tests {
         assert_eq!(m.vp[g.interior_idx(3, 3, 9)], 3000.0);
         assert_eq!(m.vp_range(), [2000.0, 3000.0]);
         assert_eq!(m.slowest_wave(), 1000.0);
+    }
+
+    #[test]
+    fn the_band_limited_step_is_odd_and_overshoots_by_seven_percent() {
+        assert_eq!(band_limited_step(0.0), 0.5);
+        assert_eq!(band_limited_step(-BAND_HALF_WIDTH), 0.0);
+        assert_eq!(band_limited_step(BAND_HALF_WIDTH), 1.0);
+        for u in [0.3, 0.5, 1.0, 1.7, 2.5, 3.9] {
+            let (a, b) = (band_limited_step(u), band_limited_step(-u));
+            assert!((a + b - 1.0).abs() < 1e-12, "{u}: {a} + {b}");
+        }
+        let peak = (0..=800)
+            .map(|m| band_limited_step(m as f64 / 200.0))
+            .fold(0.0, f64::max);
+        assert!((peak - 1.0733).abs() < 1e-4, "{peak}");
+        // Smooth enough that the step doesn't jump where the quadrature gains an interval.
+        let (a, b) = (band_limited_step(0.999_999), band_limited_step(1.000_001));
+        assert!((a - b).abs() < 1e-9, "{a} {b}");
+    }
+
+    fn band_limited(layers: Vec<LayerConfig>, nz: usize) -> (Grid, ModelConfig, Model) {
+        let g = Grid::new([2, 2, nz], [10.0; 3]);
+        let cfg = ModelConfig {
+            layers,
+            files: None,
+            spheres: vec![],
+            interfaces: Interfaces::BandLimited,
+        };
+        let m = Model::from_config(g, &cfg, Path::new(".")).unwrap();
+        // What a run is planned with is what it gets.
+        let extremes = Model::extremes(g, &cfg, Path::new(".")).unwrap();
+        assert_eq!(extremes, [m.vp_range()[1], m.slowest_wave()]);
+        (g, cfg, m)
+    }
+
+    fn at(m: &Model, k: usize) -> [f64; 3] {
+        let n = m.grid.interior_idx(0, 0, k);
+        [m.vp[n], m.vs[n], m.rho[n]].map(f64::from)
+    }
+
+    fn compliances([vp, vs, rho]: [f64; 3]) -> [f64; 2] {
+        [1.0 / (rho * vp * vp), 1.0 / (rho * vs * vs)]
+    }
+
+    #[test]
+    fn band_limited_layers_follow_their_interfaces_between_the_nodes() {
+        let (upper, lower) = (layer(0.0, 2000.0), layer(100.0, 3000.0));
+        let (_, _, m) = band_limited(vec![upper.clone(), lower.clone()], 21);
+        let props = |l: &LayerConfig| [l.vp, l.vs, l.rho];
+        // Beyond four nodes either side, each layer as it is.
+        for k in [0, 5, 15, 20] {
+            let want = props(if k < 10 { &upper } else { &lower });
+            for (a, b) in at(&m, k).iter().zip(want) {
+                assert!((a - b).abs() < 1e-3 * b, "node {k}: {a} vs {b}");
+            }
+        }
+        // On the interface, the mean density and the mean compliances.
+        let [c, d] = compliances(at(&m, 10));
+        let [c1, d1] = compliances(props(&upper));
+        let [c2, d2] = compliances(props(&lower));
+        assert!((c / (0.5 * (c1 + c2)) - 1.0).abs() < 1e-6);
+        assert!((d / (0.5 * (d1 + d2)) - 1.0).abs() < 1e-6);
+        assert!((at(&m, 10)[2] - 2000.0).abs() < 1e-3);
+        // Moved by a node, the profile moves by a node; moved by part of one, it changes.
+        let moved = |top: f64| {
+            let (_, _, m) = band_limited(vec![upper.clone(), layer(top, 3000.0)], 21);
+            m
+        };
+        let (a, b) = (moved(100.0), moved(110.0));
+        for k in 1..21 {
+            assert_eq!(at(&a, k - 1), at(&b, k));
+        }
+        assert_ne!(at(&moved(103.0), 10), at(&a, 10));
+    }
+
+    #[test]
+    fn band_limited_layers_keep_a_fluid_where_the_nodes_put_it() {
+        let water = LayerConfig {
+            top: 0.0,
+            vp: 1500.0,
+            vs: 0.0,
+            rho: 1000.0,
+        };
+        // 2.7 times water's P modulus, so the interface takes the sinc step.
+        let sediment = LayerConfig {
+            top: 50.0,
+            vp: 1800.0,
+            vs: 1000.0,
+            rho: 1900.0,
+        };
+        let (_, _, m) = band_limited(vec![water, sediment], 15);
+        for k in 0..5 {
+            assert_eq!(at(&m, k)[1], 0.0, "node {k} should be water");
+        }
+        // The node on the seafloor is sediment, its shear modulus held to half its P modulus;
+        // further down the sediment's own.
+        let [vp, vs, _] = at(&m, 5);
+        assert!(
+            vs > 0.0 && vs * vs <= 0.5 * vp * vp * (1.0 + 1e-6),
+            "{vp} {vs}"
+        );
+        assert!((at(&m, 9)[1] - 1000.0).abs() < 1e-3 * 1000.0);
+        // Water's P compliance reaches into the sediment and the sediment's into the water.
+        assert!(at(&m, 5)[0] < 1800.0 && at(&m, 4)[0] > 1500.0);
+    }
+
+    #[test]
+    fn band_limiting_stiffens_no_modulus_much_at_a_large_contrast() {
+        // A soft sediment on rock: 48 times the shear modulus. The sinc step's overshoot would
+        // make the rock's shear compliance negative next to the interface, so it is
+        // cell-averaged: nothing stiffer than the rock, and the node 3 m above the interface
+        // takes 20% rock.
+        let sediment = LayerConfig {
+            top: 0.0,
+            vp: 1800.0,
+            vs: 400.0,
+            rho: 1900.0,
+        };
+        let rock = LayerConfig {
+            top: 103.0,
+            vp: 4500.0,
+            vs: 2600.0,
+            rho: 2600.0,
+        };
+        let (_, _, m) = band_limited(vec![sediment.clone(), rock.clone()], 21);
+        let [c_rock, d_rock] = compliances([rock.vp, rock.vs, rock.rho]);
+        for k in 0..21 {
+            let [c, d] = compliances(at(&m, k));
+            assert!(
+                c >= c_rock * (1.0 - 1e-6) && d >= d_rock * (1.0 - 1e-6),
+                "node {k}"
+            );
+        }
+        let [_, d_sediment] = compliances([sediment.vp, sediment.vs, sediment.rho]);
+        let [_, d] = compliances(at(&m, 10));
+        assert!((d / (0.8 * d_sediment + 0.2 * d_rock) - 1.0).abs() < 1e-5);
+        assert_eq!(at(&m, 9)[1], sediment.vs);
+        assert_eq!(at(&m, 11)[1], rock.vs);
     }
 
     #[test]
@@ -370,6 +640,7 @@ mod tests {
                 vs: 0.0,
                 rho: 1000.0,
             }],
+            interfaces: Interfaces::Nodes,
         };
         let m = Model::from_config(g, &cfg, Path::new(".")).unwrap();
         assert_eq!(m.vs[g.interior_idx(5, 5, 7)], 0.0);
@@ -416,6 +687,7 @@ mod tests {
                 rho: "rho.npy".into(),
             }),
             spheres: vec![],
+            interfaces: Interfaces::Nodes,
         };
         let m = Model::from_config(g, &cfg, &dir).unwrap();
         // x fastest: node (3, 2, 1) is the last value.
@@ -448,6 +720,7 @@ mod tests {
                 rho: "rho.npy".into(),
             }),
             spheres: vec![],
+            interfaces: Interfaces::Nodes,
         };
         let from_disk = Model::from_config(g, &cfg, &dir).unwrap();
         let from_memory = Model::from_files(g, &cfg, Files::Memory(&held)).unwrap();
@@ -484,12 +757,14 @@ mod tests {
             layers: vec![],
             files: None,
             spheres: vec![],
+            interfaces: Interfaces::Nodes,
         };
         assert!(Model::from_config(g, &none, Path::new(".")).is_err());
         let both = ModelConfig {
             layers: vec![layer(0.0, 2000.0)],
             files,
             spheres: vec![],
+            interfaces: Interfaces::Nodes,
         };
         let e = format!(
             "{:#}",
@@ -500,6 +775,7 @@ mod tests {
             layers: vec![layer(10.0, 2000.0)],
             files: None,
             spheres: vec![],
+            interfaces: Interfaces::Nodes,
         };
         assert!(Model::from_config(g, &deep, Path::new(".")).is_err());
     }

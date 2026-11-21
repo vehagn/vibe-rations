@@ -2305,6 +2305,170 @@ no closed-form kernels, against finer grids; and whether an inversion's model er
 by_time_step` and the like for one table); the baseline with `cargo test --release --test
 gradient_accuracy`.
 
+## 2026-11-21 — A planar interface
+
+**Question.** How accurately does the scheme reflect and transmit at an interface between
+two solids, and does it matter where the interface falls between the nodes? The open
+question asked to measure it against analytic coefficients and to try a band-limited model
+[@mittet2017].
+
+**Method.** Plane waves at normal incidence, where the exact answer is one-dimensional: the
+particle velocity is reflected by $R = (Z_1 - Z_2)/(Z_1 + Z_2)$ and transmitted by $T = 1 + R$,
+with $Z = \rho v_p$ for P and $\rho v_s$ for S, and nothing converts. A uniform plane of
+sources (σzz for P, $x$ forces for S) sends them down; each side of it takes half the jump,
+so a moment $m_0$ per node sends $v_z = m_0 w(t)/(2\rho v_p^2 h^2)$ and a force $f$ per node
+$v_x = f w(t)/(2\rho v_s h^2)$. The grid is 25 nodes wide; the values outside its sides copy
+the nearest node's every half step, so every $z$-plane stays exactly uniform and the side
+layers, which act only on $x$ and $y$ derivatives, do nothing. (With ordinary edges, waves
+from the sides spoilt the transmitted P wave: 5% low with the receivers 10 nodes from the
+side layers, 1% at 30.) Upper medium $v_p = 2000$, $v_s = 1155$ m/s, $\rho = 2000$
+kg/m³; lower 3000, 1500, 2500: $R = -0.304$ for P, $-0.238$ for S. $h = 10$ m, a Ricker
+at $f_0 = 10$ Hz (P 20 and S 11.6 points per wavelength at $f_0$; S 4.6 at $2.5 f_0$), and at
+$f_0 = 5$ Hz with the distances in nodes doubled; the default scheme (order 8, optimised,
+$C = 0.85$, time error removed). The interface lies a fraction $\delta$ of a node below a
+node. Four ways of putting the two layers on the nodes, each giving node values that the
+solver then averages as always (ρ arithmetically onto the velocities, μ harmonically onto
+the shear stresses):
+
+- *node*: each node takes the layer it lies in, a node on the interface the one below
+  (`[[model.layer]]` now);
+- *cell*: each node takes its cell's average over $[z - h/2, z + h/2]$, density
+  arithmetically and the moduli $\rho v_p^2$, $\rho v_s^2$ harmonically;
+- *band*: the step band-limited to the grid's Nyquist wavenumber (a sinc tapered by a Hann
+  window over ±4 nodes, integrated) and sampled, applied to density and the compliances
+  $1/\rho v_p^2$, $1/\rho v_s^2$;
+- *band moduli*: the same applied to the moduli themselves.
+
+Each arrival is compared with the exact one over its window, the other arrivals' exact
+values taken off: the misfit relative to the arrival, the least-squares amplitude ratio, and
+the shift from the correlation's peak, in units of $h/v$ of the upper medium (a reflection's
+shift is twice the interface's error in position).
+
+**Results.** Reflected waves, $f_0 = 10 \to 5$ Hz (direct waves 0.010% and 0.026%):
+
+| Layers | $\delta$ | P misfit | S misfit | Shift ($h/v$) |
+|---|---|---|---|---|
+| node | 0 | 35.1% → 17.6% | 57.0% → 29.9% | $-1.00$ |
+| node | 0.25 | 17.6% → 8.8% | 30.2% → 15.2% | $+0.50$ |
+| node | 0.5 | 0.72% → 0.17% | 7.5% → 1.8% | 0.00 |
+| node | 0.75 | 17.6% → 8.8% | 29.4% → 15.1% | $-0.50$ |
+| cell | 0, 0.25, 0.75 | 2.9–4.2% → 0.74–1.0% | 18–22% → 4.9–5.9% | $\le 0.08$ |
+| band | any | 1.16–1.19% → 0.34–0.35% | 12.4–12.8% → 3.4% | $\le 0.02$ |
+| band moduli | 0–0.75 | 3.8–9.0% → 1.9–4.3% | 11–16% → 4.0–6.1% | $-0.10$ to $-0.26$ |
+
+Transmitted waves: node 5.9% (P) and 6.9% (S) at $\delta = 0$, 0.078% and 0.44% at 0.5; band
+0.125% and 0.75% (→ 0.04% and 0.21%). Cell averages at $\delta = 0.5$ are the node values.
+
+1. **Node-sampled layers put the interface midway between the last node above it and the
+   first below**, wherever it lies: the shifts are $2(\frac12 - \delta)$ to within 0.01. The
+   error is first order (it halves with $h/\lambda$). A layer's top on a node, as at both
+   interfaces of `examples/layered.toml`, reflects $h/v$ early.
+2. **Midway the error is second order** (P ×4.2, S ×4.1 per halving), an amplitude error:
+   the S reflection is 6.3% weak at 11.6 points per wavelength at $f_0$, 1.5% at 23.
+3. **The stencil's order doesn't matter** (`interfaces_by_order`): orders 8, 12 and 16
+   give the same reflection misfits to 0.02%, at $\delta = 0$ and 0.5, node-sampled or
+   band-limited, and order 4 differs by at most 0.06% for P and 1.8% for S, where its own
+   dispersion shows (its direct S wave is 1.2% off). At interfaces the model's sampling
+   sets the error, and longer stencils gain nothing.
+4. **Averaging removes the position error but not the second-order one.** Cell averages
+   leave shifts of at most 0.08 $h/v$ and larger amplitude errors than midway node sampling.
+   Band-limiting makes the result independent of $\delta$ to 0.04% (P) and 0.4% (S), with
+   errors between the two. Band-limiting the moduli rather than the compliances leaves a
+   $\delta$-dependent position error of 0.05–0.13 $h$, as arithmetic averaging of moduli
+   would: the compliances are what to band-limit.
+5. **The taper** (`interfaces_by_band_limit_width`): ±2 nodes doubles the error (P 2.3–2.4%,
+   S 17–18%); ±8 barely improves on ±4 (P 0.94–0.96%, S 12.5–12.6%).
+
+Relative to the incident wave, band-limited reflections are off by 0.36% (P) and 3% (S) at
+these samplings; the S reflection is the weak spot at the point densities FWI runs at.
+
+**Decision.** `a_planar_interface_reflects_and_transmits_plane_waves` in `tests/physics.rs`
+checks the interface midway (baselines above) and pins the half-node shift of a layer's top
+on a node, so a change to how layers meet the nodes shows up there. Layers stay sampled at
+the nodes for now: changing that changes every layered model and every baseline built on
+them, and fluids need their own rule (a compliance band-limited into water makes $\mu$ zero
+up to four nodes away; the Marmousi2 sections make a node fluid by majority instead).
+Band-limited layers, density and compliances over ±4 nodes, are the candidate: they let an
+interface lie anywhere at second-order cost. The gradient is with respect to node values,
+so this changes only how a configuration's layers become a model, not the gradient. The
+sinc and its taper here are ours, not checked against Mittet's paper.
+
+**Reproduce:** `just interfaces` (3 minutes);
+`just physics a_planar_interface_reflects_and_transmits_plane_waves`.
+
+## 2026-11-21 — Band-limited layers, opt in
+
+**Question.** The planar-interface entry found that band-limiting density and compliances
+puts an interface where it lies. Can layers be built that way in general, including water
+and large contrasts, and what would making it the default change?
+
+**Method.** `[model] interfaces = "band-limited"` (`model::layer_profile`): each layer
+weighs the difference of the steps at its top and bottom, and density and the compliances
+$1/\rho v_p^2$, $1/\rho v_s^2$ are the weighted means. Two problems needed rules. (1) The
+step's 7.3% overshoot, across a contrast $r$ in compliance, takes the stiffer side's
+compliance $c$ to $c(1 - 0.073(r - 1))$: negative above $r = 14.7$ (a soft sediment on rock,
+water on rock), and stiff enough to shorten $\Delta t$ well before. (2) A fluid's S
+compliance is infinite, so averaging it would make $\mu$ zero four nodes into the solid.
+Candidates for (1), in the study's plane-wave setup (`just interfaces`; 20 and 11.6 points
+per wavelength at $f_0$, $\delta$ from 0 to 0.75): the step clamped to $[0, 1]$, and the
+logarithms of the moduli band-limited instead. Then a large contrast, a sediment
+($v_p = 1800$, $v_s = 400$ m/s, $\rho = 1900$) on rock (4500, 2600, 2600; 48 times the shear
+modulus, $R = -0.55$ for P, $-0.80$ for S) at $f_0 = 3.5$ Hz, $\delta$ = 0, 0.25 and 0.5.
+Last, `just physics` and the unit tests with the default flipped to band-limited.
+
+**Results.**
+
+- *Clamping* the step costs most of the gain: P reflection 2.5–6.6% (band-limited 1.2%), S
+  15–24% (12.6%), no better than cell averages.
+- *Logarithms* of the moduli stay positive but leave a position error, shifts of
+  $-0.10$ to $-0.12$ $h/v$ for P (3.4–4.5%) and $-0.05$ to $-0.09$ for S: like moduli,
+  only compliances put the interface where it lies.
+- *At the large contrast* (reflection misfits; transmitted S in brackets):
+
+  | Layers | P, $\delta$ = 0 / 0.25 / 0.5 | S, $\delta$ = 0 / 0.25 / 0.5 |
+  |---|---|---|
+  | node | 13.5 / 6.8 / 0.07% | 57.7 / 31.2 / 2.4% (25.7 / 14.1 / 3.3%) |
+  | sinc, clamped so no modulus stiffens by more than 1.25 | 0.60 / 0.48 / 0.23% | 11.9 / 8.7 / 6.1% (11.5 / 8.5 / 6.8%) |
+  | cell averages | 0.37 / 0.26 / 0.07% | 9.1 / 8.0 / 2.4% (9.3 / 7.5 / 3.3%) |
+
+  Cell averages, which never overshoot and also keep the interface in place, beat the
+  clamped sinc here; at the moderate contrast the sinc beats them (P 1.2% against
+  2.9–4.2%, S 12.6% against 18–22%).
+- *The rule*, then: an interface takes the sinc step unless its contrast would let the
+  overshoot stiffen a modulus by more than 1.25 (`MAX_STIFFENING`: a compliance ratio above
+  3.7, P and, between solids, S), and cell averages otherwise. Water: a node is fluid if the
+  layer it lies in is, as with node sampling; a solid node takes the solids' S compliance
+  alone, at most half its P modulus where a fluid's P compliance reaches it, so its bulk
+  modulus stays positive ($\lambda \ge 0$). Through the configuration the plane-wave tests
+  give the study's numbers exactly (`band_limited_interfaces_act_where_they_lie`: P 1.19%
+  and 1.17%, S 12.6% and 12.8% with the interface on a node and a quarter of one off).
+- *The overshoot speeds up some nodes*: 3022 m/s next to a 3000 m/s layer (2200 above),
+  2179 m/s in 2000 m/s rock under water, so $\Delta t$ shrinks by 0.7–8% and
+  `pml_vp_max` grows with it.
+- *`just physics` with band-limited layers as the default*: the analytic tests, CPML,
+  reciprocity, the dot-product test and the sphere inversion are unchanged; the long run
+  drains to $2.5 \times 10^{-6}$ and $9.6 \times 10^{-7}$ (node-sampled $2.7 \times 10^{-6}$
+  and $1.1 \times 10^{-6}$); the walls-and-water wavefield rebuilt backwards drifts
+  $1.8 \times 10^{-6}$ ($9.6 \times 10^{-7}$). Three gradient checks fail, and in the unit
+  tests the inversion's set-up test: it expects `pml_vp_max` to be the fastest layer's
+  (2000, now 2179). The gradient checks perturb every node except those at the model's
+  fastest speed; band-limited, the fastest is an overshoot plane (3022 m/s) and the 3000 m/s
+  layer just below it is perturbed past it, which shortens $\Delta t$: the perturbed run has
+  1280 samples against the observed 1270, and with water the $v_p$ check is off by 1%. Both
+  models of a check have the same $\Delta t$ (checked: 253 steps at order 4, 285 at order 8,
+  against 251 and 283 node-sampled), so the gradient isn't at fault; it is with respect to
+  node values, which band-limiting only sets.
+
+**Decision.** Band-limited layers are opt-in; node sampling stays the default. Making them
+the default needs the gradient checks to spare nodes near the fastest speed (or pin
+$\Delta t$ and `pml_vp_max`), the inversion test's expected `pml_vp_max`, and the baselines
+above. Spheres are still node-sampled.
+
+**Reproduce:** `just interfaces` (`interfaces_at_a_large_contrast` for the table);
+`just physics band_limited_interfaces_act_where_they_lie`; `just unit model::`. For the
+default flipped, move `#[default]` in `config::Interfaces` to `BandLimited` and run
+`just physics` and `just unit`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2337,8 +2501,16 @@ gradient_accuracy`.
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
   for P (the free-surface test's floor), so measure it first on Lamb's problem with an
   exact solution.
-- **Interfaces.** Band-limit the model to the grid [@mittet2017] and measure reflection and
-  transmission at a planar interface against analytic coefficients.
+- **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
+  node-sampled layers put an interface midway between nodes (first-order error),
+  band-limiting density and compliances [@mittet2017] makes it second order wherever it
+  lies, and the stencil's order doesn't matter. Band-limited layers are opt-in
+  (2026-11-21, "Band-limited layers, opt in"). Still open: whether they should be the
+  default (the gradient checks' mask first), spheres, and how accurate the water rule is
+  against a fluid–solid reference (Scholte waves); oblique incidence
+  with converted waves, which needs point sources and an exact reference, or plane waves
+  at an angle in a grid whose sides wrap around; and the S reflection's second-order error
+  at the point densities FWI runs at.
 - **Source and receiver positions** off the nodes [@hicks2002; @petersson2016]: snapping
   a receiver 0.4 h off its position cost 26% misfit at 3.9 ppw (2026-11-20, removing time
   dispersion).

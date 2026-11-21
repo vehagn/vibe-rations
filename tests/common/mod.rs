@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod plane;
 pub mod stokes;
 
 use std::f64::consts::PI;

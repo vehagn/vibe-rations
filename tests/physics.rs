@@ -199,6 +199,93 @@ fn the_free_surface_doubles_a_vertically_incident_p_wave() {
     assert!(e < 0.026, "misfit {e}");
 }
 
+/// Plane P and S waves at normal incidence on a planar interface between two layers, against
+/// the exact reflection and transmission (`common::plane`; R = -0.304 for P, -0.238 for S).
+/// This checks the material averaging where a layer meets another: density at the
+/// velocities, the moduli at the stresses, the shear modulus harmonically.
+///
+/// With the interface midway between two planes of nodes, where sampling the layers onto
+/// the nodes is exact, at the default, at 20 (P) and 11.6 (S) points per wavelength at f0:
+/// the direct waves 0.010% and 0.026%, reflections 0.72% and 7.5%, transmissions 0.078% and
+/// 0.44%. These errors fall as h² and don't depend on the stencil's order (4 to 16): the
+/// interface, not the stencil, sets them (`just interfaces`). With a layer's top on a plane
+/// of nodes, which takes the layer below, the interface acts half a node higher: the
+/// reflection comes h/vp early (35% and 57% misfit); the test pins that too, so a change to
+/// how layers meet the nodes shows up here.
+#[test]
+fn a_planar_interface_reflects_and_transmits_plane_waves() {
+    use common::plane::{PlaneWave, Wave};
+    // (wave, direct, reflected, transmitted): misfits just above those measured.
+    for (wave, limits) in [
+        (Wave::P, [1.2e-4, 7.5e-3, 8.5e-4]),
+        (Wave::S, [3e-4, 7.7e-2, 4.7e-3]),
+    ] {
+        let p = PlaneWave::interface(wave, 1, 0.5);
+        let fits = p.fits(&p.run(None));
+        for ((name, fit), limit) in ["direct", "reflected", "transmitted"]
+            .iter()
+            .zip(fits)
+            .zip(limits)
+        {
+            println!(
+                "interface, {wave:?} {name}: misfit {:.3}%, amplitude {:.4}, shift {:.3} h/v",
+                100.0 * fit.misfit,
+                fit.ratio,
+                fit.shift / p.node_time()
+            );
+            assert!(fit.misfit < limit, "{wave:?} {name}: misfit {}", fit.misfit);
+            assert!(
+                fit.shift.abs() < 0.02 * p.node_time(),
+                "{wave:?} {name}: {fit:?}"
+            );
+        }
+        let p = PlaneWave::interface(wave, 1, 0.0);
+        let [_, reflected, _] = p.fits(&p.run(None));
+        let shift = reflected.shift / p.node_time();
+        println!("interface on a node, {wave:?} reflected: shift {shift:.3} h/v");
+        assert!((shift + 1.0).abs() < 0.02, "{wave:?}: shift {shift}");
+    }
+}
+
+/// The same with `interfaces = "band-limited"`: the interface on a node and a quarter of the
+/// way to the next act where they lie, with the same errors. Measured: P reflected 1.19% and
+/// 1.17%, transmitted 0.125%; S 12.6% and 12.8%, 0.75%; shifts under 0.01 h/v. Node-sampled,
+/// the same interfaces reflect 35% and 18% (P), 57% and 30% (S) off, h/v early and h/(2v)
+/// late.
+#[test]
+fn band_limited_interfaces_act_where_they_lie() {
+    use common::plane::{PlaneWave, Wave};
+    use vibe_rations::config::Interfaces;
+    for (wave, limits) in [
+        (Wave::P, [1.2e-4, 1.25e-2, 1.35e-3]),
+        (Wave::S, [3e-4, 0.13, 8e-3]),
+    ] {
+        for delta in [0.0, 0.25] {
+            let mut p = PlaneWave::interface(wave, 1, delta);
+            p.interfaces = Interfaces::BandLimited;
+            let fits = p.fits(&p.run(None));
+            for ((name, fit), limit) in ["direct", "reflected", "transmitted"]
+                .iter()
+                .zip(fits)
+                .zip(limits)
+            {
+                println!(
+                    "band-limited interface {delta} node below one, {wave:?} {name}: misfit \
+                     {:.3}%, amplitude {:.4}, shift {:.3} h/v",
+                    100.0 * fit.misfit,
+                    fit.ratio,
+                    fit.shift / p.node_time()
+                );
+                assert!(fit.misfit < limit, "{wave:?} {name}: misfit {}", fit.misfit);
+                assert!(
+                    fit.shift.abs() < 0.02 * p.node_time(),
+                    "{wave:?} {name}: {fit:?}"
+                );
+            }
+        }
+    }
+}
+
 /// The same receivers, the same distance from the source, in a domain small enough that the
 /// absorbing layers are close and in one large enough that they are out of reach. With a free
 /// surface, the source stays at the same depth and only the sides and bottom move away.

@@ -19,6 +19,7 @@ opens a shell there instead.
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
 | `just gradient-accuracy [name]` | The solver's gradients against the exact kernels of a homogeneous full space | ~40 min |
@@ -99,12 +100,16 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  interfaces.rs  plane waves at a planar interface, by position, sampling and order (ignored;
+                 `just interfaces`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
   reconstruction.rs  the rebuilt wavefield's drift (ignored; `just drift`)
   gradient_accuracy.rs  gradients against the exact kernels (studies ignored; `just
                  gradient-accuracy`), and a baseline at the coarsest grid
   common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
-                 force's field with its gradient for any time function, and the exact kernels
+                 force's field with its gradient for any time function, and the exact kernels;
+                 plane.rs: plane waves at normal incidence on an interface, kept exactly 1D,
+                 and their exact answer
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -169,6 +174,36 @@ doesn't show.
   would depend on picking. Times are
   $m\,\Delta$ from the run's start, not the recorded fields' half-step times: a taper hides
   the difference.
+
+- **Interfaces** (`just interfaces`, `tests/common/plane.rs`; the log's "A planar
+  interface"). Layers are sampled at the nodes, so an interface acts midway between the
+  last node above it and the first below, wherever it lies: a layer's top on a node (both
+  of `examples/layered.toml`'s interfaces are) reflects $h/v$ early, a first-order error
+  (reflection misfit 35% for P, 57% for S at 20 and 11.6 ppw at $f_0$; transmission 6–7%).
+  Midway it is second order and the same at orders 4 to 16: at interfaces the model's
+  sampling, not the stencil, sets the error. Band-limiting density and the compliances
+  $1/\rho v_p^2$, $1/\rho v_s^2$ (a sinc tapered over ±4 nodes) makes the reflection
+  independent of the interface's position (P 1.2%, S 12.6%, second order); band-limiting
+  the moduli themselves, or their logarithms, leaves a position error, and clamping the
+  step's 7.3% overshoot costs most of the gain. It is opt-in, `[model] interfaces =
+  "band-limited"` (`model::layer_profile`): a node is fluid if the layer it lies in is; a
+  solid node takes the solids' S compliance alone, capped at half its P modulus near a
+  fluid (λ ≥ 0); and an interface whose contrast would let the overshoot stiffen a modulus
+  by more than 1.25 (`MAX_STIFFENING`, a compliance ratio above 3.7, as for water on rock)
+  is cell-averaged instead, which never overshoots and also keeps it in place: at a
+  contrast of 48 cell averages beat a clamped sinc (S 2.4–9.1% against 6.1–11.9%), at 2.8
+  the sinc beats them. The overshoot makes some interface nodes faster than any layer
+  (3022 m/s next to a 3000 m/s layer; 2179 m/s in 2000 m/s rock under water), so
+  $\Delta t$ shrinks and `pml_vp_max` grows with it. Not the default yet: under it the gradient
+  checks fail (their mask spares only nodes at the fastest speed, so a 3000 m/s layer just
+  below a 3022 m/s plane is perturbed past it and changes $\Delta t$), the inversion's
+  set-up test expects `pml_vp_max` to be a layer's, and the walls-and-water wavefield
+  rebuilt backwards drifts $1.8 \times 10^{-6}$ instead of $9.6 \times 10^{-7}$; the
+  rest of `just physics` is unchanged. Spheres are still node-sampled. The test grid stays
+  exactly 1D only because the values outside its sides copy the nearest node's every half
+  step (`extend_sideways`): with ordinary edges, waves from the sides spoilt the
+  transmitted P wave by 5% at 10 nodes from them, and by 1% at 30.
+
 - **The misfits meet the web page** (merged 2026-11-21). `InversionConfig.iterations` is now
   an `Option` (stages give their own), so ask `InversionConfig::stages()` how many iterations
   run, never the field. `view::InversionView` runs the stages: a later stage's start
@@ -440,7 +475,10 @@ doesn't show.
 - **Physics test baselines at the default, order 8 with optimised coefficients at
   $C = 0.85$, the time error removed** (fail if they get worse; update this list if they get
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
-  free-surface P doubling 2.52% (mostly the reference, above); CPML reflection
+  free-surface P doubling 2.52% (mostly the reference, above); a planar interface midway
+  between nodes, plane P and S waves, direct 0.010% and 0.026%, reflected 0.72% and 7.5%,
+  transmitted 0.078% and 0.44%; band-limited, on a node and a quarter of one off, reflected
+  1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
   reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
   $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences

@@ -67,6 +67,12 @@ accuracy:
 gradient-accuracy *args:
     cargo test --release --test gradient_accuracy {{ args }} -- --ignored --nocapture --test-threads 1
 
+# The interface study: plane waves reflected and transmitted at a planar interface, by where it
+# falls between the nodes, how layers are put on them and the stencil order (about 3 minutes).
+[group("check")]
+interfaces:
+    cargo test --release --test interfaces -- --ignored --nocapture --test-threads 1
+
 # The inversion study: misfits, frequency-continuation stages and preconditioners on small
 # surveys (about 30 minutes; `just study <name>` for one). The research log records the results.
 [group("check")]

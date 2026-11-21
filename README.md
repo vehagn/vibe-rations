@@ -130,6 +130,7 @@ a free surface $z = 0$ is the surface.
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
+| `[model]` | `interfaces`: how the layers meet the nodes. `"nodes"` (default): each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off; `"band-limited"`: smoothed to the grid so it acts where it lies (see "Accuracy") |
 | `[model.files]` | Or `.npy` arrays for `vp`, `vs`, `rho`, relative to the configuration: shape (nz, ny, nx), or (nz, nx) for a section the same at every $y$; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
 | `[[model.sphere]]` | Spheres painted over the model |
 | `[[source]]` | `position`, `wavelet` (Ricker or Gaussian), and one of `explosion`, `moment`, `double_couple` (strike, dip, rake, m0) or `force` |
@@ -662,8 +663,15 @@ Rules of thumb:
 
 What higher orders don't fix, from the literature and our measurements:
 
-- **Interfaces.** Sharp interfaces sampled on the grid are only about second-order accurate
-  and want a band-limited model (Mittet 2017).
+- **Interfaces.** Measured with plane waves at normal incidence (`just interfaces`; the
+  research log's "A planar interface"). Layers are sampled at the nodes, so an interface
+  acts midway between the last node above it and the first below, wherever it lies: a
+  layer's top on a node reflects $h/v$ early, a first-order error (reflection misfit 35% for
+  P and 57% for S at 20 and 11.6 points per wavelength at $f_0$). Midway between nodes the
+  error is second order (0.72% and 7.5%) and the same at orders 4 to 16, so longer stencils
+  gain nothing there. Band-limiting the model to the grid (Mittet 2017), density and the
+  compliances, makes the reflection independent of where the interface falls (1.2% and
+  12.6%, second order): `[model] interfaces = "band-limited"`, off by default.
 - **The free surface.** Stress imaging is second order, so surface waves need finer grids
   (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils. Our
   free-surface test's 2.5% is mostly its reference, which doubles the P wave as if it were
@@ -693,6 +701,7 @@ removed) unless stated:
 | Point force against Stokes' solution: along, across and diagonal to the force | 0.001–0.005% (Taylor 0.001–0.008%) |
 | The same with the time error kept, at Courant 0.3 | 0.03–0.09% |
 | A P wave doubling at the free surface above a buried explosion | 2.5%, mostly the reference's (see "Accuracy") |
+| Plane P and S waves at normal incidence on a planar interface midway between nodes, against the exact reflection and transmission | reflected 0.72% (P) and 7.5% (S), transmitted 0.08% and 0.44%; a layer's top on a node reflects $h/v$ early (see "Accuracy") |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 8 \times 10^{-7}$ of peak |
 | Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 8.3 \times 10^{-8}$ |
