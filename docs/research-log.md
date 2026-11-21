@@ -1754,6 +1754,83 @@ the memory estimate, made first, refused the iterations the page writes beside t
 **Reproduce:** `just unit misfit`; `just physics mutes_keep`; the numbers above,
 `cargo test --release --lib mute_study -- --ignored --nocapture`.
 
+## 2026-11-21 — Where Marmousi2's misfit lies
+
+**Question.** Five L2 iterations of `examples/marmousi2/central.toml` from its start smoothed
+over 250 m lowered the misfit to 57.9% without bringing the model nearer the truth, and moved
+$v_s$ away from it between 750 m and 1.5 km (2026-11-20, "Marmousi2"). The suspected cause is
+the slow waves along the seafloor (Scholte and S waves in the sediments, about 300 m/s in the
+truth, 400 m/s in the start), which the start predicts a cycle or more off. How much of the
+misfit, and of its gradient, do they carry?
+
+**Method** (`tests/marmousi2_study.rs`, `misfit_by_arrival`). For the start against the true
+model's five shots, the balanced L2 misfit, as the inversion measures it
+($\tfrac12 \sum_c w_c \sum (d - d_\text{obs})^2$, $w_c$ the inverse of shot and component $c$'s
+observed energy), is summed sample by sample into bins: before and after lines
+$t = |\Delta x| / v + t_0$ for $v$ = 300, 400 and 500 m/s, by component, and by horizontal
+offset. $t_0 = 0.87$ s is the earliest a slow wave can leave the seafloor below the source: the
+Ricker's peak ($1.2 / f_0 = 1.0$ s) less half a period, plus the 425 m of water at 1500 m/s. The
+records are 3.5 s long, so such a wave stays in them out to an offset of 0.8 km at 300 m/s and
+1.3 km at 500. The gradient is linear in the residuals, so the gradient of the residuals before
+the 400 m/s line (the rest zeroed) and the whole gradient give the part after the line as the
+difference, two gradient runs per shot. Each part is taken relative ($m_0\, \partial\chi /
+\partial m$) at the free nodes, as the inversion's unknowns are, and reported by depth band:
+its norm, and the cosine of its descent direction $-\nabla$ with the true update
+$m_\text{true} / m_0 - 1$. These are the raw gradients; the inversion divides them by the
+source-side illumination [@shin2001], which raises the deep ones.
+
+**Results.** The misfit (0.660 in all; by shot from $x$ = 1 to 5 km 0.057, 0.090, 0.140,
+0.255 and 0.119):
+
+| Split | Share |
+|---|---|
+| before / after $t = \lvert\Delta x\rvert / 300 + 0.87$ | 61.5% / 38.5% |
+| before / after $t = \lvert\Delta x\rvert / 400 + 0.87$ | 47.2% / 52.8% |
+| before / after $t = \lvert\Delta x\rvert / 500 + 0.87$ | 35.1% / 64.9% |
+| $v_x$ / $v_z$ | 76.7% / 23.3% |
+| offset 0–1 / 1–2 / 2–3 / over 3 km | 81.4% / 13.5% / 3.8% / 1.3% |
+
+The gradient split at 400 m/s, norm and cosine with the true update by depth band:
+
+| | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|
+| $v_p$, before the line | $6.8 \times 10^{-3}$, +0.47 | $1.4 \times 10^{-3}$, +0.28 | $4.8 \times 10^{-4}$, −0.05 | $8.2 \times 10^{-5}$, +0.04 | $4.6 \times 10^{-6}$, −0.14 |
+| $v_p$, after it | $3.6 \times 10^{-3}$, −0.04 | $1.2 \times 10^{-3}$, −0.27 | $7.5 \times 10^{-4}$, −0.17 | $7.6 \times 10^{-5}$, +0.01 | $6.6 \times 10^{-6}$, −0.13 |
+| $v_p$, all | $8.2 \times 10^{-3}$, +0.37 | $1.8 \times 10^{-3}$, +0.04 | $9.4 \times 10^{-4}$, −0.16 | $1.3 \times 10^{-4}$, +0.03 | $9.9 \times 10^{-6}$, −0.15 |
+| $v_s$, before the line | $1.7 \times 10^{-2}$, +0.13 | $2.4 \times 10^{-3}$, +0.01 | $1.1 \times 10^{-3}$, −0.20 | $1.9 \times 10^{-4}$, +0.01 | $3.3 \times 10^{-6}$, +0.15 |
+| $v_s$, after it | $1.8 \times 10^{-2}$, +0.03 | $8.6 \times 10^{-3}$, −0.12 | $5.2 \times 10^{-3}$, −0.17 | $4.4 \times 10^{-4}$, −0.05 | $4.1 \times 10^{-6}$, +0.16 |
+| $v_s$, all | $3.0 \times 10^{-2}$, +0.10 | $9.5 \times 10^{-3}$, −0.10 | $5.7 \times 10^{-3}$, −0.19 | $5.5 \times 10^{-4}$, −0.03 | $6.5 \times 10^{-6}$, +0.18 |
+
+- *Where the misfit is.* Four fifths of it is within 1 km of the source, three quarters on the
+  horizontal component, and more than half after the 400 m/s line: slow, horizontally
+  polarised waves at near offsets, which is what Scholte and S waves in soft sediments under a
+  fluid look like. The balance weighs components, not offsets, so the loud near offsets
+  dominate. More than a third comes even after the 300 m/s line: the truth's slowest
+  arrivals, and the coda of reverberations in the sediments.
+- *Where its gradient points.* Between 750 m and 1.5 km the residuals after the line carry
+  3.5 and 4.8 times the $v_s$ gradient that the earlier ones do, and point away from the truth
+  (cosines −0.12 and −0.17): the whole gradient there does too (−0.10, −0.19), which is where
+  the baseline's $v_s$ moved away. The earlier residuals' gradient points towards the truth in
+  the top kilometre, clearly for $v_p$ (+0.47, +0.28), weakly for $v_s$ (+0.13, +0.01), but
+  away for $v_s$ at 1–1.5 km too (−0.20). Below 1.5 km both are 10–1000 times smaller and
+  their cosines close to zero: these 1.2 Hz data from 5 km of ocean-bottom nodes barely see
+  it.
+- The total's cosines match the baseline inversion's by band in sign (2026-11-20 table: $v_s$
+  +0.25, −0.15, −0.17 in the top three bands), so its first gradient already decided the
+  outcome.
+
+**Decision.** The slow waves are the obstacle, as suspected: they carry most of the misfit and
+the wrong-signed part of the gradient below 750 m. Muting or down-weighting them by arrival
+time (`feat/mutes`, not yet on main) is the direct remedy; meanwhile the tools on main are run
+in the order this suggests (next entries): L2 again in the study's own measure, as the
+reference; frequency stages from 0.6 Hz, whose 1.7 s period comes nearer the slow waves'
+roughly 2 s of delay [@bunks1995; @fichtner2013]; then time shifts and the phase misfit
+[@luo1991; @fichtner2008], whose single-arrival assumption the overlapping slow waves at
+near offsets break, so they are expected to do least.
+
+**Reproduce:** `just in marmousi2`, then `just in marmousi2-study misfit_by_arrival` (15
+minutes on four cores: 78 s for the observed traces, 706 s for the gradients).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
