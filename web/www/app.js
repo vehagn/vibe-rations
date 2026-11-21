@@ -1,15 +1,28 @@
 // The page: picks a configuration, hands it to a solver, and draws what comes back. The solver
 // is WebAssembly in worker.js, on this machine, or, when `vibe-rations serve` served the page,
-// the server (remote.js); both answer the same messages.
+// the server (remote.js); both answer the same messages. The configuration's text is the source
+// of truth: the settings form (form.js) and the inversion (fwi.js) edit it through config.js,
+// and the Command tab (commands.js) shows how to run it without the page.
 
 import { RemoteSolver, findServer, listRuns } from "./remote.js";
-
-const $ = (selector) => document.querySelector(selector);
+import { ready as configReady, defaultTruth, modelOf } from "./config.js";
+import { initForm, refreshForm, settings } from "./form.js";
+import { initCommands, nameCommands, refreshCommands } from "./commands.js";
+import * as fwi from "./fwi.js";
+import { plot, fitHeight, clearCanvas } from "./plot.js";
+import {
+  $,
+  el,
+  download,
+  formatBytes,
+  formatDuration,
+  formatGain,
+  formatLength,
+  formatValue,
+  showMemory,
+} from "./util.js";
 
 const UNITS = { vx: "m/s", vy: "m/s", vz: "m/s", p: "Pa" };
-// Room around a plot for the tick labels: the y label sits left of them, and the last x label
-// reaches past the edge.
-const MARGIN = { left: 74, right: 30, top: 10, bottom: 42 };
 const NORMAL_AXIS = { xy: 2, xz: 1, yz: 0 };
 
 const state = {
@@ -21,6 +34,11 @@ const state = {
   clip: 0,
   step: 0,
   totalSteps: 0,
+  // The configuration the solver has set up, to tell edits from it.
+  loaded: null,
+  // The run on the server, and the inversion there, for the commands.
+  runId: null,
+  inversionId: null,
 };
 
 // ?threads=N picks the solver's thread count, e.g. 1 to compare.
@@ -36,6 +54,7 @@ function useSolver(kind) {
   worker.onmessage = ({ data }) => on[data.type]?.(data);
   worker.onerror = (e) => showError(`The solver failed to start: ${e.message}`);
   state.compute = kind;
+  state.runId = state.inversionId = null;
   $("#server-runs-field").hidden = kind !== "server";
 }
 
@@ -51,18 +70,19 @@ const on = {
     worker.postMessage({ type: "live", on: $("#live").checked });
     if (server) refreshRuns();
     // Switching solvers keeps the configuration being edited.
-    if (state.switched) load($("#editor").value);
+    if (state.switched) load(editor().value);
     else loadExample($("#example").value);
     state.switched = true;
   },
-  loaded({ info, toml, name }) {
+  loaded({ info, toml, name, id }) {
     if (toml !== undefined) {
       // An attached run: show its configuration, and its example if it is one.
       if ([...$("#example").options].some((o) => o.value === name)) $("#example").value = name;
-      $("#editor").value = toml;
+      setText(toml);
+      state.loaded = toml;
       $("#example-description").textContent = describe(toml);
-      estimate(toml);
     }
+    state.runId = id ?? null;
     if (state.compute === "server") refreshRuns();
     state.info = info;
     clearError();
@@ -72,6 +92,8 @@ const on = {
     state.totalSteps = info.steps;
     updateProgress({ step: 0, totalSteps: info.steps, time: 0, speed: 0 });
     setStatus("ready", "Ready to run");
+    markEdited();
+    refreshCommands();
     sendView();
   },
   state({ running, done }) {
@@ -98,19 +120,50 @@ const on = {
     updateProgress(f);
     draw();
   },
-  estimate({ id, memory, error }) {
-    if (id === state.estimate) showMemory(memory, error);
+  estimate(message) {
+    if (String(message.id).startsWith("fwi-")) return fwi.showEstimate(message);
+    if (message.id === state.estimate) showMemory($("#memory"), message.memory, message.error);
+  },
+  inversion(message) {
+    if (message.id) state.inversionId = message.id;
+    fwi.showStatus(message);
+    if (message.running) setStatus("running", "Inverting");
+    else if (message.status?.stage === "done") setStatus("done", "Inversion done");
+    else if (message.status) setStatus("ready", "Inversion stopped");
+    refreshCommands();
+  },
+  inversionFrame(f) {
+    fwi.showFrame(f);
+  },
+  inversionAttached(message) {
+    state.inversionId = message.id;
+    setText(message.start);
+    let truth = message.truth;
+    try {
+      truth = modelOf(truth);
+    } catch {}
+    fwi.attached({ ...message, truth });
+    showTab("fwi");
+  },
+  modelNpy(message) {
+    fwi.savedModel(message);
   },
   npy({ component, bytes }) {
     download(new Blob([bytes], { type: "application/octet-stream" }), `${component}.npy`);
   },
   error({ during, message }) {
-    const what = { load: "The configuration has a problem", run: "The run stopped" }[during];
+    const what = {
+      load: "The configuration has a problem",
+      run: "The run stopped",
+      invert: "The inversion stopped",
+    }[during];
     showError(what ? `${what}: ${message}` : message);
     if (during === "load") setStatus("error", "Configuration error");
-    if (during === "run") setStatus("error", "Stopped");
+    if (during === "run" || during === "invert") setStatus("error", "Stopped");
   },
 };
+
+const editor = () => $("#editor");
 
 // ---------------------------------------------------------------------------- scenarios
 
@@ -118,10 +171,7 @@ async function loadExamples() {
   const select = $("#example");
   const files = await fetch("examples/index.json").then((r) => r.json());
   for (const file of files) {
-    const option = document.createElement("option");
-    option.value = file;
-    option.textContent = file.replace(/\.toml$/, "").replace(/[-_]/g, " ");
-    select.append(option);
+    select.append(el("option", { value: file, textContent: file.replace(/\.toml$/, "").replace(/[-_]/g, " ") }));
   }
   const wanted = new URLSearchParams(location.search).get("example");
   select.value = files.includes(`${wanted}.toml`) ? `${wanted}.toml` : files.includes("explosion.toml") ? "explosion.toml" : files[0];
@@ -129,8 +179,11 @@ async function loadExamples() {
 
 async function loadExample(file) {
   const toml = await fetch(`examples/${file}`).then((r) => r.text());
-  $("#editor").value = toml;
   $("#example-description").textContent = describe(toml);
+  nameCommands(file);
+  editor().value = toml;
+  fwi.resetTruth();
+  setText(toml);
   load(toml);
 }
 
@@ -146,39 +199,45 @@ function describe(toml) {
   return lines.join(" ");
 }
 
-/// Asks the worker what a configuration would need in memory; the latest answer is shown.
+/// Puts a configuration in the editor and has everything that follows it catch up.
+function setText(text) {
+  editor().value = text;
+  edited();
+}
+
+/// The configuration has changed: the form, the memory, the commands and the inversion's memory
+/// follow it, at once for small changes and after a pause in typing.
+let following;
+function edited({ wait = 0 } = {}) {
+  clearTimeout(following);
+  const run = () => {
+    const text = editor().value;
+    estimate(text);
+    refreshForm(text);
+    markEdited();
+    refreshCommands();
+    fwi.estimateFwi();
+  };
+  if (wait) following = setTimeout(run, wait);
+  else run();
+}
+
+/// Shows Apply and Revert while the configuration differs from the one set up.
+function markEdited() {
+  $("#changes").hidden = state.loaded === null || editor().value === state.loaded;
+}
+
+/// Asks the solver what a configuration would need in memory; the latest answer is shown.
 function estimate(toml) {
   state.estimate = (state.estimate ?? 0) + 1;
   worker.postMessage({ type: "estimate", toml, id: state.estimate });
 }
 
-function showMemory(memory, error) {
-  const box = $("#memory");
-  // A configuration that doesn't parse says why when it is applied.
-  box.hidden = Boolean(error);
-  if (error) return;
-  const server = memory.where === "server";
-  const limit = memory.limit == null ? null : formatBytes(memory.limit);
-  const over = memory.limit != null && memory.peak > memory.limit;
-  box.dataset.over = over;
-  $("#memory-total").textContent = over
-    ? server
-      ? `Memory: ${formatBytes(memory.peak)}, more than the server has available (${limit})`
-      : `Memory: ${formatBytes(memory.peak)}, more than a browser can give (${limit})`
-    : server
-      ? `Memory: ${formatBytes(memory.peak)}` + (limit ? ` of the server's ${limit} available` : " on the server")
-      : `Memory: ${formatBytes(memory.peak)} of the browser's ${limit}`;
-  $("#memory-parts").replaceChildren(
-    ...memory.parts.flatMap(({ what, bytes, transient }) => [
-      Object.assign(document.createElement("dt"), { textContent: formatBytes(bytes) }),
-      Object.assign(document.createElement("dd"), { textContent: transient ? `${what} (only then)` : what }),
-    ]),
-  );
-}
-
 function load(toml) {
   estimate(toml);
   state.info = null;
+  state.loaded = toml;
+  markEdited();
   state.section?.bitmap.close();
   state.gather?.bitmap.close();
   state.section = state.gather = null;
@@ -194,13 +253,15 @@ async function refreshRuns() {
     const runs = await listRuns();
     const progress = (r) => (r.total_steps ? ` ${Math.round((100 * r.step) / r.total_steps)}%` : "");
     select.replaceChildren(
-      Object.assign(document.createElement("option"), { value: "", textContent: `${runs.length} run(s) on the server…` }),
+      el("option", { value: "", textContent: `${runs.length} run(s) on the server…` }),
       ...runs
         .filter((r) => r.info)
         .map((r) =>
-          Object.assign(document.createElement("option"), {
+          el("option", {
             value: r.id,
-            textContent: `${r.name.replace(/\.toml$/, "")} · ${r.phase}${r.phase === "done" ? "" : progress(r)}${r.live ? "" : " (results only)"}`,
+            textContent:
+              `${r.name.replace(/\.toml$/, "")}${r.kind === "inversion" ? " · inversion" : ""} · ${r.phase}` +
+              `${r.phase === "done" ? "" : progress(r)}${r.live ? "" : " (results only)"}`,
             disabled: !r.live,
           }),
         ),
@@ -210,17 +271,30 @@ async function refreshRuns() {
   }
 }
 
+// ---------------------------------------------------------------------------- tabs
+
+function showTab(name) {
+  for (const tab of document.querySelectorAll('[role="tab"]')) tab.setAttribute("aria-selected", tab.dataset.tab === name);
+  for (const panel of document.querySelectorAll(".tab-panel")) panel.hidden = panel.dataset.panel !== name;
+  if (name === "command") refreshCommands();
+  if (name === "fwi") fwi.estimateFwi();
+  try {
+    localStorage.setItem("vibe-rations.tab", name);
+  } catch {}
+}
+
+for (const tab of document.querySelectorAll('[role="tab"]')) {
+  tab.addEventListener("click", () => showTab(tab.dataset.tab));
+}
+
 // ---------------------------------------------------------------------------- view
 
 function setupView(info) {
-  const [nx, ny, nz] = info.points;
   const source = info.sources[0]?.position ?? [0, 0, 0];
   // Through the source along the plane's normal.
   state.view.index = Math.round(source[NORMAL_AXIS[state.view.plane]] / info.spacing[NORMAL_AXIS[state.view.plane]]);
   const gather = $("#gather-component");
-  gather.replaceChildren(
-    ...info.components.map((c) => Object.assign(document.createElement("option"), { value: c, textContent: c })),
-  );
+  gather.replaceChildren(...info.components.map((c) => el("option", { value: c, textContent: c })));
   state.view.gather = info.components.includes(state.view.field) ? state.view.field : info.components[0] ?? null;
   gather.value = state.view.gather ?? "";
   gather.disabled = !state.view.gather;
@@ -273,6 +347,7 @@ $("#gain").addEventListener("input", (e) => {
   state.view.gain = 2 ** Number(e.target.value);
   $("#gain-label").textContent = `×${formatGain(state.view.gain)}`;
   sendView();
+  fwi.sendView();
 });
 
 $("#gather-component").addEventListener("change", (e) => {
@@ -284,10 +359,11 @@ $("#gather-component").addEventListener("change", (e) => {
 
 $("#example").addEventListener("change", (e) => loadExample(e.target.value));
 $("#apply").addEventListener("click", () => {
-  $("#example-description").textContent = describe($("#editor").value);
-  load($("#editor").value);
+  $("#example-description").textContent = describe(editor().value);
+  load(editor().value);
 });
-$("#reset").addEventListener("click", () => load($("#editor").value));
+$("#revert").addEventListener("click", () => setText(state.loaded));
+$("#reset").addEventListener("click", () => load(editor().value));
 for (const input of document.querySelectorAll('input[name="compute"]')) {
   input.addEventListener("change", () => {
     if (!input.checked) return;
@@ -307,12 +383,8 @@ $("#server-runs").addEventListener("change", (e) => {
   worker.postMessage({ type: "attach", id: e.target.value });
   e.target.value = "";
 });
-// The memory estimate follows the configuration as it is typed.
-let typing;
-$("#editor").addEventListener("input", () => {
-  clearTimeout(typing);
-  typing = setTimeout(() => estimate($("#editor").value), 300);
-});
+// The memory estimate, the form and the commands follow the configuration as it is typed.
+editor().addEventListener("input", () => edited({ wait: 300 }));
 $("#run").addEventListener("click", () => worker.postMessage({ type: state.running ? "pause" : "run" }));
 document.addEventListener("keydown", (e) => {
   if (e.key === " " && !["TEXTAREA", "INPUT", "SELECT", "BUTTON"].includes(document.activeElement?.tagName)) {
@@ -358,6 +430,7 @@ function drawSection() {
     aspect: extents[h] / extents[v],
     smooth: true,
     markers,
+    format: formatLength,
   });
   const unit = UNITS[view.field];
   const clip = formatValue(state.clip);
@@ -375,118 +448,8 @@ function drawGather() {
     y: [0, info.duration, "time", (v) => `${+v.toFixed(3)} s`],
     smooth: false,
     markers: [],
+    format: formatLength,
   });
-}
-
-/// Makes a canvas as tall as an image of this aspect needs at its width, within limits, so
-/// there's no empty band under a wide section.
-function fitHeight(canvas, aspect) {
-  const width = canvas.getBoundingClientRect().width;
-  const fit = (width - MARGIN.left - MARGIN.right) / aspect + MARGIN.top + MARGIN.bottom;
-  const max = Math.min(window.innerHeight * 0.65, 680);
-  canvas.style.height = `${Math.round(Math.max(180, Math.min(max, fit)))}px`;
-}
-
-function clearCanvas(canvas) {
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-}
-
-/// Draws `image` into `canvas` with axes. `x` and `y` are [first, last, label, format?]; with
-/// `aspect` (width / height) the image keeps its proportions.
-function plot(canvas, image, { x, y, aspect, smooth, markers }) {
-  const dpr = window.devicePixelRatio || 1;
-  const box = canvas.getBoundingClientRect();
-  if (box.width === 0) return;
-  canvas.width = Math.round(box.width * dpr);
-  canvas.height = Math.round(box.height * dpr);
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, box.width, box.height);
-
-  const margin = MARGIN;
-  let w = box.width - margin.left - margin.right;
-  let h = box.height - margin.top - margin.bottom;
-  if (aspect) {
-    if (w / h > aspect) w = h * aspect;
-    else h = w / aspect;
-  }
-  const left = margin.left + (box.width - margin.left - margin.right - w) / 2;
-  const top = margin.top;
-  ctx.imageSmoothingEnabled = smooth;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(image, left, top, w, h);
-
-  const style = getComputedStyle(document.documentElement);
-  const ink = style.getPropertyValue("--muted").trim();
-  ctx.strokeStyle = style.getPropertyValue("--line").trim();
-  ctx.lineWidth = 1;
-  ctx.strokeRect(left + 0.5, top + 0.5, w - 1, h - 1);
-  ctx.fillStyle = ink;
-  ctx.font = `12px ${style.getPropertyValue("--font").trim()}`;
-
-  const fx = x[3] ?? formatLength;
-  const fy = y[3] ?? formatLength;
-  const px = (v) => left + ((v - x[0]) / (x[1] - x[0] || 1)) * w;
-  const py = (v) => top + ((v - y[0]) / (y[1] - y[0] || 1)) * h;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  for (const t of ticks(x[0], x[1], Math.max(2, Math.floor(w / 85)))) {
-    ctx.fillRect(px(t), top + h, 1, 4);
-    ctx.fillText(fx(t), px(t), top + h + 6);
-  }
-  ctx.fillText(x[2], left + w / 2, top + h + 24);
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (const t of ticks(y[0], y[1], Math.max(2, Math.floor(h / 45)))) {
-    ctx.fillRect(left - 4, py(t), 4, 1);
-    ctx.fillText(fy(t), left - 7, py(t));
-  }
-  ctx.save();
-  ctx.translate(12, top + h / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = "center";
-  ctx.fillText(y[2], 0, 0);
-  ctx.restore();
-
-  for (const m of markers) {
-    const [cx, cy] = [px(m.x), py(m.y)];
-    ctx.beginPath();
-    if (m.kind === "source") {
-      star(ctx, cx, cy, 7, 3);
-      ctx.fillStyle = "#f5b400";
-    } else {
-      ctx.moveTo(cx - 4, cy - 5);
-      ctx.lineTo(cx + 4, cy - 5);
-      ctx.lineTo(cx, cy + 2);
-      ctx.closePath();
-      ctx.fillStyle = "#1f8a4c";
-    }
-    ctx.fill();
-    ctx.strokeStyle = "#ffffff";
-    ctx.stroke();
-  }
-}
-
-function star(ctx, x, y, outer, inner) {
-  for (let i = 0; i < 10; i++) {
-    const r = i % 2 ? inner : outer;
-    const a = (Math.PI / 5) * i - Math.PI / 2;
-    ctx[i ? "lineTo" : "moveTo"](x + r * Math.cos(a), y + r * Math.sin(a));
-  }
-  ctx.closePath();
-}
-
-/// About `count` round numbers between `lo` and `hi`.
-function ticks(lo, hi, count) {
-  const span = hi - lo;
-  if (!(span > 0)) return [lo];
-  const raw = span / Math.min(count, 8);
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw);
-  const out = [];
-  for (let t = Math.ceil(lo / step) * step; t <= hi + step * 1e-9; t += step) out.push(+t.toPrecision(12));
-  return out;
 }
 
 // ---------------------------------------------------------------------------- panels
@@ -511,15 +474,8 @@ function showInfo(info) {
     ["Receivers", `${info.receivers} × ${info.samples} samples`],
     ["Memory", formatBytes(info.memory_bytes)],
   ];
-  $("#info").replaceChildren(
-    ...rows.flatMap(([k, v]) => [
-      Object.assign(document.createElement("dt"), { textContent: k }),
-      Object.assign(document.createElement("dd"), { textContent: v }),
-    ]),
-  );
-  $("#warnings").replaceChildren(
-    ...info.warnings.map((w) => Object.assign(document.createElement("li"), { textContent: w })),
-  );
+  $("#info").replaceChildren(...rows.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: v })]));
+  $("#warnings").replaceChildren(...info.warnings.map((w) => el("li", { textContent: w })));
 }
 
 function updateProgress({ step, totalSteps, time, speed }) {
@@ -548,45 +504,43 @@ function clearError() {
   $("#error").hidden = true;
 }
 
-// ---------------------------------------------------------------------------- formatting
+// ---------------------------------------------------------------------------- start
 
-/// Bytes for people, as the solver writes them: B, KiB, MiB or GiB.
-function formatBytes(bytes) {
-  const units = ["B", "KiB", "MiB", "GiB"];
-  let v = bytes;
-  let u = 0;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u += 1;
-  }
-  return u === 0 ? `${bytes} B` : `${v < 10 ? v.toFixed(2) : v.toFixed(0)} ${units[u]}`;
-}
-
-function formatLength(m) {
-  return Math.abs(m) >= 2000 ? `${+(m / 1000).toFixed(2)} km` : `${+m.toFixed(1)} m`;
-}
-
-function formatValue(v) {
-  if (!(v > 0)) return "0";
-  return v >= 0.01 && v < 1e4 ? v.toPrecision(2) : v.toExponential(1);
-}
-
-function formatGain(g) {
-  return g >= 1 ? String(+g.toFixed(2)) : `1/${+(1 / g).toFixed(2)}`;
-}
-
-function formatDuration(s) {
-  if (s < 60) return `${Math.ceil(s)} s`;
-  return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
-}
-
-function download(blob, name) {
-  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
+const stem = () => ($("#command-file").value.trim() || "run.toml").replace(/\.toml$/, "");
 
 examplesLoaded = loadExamples();
+await configReady;
+initForm({ text: () => editor().value, change: setText, info: () => state.info });
+initCommands({
+  text: () => editor().value,
+  run: () => state.runId,
+  inversionRun: () => state.inversionId,
+  server: () => state.compute === "server",
+  truth: () => $("#truth").value,
+  sources: () => settings()?.sources.length ?? 1,
+  balance: () => (settings()?.inversion ?? settings()?.inversion_defaults)?.balance ?? true,
+});
+fwi.initFwi({
+  solver: () => worker,
+  text: () => editor().value,
+  truthDefault: () => {
+    try {
+      return defaultTruth(editor().value);
+    } catch (e) {
+      return `# ${e.message ?? e}\n`;
+    }
+  },
+  name: stem,
+  gain: () => state.view.gain,
+  markers: () => [
+    ...(settings()?.sources ?? []).map((s) => ({ position: s.position, kind: "source" })),
+    ...(state.info?.receiver_positions ?? []).map((p) => ({ position: p, kind: "receiver" })),
+  ],
+});
+try {
+  const tab = localStorage.getItem("vibe-rations.tab");
+  if (tab && document.querySelector(`[data-panel="${tab}"]`)) showTab(tab);
+} catch {}
 
 // Served by `vibe-rations serve`: offer its solver, and use it.
 const server = await findServer();

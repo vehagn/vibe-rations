@@ -7,12 +7,14 @@
 
 use std::path::Path;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use vibe_rations::config::Config;
 use vibe_rations::memory::{self, Memory};
 use vibe_rations::simulation::Simulation;
-use vibe_rations::view::{self, View};
+use vibe_rations::view::{self, InversionView, View};
 use wasm_bindgen::prelude::*;
+
+pub mod settings;
 
 #[wasm_bindgen]
 extern "C" {
@@ -47,10 +49,16 @@ impl Frame {
         self.0.height
     }
 
-    /// The value drawn at full colour.
+    /// The value drawn at full colour: the top of the colour scale.
     #[wasm_bindgen(getter)]
     pub fn clip(&self) -> f32 {
         self.0.clip
+    }
+
+    /// The bottom of the colour scale: -clip for signed pictures.
+    #[wasm_bindgen(getter)]
+    pub fn low(&self) -> f32 {
+        self.0.low
     }
 
     /// The pixels, RGBA, row by row from the top; hands them over without copying.
@@ -147,6 +155,111 @@ impl Simulator {
     }
 }
 
+/// An inversion of synthetic data the page can step a unit at a time and look at.
+#[wasm_bindgen]
+pub struct Inverter(InversionView);
+
+#[wasm_bindgen]
+impl Inverter {
+    /// The memory an inversion of the start `config` (with `[inversion]`) would need, as
+    /// JSON like [`Simulator::estimate_memory`]'s.
+    #[wasm_bindgen(js_name = estimateMemory)]
+    pub fn estimate_memory(config: &str) -> Result<String, JsError> {
+        let m = estimate_inversion(config).map_err(js)?;
+        let mut value = serde_json::to_value(&m).expect("Memory serialises");
+        value["limit"] = serde_json::json!(BROWSER_LIMIT);
+        Ok(value.to_string())
+    }
+
+    /// An inversion of `start`'s model (with its `[inversion]`) against the traces of
+    /// `truth` (the same survey with the true model), as [`settings::synthetic`] makes them.
+    #[wasm_bindgen(constructor)]
+    pub fn new(start: &str, truth: &str) -> Result<Inverter, JsError> {
+        setup_inversion(start, truth).map(Inverter).map_err(js)
+    }
+
+    /// Does the next unit of work: a shot of observed traces, the start, an iteration. False
+    /// once there is none left.
+    pub fn advance(&mut self) -> Result<bool, JsError> {
+        self.0.advance().map_err(js)
+    }
+
+    /// Where it is, as JSON (`InversionView::status`).
+    pub fn status(&self) -> String {
+        self.0.status().to_string()
+    }
+
+    /// A picture of `parameter` (vp, vs, rho) showing `show` (model, update, true-update,
+    /// descent) on `plane` through node `index`.
+    pub fn picture(
+        &self,
+        parameter: &str,
+        show: &str,
+        plane: &str,
+        index: usize,
+        gain: f32,
+    ) -> Result<Frame, JsError> {
+        self.0
+            .pictures
+            .section(parameter, show, plane, index, gain)
+            .map(Frame)
+            .map_err(js)
+    }
+
+    /// The model as it stands, `parameter` as an `.npy` file (nz, ny, nx).
+    #[wasm_bindgen(js_name = modelNpy)]
+    pub fn model_npy(&self, parameter: &str) -> Result<Vec<u8>, JsError> {
+        self.0.pictures.npy(parameter).map_err(js)
+    }
+}
+
+/// What the configuration `text` sets, defaults filled in, as JSON ([`settings::settings`]).
+#[wasm_bindgen(js_name = readSettings)]
+pub fn read_settings(text: &str) -> Result<String, JsError> {
+    settings::settings(text).map(|v| v.to_string()).map_err(js)
+}
+
+/// The configuration `text` with `edits` (JSON: `[{path, value}]`) applied
+/// ([`settings::edit`]).
+#[wasm_bindgen(js_name = editConfig)]
+pub fn edit_config(text: &str, edits: &str) -> Result<String, JsError> {
+    let edits: serde_json::Value = serde_json::from_str(edits)
+        .context("edits must be JSON")
+        .map_err(js)?;
+    settings::edit(text, &edits).map_err(js)
+}
+
+/// The commands that run a configuration without the page, as JSON ([`settings::commands`]).
+#[wasm_bindgen]
+pub fn commands(input: &str) -> Result<String, JsError> {
+    let input: serde_json::Value = serde_json::from_str(input)
+        .context("the input must be JSON")
+        .map_err(js)?;
+    settings::commands(&input)
+        .map(|v| v.to_string())
+        .map_err(js)
+}
+
+/// A true model for a synthetic inversion of `text`: its model with a sphere added.
+#[wasm_bindgen(js_name = defaultTruth)]
+pub fn default_truth(text: &str) -> Result<String, JsError> {
+    settings::default_truth(text).map_err(js)
+}
+
+/// The `[model]` of a configuration alone, as TOML ([`settings::model_of`]).
+#[wasm_bindgen(js_name = modelOf)]
+pub fn model_of(text: &str) -> Result<String, JsError> {
+    settings::model_of(text).map_err(js)
+}
+
+/// The start and the truth of a synthetic inversion, as JSON `{start, truth}`
+/// ([`settings::synthetic`]).
+#[wasm_bindgen]
+pub fn synthetic(text: &str, truth: &str, observed: &str) -> Result<String, JsError> {
+    let (start, truth) = settings::synthetic(text, truth, observed).map_err(js)?;
+    Ok(serde_json::json!({ "start": start, "truth": truth }).to_string())
+}
+
 /// What WebAssembly can address: 4 GiB. The page refuses runs that would need more, less a
 /// margin for the program and the pictures, before setting them up.
 pub const BROWSER_LIMIT: u64 = 4 << 30;
@@ -165,6 +278,28 @@ fn browser_config(config: &str) -> Result<Config> {
         "the browser can't read model files; use [[model.layer]]s and [[model.sphere]]s"
     );
     Ok(cfg)
+}
+
+/// The memory an inversion of synthetic data from the start `config` would need in the
+/// browser.
+pub fn estimate_inversion(config: &str) -> Result<Memory> {
+    let cfg = browser_config(config)?;
+    memory::estimate_synthetic_inversion(&cfg, Path::new("."))
+}
+
+/// Sets up an inversion of synthetic data for the browser, if it fits.
+pub fn setup_inversion(start: &str, truth: &str) -> Result<InversionView> {
+    let cfg = browser_config(start)?;
+    let truth = browser_config(truth).context("in the true model")?;
+    let m = memory::estimate_synthetic_inversion(&cfg, Path::new("."))?;
+    ensure!(
+        m.peak + MARGIN <= BROWSER_LIMIT,
+        "this inversion needs {} of memory, and a browser gives WebAssembly at most {}; use a \
+         smaller grid, or the run server",
+        memory::human(m.peak),
+        memory::human(BROWSER_LIMIT)
+    );
+    InversionView::new(&cfg, &truth, Path::new("."))
 }
 
 /// Sets a run up for the browser: no model files, and no more memory than WebAssembly has.
@@ -230,6 +365,40 @@ mod tests {
         let start = text.find("points = [").unwrap();
         let end = start + text[start..].find(']').unwrap() + 1;
         format!("{}points = [800, 800, 800]{}", &text[..start], &text[end..])
+    }
+
+    /// The page's inversion: the settings module's pair of configurations, stepped to the end;
+    /// one too large for the browser is refused before anything is allocated.
+    #[test]
+    fn inverts_synthetic_data_and_refuses_inversions_too_large() {
+        let with = settings::edit(
+            CONFIG,
+            &serde_json::json!([
+                { "path": "inversion.observed", "value": "observed" },
+                { "path": "inversion.iterations", "value": 1 },
+                { "path": "inversion.parameters", "value": ["vs"] },
+                { "path": "scheme.coefficients", "value": "taylor" },
+            ]),
+        )
+        .unwrap();
+        let truth = settings::default_truth(&with).unwrap();
+        let (start, truth) = settings::synthetic(&with, &truth, "observed").unwrap();
+        let m = estimate_inversion(&start).unwrap();
+        assert!(m.peak > estimate(&start).unwrap().peak);
+        let mut inv = setup_inversion(&start, &truth).unwrap();
+        while inv.advance().unwrap() {}
+        let s = inv.status();
+        assert_eq!(s["stage"], "done");
+        assert!(s["misfit"].as_f64().unwrap() < s["starting_misfit"].as_f64().unwrap());
+        let f = inv.pictures.section("vs", "update", "xz", 10, 1.0).unwrap();
+        assert_eq!(f.rgba.len(), f.width * f.height * 4);
+        let e = format!(
+            "{:#}",
+            setup_inversion(&grown(&start), &grown(&truth))
+                .err()
+                .unwrap()
+        );
+        assert!(e.contains("at most 4.00 GiB"), "{e}");
     }
 
     #[test]

@@ -157,12 +157,27 @@ output {
 
 select,
 button,
-textarea {
+textarea,
+input[type="number"],
+input:not([type]) {
   font: inherit;
   color: var(--ink);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+input[type="number"],
+input:not([type]) {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.6;
 }
 
 select {
@@ -391,6 +406,280 @@ footer {
 
 a {
   color: var(--blue);
+}
+
+/* The sidebar's tabs. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.tabs button {
+  flex: 1;
+  padding: 5px 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.tabs button[aria-selected="true"] {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Edited but not applied. */
+.changes {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+}
+
+.changes span {
+  flex: 1;
+  color: var(--warn);
+  font-size: 13px;
+}
+
+.changes button.primary {
+  min-width: 0;
+}
+
+.warn {
+  color: var(--warn);
+}
+
+/* The settings form. */
+fieldset {
+  margin: 0 0 10px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.trio,
+.pair,
+.grid2 {
+  display: grid;
+  gap: 6px 8px;
+  margin-bottom: 8px;
+}
+
+.trio {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pair,
+.grid2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.trio label,
+.pair label,
+.grid2 label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+label.inline {
+  display: grid;
+  grid-template-columns: 1fr 110px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+label.inline select {
+  width: 100%;
+}
+
+.check-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+.checks {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.checks label {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  font-family: var(--mono);
+}
+
+fieldset .field {
+  margin: 6px 0;
+}
+
+fieldset .row {
+  margin-bottom: 6px;
+}
+
+fieldset .row select {
+  flex: 1;
+}
+
+table.rows {
+  width: 100%;
+  margin: 4px 0 6px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+table.rows th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+table.rows th:last-child,
+table.rows td:last-child {
+  width: 26px;
+}
+
+table.rows td {
+  padding: 1px;
+}
+
+table.rows input {
+  padding: 3px 4px;
+  font-size: 12px;
+}
+
+table.rows button {
+  width: 24px;
+  padding: 2px 0;
+}
+
+textarea.short {
+  height: 180px;
+}
+
+/* The inversion. */
+.actions {
+  margin-top: 10px;
+}
+
+table.history {
+  width: 100%;
+  margin: 6px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+table.history th {
+  color: var(--muted);
+  font-weight: 500;
+  text-align: right;
+}
+
+table.history td {
+  text-align: right;
+  border-top: 1px solid var(--line);
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.toolbar .segmented {
+  min-width: 120px;
+}
+
+.toolbar input[type="range"] {
+  flex: 1;
+  min-width: 120px;
+}
+
+canvas.misfit {
+  height: 200px;
+  margin-top: 12px;
+}
+
+.legend .bar[data-scale="signed"] {
+  background: linear-gradient(to right, #0000ff, #ffffff, #ff0000);
+}
+
+.legend .bar[data-scale="sequential"] {
+  background: linear-gradient(to right, #440154, #3a528b, #20908d, #5ec962, #fde725);
+}
+
+/* The commands. */
+.commands {
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.commands li {
+  margin-bottom: 8px;
+}
+
+.commands .what {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.commands .line {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.commands code {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  font: 12px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.commands button.copy {
+  padding: 3px 8px;
+  font-size: 12px;
 }
 
 @media (max-width: 860px) {

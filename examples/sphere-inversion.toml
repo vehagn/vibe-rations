@@ -1,0 +1,71 @@
+# A small inversion: two shots, a vertical and a horizontal force 30 m deep, recorded on the
+# surface over a homogeneous half-space. This model is where the inversion starts; the web
+# page's FWI tab makes the observed traces from a true model with a faster sphere below the
+# sources, and inverts them for vp and vs in the browser in a minute or so.
+#
+#   just run examples/sphere-inversion.toml
+#
+# Without the page, the true model is a second configuration (the Command tab writes both,
+# with the time step, absorbing layers and coefficients set alike):
+#
+#   vibe-rations run --shots sphere-inversion-truth.toml   # the observed traces
+#   vibe-rations invert sphere-inversion-start.toml
+
+[grid]
+points = [36, 32, 26]
+spacing = 10.0
+
+[time]
+duration = 0.3
+
+[boundary]
+pml_width = 8
+
+[[model.layer]]
+top = 0.0
+vp = 2400.0
+vs = 1300.0
+rho = 2100.0
+
+[[source]]
+position = [130.0, 155.0, 30.0]
+force = [0.0, 0.0, 1e9]
+wavelet = { kind = "ricker", frequency = 12.0 }
+
+[[source]]
+position = [220.0, 155.0, 30.0]
+force = [1e9, 0.0, 0.0]
+wavelet = { kind = "ricker", frequency = 12.0 }
+
+[receivers]
+components = ["vx", "vy", "vz"]
+
+# Two lines along x, four nodes clear of the absorbing layers: receivers whose interpolation
+# reaches into them read damped values, and the gradient is no longer exact.
+[[receivers.line]]
+from = [120.0, 120.0, 0.0]
+to = [230.0, 120.0, 0.0]
+count = 12
+
+[[receivers.line]]
+from = [120.0, 190.0, 0.0]
+to = [230.0, 190.0, 0.0]
+count = 12
+
+# The vertical section through both sources, every 50 ms.
+[[snapshot]]
+field = "vz"
+plane = "xz"
+at = 155.0
+interval = 0.05
+
+[inversion]
+observed = "observed"
+parameters = ["vp", "vs"]
+iterations = 5
+# The sources and receivers sit in the top 60 m, where the gradient is largest and least
+# reliable; the model is held there.
+fixed_above = 60.0
+
+[output]
+dir = "out/sphere-inversion"

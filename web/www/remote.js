@@ -1,6 +1,7 @@
 // The solver on the server that served this page (`vibe-rations serve`), behind the same
 // messages as worker.js, so the page drives either the same way. Runs live on the server: they
-// carry on when the page is closed, and the page can attach to them again.
+// carry on when the page is closed, and the page can attach to them again. So do inversions,
+// which are runs of their own (kind=inversion) that the server steps a unit at a time.
 
 const POLL_MS = 200;
 // With live pictures off: progress only, and seldom. The server sees nobody asking for
@@ -34,6 +35,10 @@ export class RemoteSolver {
     this.stopped = false;
     this.view = { field: "vz", plane: "xz", index: 0, gain: 1, gather: null, gatherRows: 600 };
     this.live = true;
+    // The inversion this page follows, and how it looks at it.
+    this.inversion = null;
+    this.following = false;
+    this.inversionView = { parameter: "vs", show: "update", plane: "xz", index: 0, gain: 1 };
     this.ready();
   }
 
@@ -55,6 +60,11 @@ export class RemoteSolver {
       live: this.setLive,
       npy: this.npy,
       estimate: this.estimate,
+      invert: this.invert,
+      stopInversion: this.stopInversion,
+      resumeInversion: this.resumeInversion,
+      inversionView: this.setInversionView,
+      modelNpy: this.modelNpy,
     }[message.type];
     handler?.call(this, message);
   }
@@ -82,17 +92,24 @@ export class RemoteSolver {
 
   async load({ toml, name }) {
     this.forget();
+    // A newer load replaces this one: it deletes the run this one set up, or this one does,
+    // and nothing is reported for it.
+    const mine = (this.loads = (this.loads ?? 0) + 1);
+    const replaced = () => mine !== this.loads;
     try {
       const created = await json("POST", `/api/runs?name=${encodeURIComponent(name ?? "page.toml")}`, toml);
+      if (replaced()) return call("DELETE", run(created.id)).catch(() => {});
       this.id = created.id;
       this.unstarted = true;
       if (created.needs.length) {
         throw new Error(`model files (${created.needs.join(", ")}) can only be sent from the command line`);
       }
       const s = await json("POST", run(created.id, "/start?paused=true"));
+      if (replaced()) return;
       this.send({ type: "loaded", info: s.info, id: s.id });
       this.send({ type: "state", running: false });
     } catch (e) {
+      if (replaced()) return;
       this.send({ type: "state", running: false });
       this.fail("load", e);
     }
@@ -100,10 +117,11 @@ export class RemoteSolver {
 
   /// Picks up a run already on the server.
   async attach({ id }) {
-    this.forget();
     try {
       const s = await json("GET", run(id));
       if (!s.info) throw new Error("that run hasn't been set up yet");
+      if (s.kind === "inversion") return await this.attachInversion(s);
+      this.forget();
       this.id = id;
       const toml = await (await call("GET", run(id, "/config"))).text();
       this.send({ type: "loaded", info: s.info, id, toml, name: s.name });
@@ -164,12 +182,109 @@ export class RemoteSolver {
     }
   }
 
-  async estimate({ toml, id }) {
+  async estimate({ toml, id, kind }) {
     try {
-      const memory = await json("POST", "/api/estimate", toml);
+      const memory = await json("POST", `/api/estimate${kind ? `?kind=${kind}` : ""}`, toml);
       this.send({ type: "estimate", id, memory: { ...memory, where: "server" } });
     } catch (e) {
       this.send({ type: "estimate", id, error: String(e?.message ?? e) });
+    }
+  }
+
+  /// Starts an inversion on the server: the start's configuration, then its true model.
+  async invert({ start, truth, name }) {
+    try {
+      const created = await json("POST", `/api/runs?name=${encodeURIComponent(name ?? "inversion.toml")}&kind=inversion`, start);
+      await call("PUT", run(created.id, "/files/truth.toml"), truth);
+      const s = await json("POST", run(created.id, "/start"));
+      this.inversion = s.id;
+      this.reportInversion(s);
+      this.followInversion();
+    } catch (e) {
+      this.send({ type: "inversion", status: null, running: false });
+      this.fail("invert", e);
+    }
+  }
+
+  /// Picks up an inversion already on the server: its start, its truth, where it is.
+  async attachInversion(s) {
+    const start = await (await call("GET", run(s.id, "/config"))).text();
+    const truth = await (await call("GET", run(s.id, "/files/truth.toml"))).text();
+    this.inversion = s.id;
+    this.send({ type: "inversionAttached", id: s.id, start, truth, name: s.name });
+    await this.reportInversion(s);
+    if (s.phase === "running") this.followInversion();
+  }
+
+  async stopInversion() {
+    if (!this.inversion) return;
+    try {
+      await json("POST", run(this.inversion, "/pause"));
+    } catch {}
+  }
+
+  async resumeInversion() {
+    if (!this.inversion) return;
+    try {
+      await json("POST", run(this.inversion, "/resume"));
+      this.followInversion();
+    } catch (e) {
+      this.fail("invert", e);
+    }
+  }
+
+  async setInversionView({ view }) {
+    this.inversionView = { ...this.inversionView, ...view };
+    if (this.inversion && !this.following) await this.inversionFrame();
+  }
+
+  async modelNpy({ parameter }) {
+    try {
+      const response = await call("GET", run(this.inversion, `/outputs/${parameter}.npy`));
+      this.send({ type: "modelNpy", parameter, bytes: new Uint8Array(await response.arrayBuffer()) });
+    } catch (e) {
+      this.fail("download", e);
+    }
+  }
+
+  /// Follows the inversion while it runs: its status and a picture after each poll.
+  async followInversion() {
+    if (this.following) return;
+    this.following = true;
+    const id = this.inversion;
+    try {
+      while (!this.stopped && this.inversion === id) {
+        const s = await json("GET", run(id));
+        const ongoing = await this.reportInversion(s);
+        if (!ongoing) break;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } catch (e) {
+      this.fail("invert", e);
+    } finally {
+      this.following = false;
+    }
+  }
+
+  /// Sends an inversion's status and picture; whether it is still running.
+  async reportInversion(s) {
+    const running = s.phase === "running";
+    this.send({ type: "inversion", id: s.id, status: s.inversion, running });
+    await this.inversionFrame();
+    if (s.phase === "failed" || s.phase === "interrupted") this.fail("invert", s.error ?? s.phase);
+    return running;
+  }
+
+  async inversionFrame() {
+    const v = this.inversionView;
+    const query = new URLSearchParams({ parameter: v.parameter, show: v.show, plane: v.plane, index: v.index, gain: v.gain });
+    try {
+      const response = await call("GET", run(this.inversion, `/model?${query}`));
+      const clip = Number(response.headers.get("X-Clip"));
+      const low = Number(response.headers.get("X-Low"));
+      this.send({ type: "inversionFrame", section: await bitmap(response), clip, low });
+    } catch (e) {
+      this.send({ type: "inversionFrame", section: null, note: String(e?.message ?? e) });
     }
   }
 

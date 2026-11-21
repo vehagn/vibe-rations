@@ -20,6 +20,9 @@ threads = ["dep:wasm-bindgen-rayon"]
 [dependencies]
 anyhow = "1"
 serde_json = "1"
+# Edits the configuration for the page's form, keeping its comments.
+toml = "1"
+toml_edit = "0.25.20"
 vibe-rations = { path = "..", default-features = false }
 # Must match the wasm-bindgen CLI exactly: WASM_BINDGEN_VERSION in .devcontainer/Containerfile
 # and web/Containerfile.
