@@ -2031,6 +2031,54 @@ remain the best for $v_s$ and the phase misfit for $v_p$, and neither recovers t
 
 **Reproduce:** `just in marmousi2-study stages_with_receivers_side` (65 minutes on four cores).
 
+## 2026-11-21 — Marmousi2: L2 with the slow seafloor waves muted
+
+**Question.** The slow waves along the seafloor carry most of the start's misfit and turn its
+gradient away from the truth below 750 m (2026-11-21, "Where Marmousi2's misfit lies"). Muting
+them, as Warner et al. did with the Scholte waves of their ocean-bottom data [@warner2013]
+and as Prieux et al. left them out of theirs [@prieux2013b], should leave a misfit whose
+gradient points the right way. Does it, with L2 alone?
+
+**Method** (`tests/marmousi2_study.rs`, `muted_l2`; `[[inversion.mute]]`, 2026-11-21, "Mutes
+and windows"). As the earlier variants, five L2 iterations, with one mute in every stage: keep
+what arrives before $t = |\Delta x| / 600\ \text{m/s} + 0.87$ s, over a half-cosine taper of
+0.42 s (half the dominant period, the least the mutes' entry recommends) to zero. $t_0$ is the
+earliest a slow wave can leave the seafloor below the source (the first entry); at 600 m/s the
+weight is zero by the time the start's 400 m/s waves arrive at 0.5 km (2.12 s) and 0.4 s before
+them at 1 km. The mute applies to observed and synthetic traces alike. The study still reports
+the L2 misfit of *all* the data, muted or not.
+
+**Results.**
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| L2 | 57.9% | $v_p$ | 0.900, +0.44 | 0.994, +0.12 | 1.020, −0.15 | 1.001, −0.02 | 1.003, −0.24 |
+| | | $v_s$ | 0.973, +0.25 | 1.095, −0.15 | 1.070, −0.17 | 0.999, +0.04 | 0.999, +0.15 |
+| L2, muted | 85.7% | $v_p$ | 0.916, +0.44 | 0.971, +0.35 | 0.999, +0.05 | 1.000, −0.03 | 1.001, −0.29 |
+| | | $v_s$ | 0.970, +0.26 | 1.004, −0.05 | 1.001, −0.05 | 1.000, +0.04 | 1.000, +0.13 |
+
+Over every free node: $v_p$ 0.999, $v_s$ 1.000 (L2: 1.001, 1.004). The muted misfit fell from
+0.332 after the first iteration to 0.240 after the fifth, every step the full one at the first
+trial. 2,769 s in all, as L2 (the mute costs nothing measurable).
+
+- *Muting stops the damage.* $v_s$ below 750 m no longer moves away (1.004 and 1.001 against
+  1.095 and 1.070); its cosines there are about zero (−0.05), so it barely moves at all, which
+  says the waves left (P, and S waves faster than 600 m/s) see little $v_s$ at these depths.
+- *$v_p$ gains.* At 750–1000 m it moves as the phase misfit made it (0.971, cosine +0.35, against
+  L2's 0.994), and at 1000–1500 m it no longer turns away (0.999, +0.05, against 1.020, −0.15):
+  the first variant whose $v_p$ is nearer the truth over every free node. The top band is a
+  little behind L2's (0.916 against 0.900); the deepest band's cosine is negative in every
+  variant (−0.24 to −0.29), a change of 0.1%.
+- It fits less of the data (85.7% of the L2 misfit against 57.9%), as it should: the slow
+  waves are still mispredicted, and no longer what the inversion fits.
+
+**Decision.** Mute the slow seafloor waves: with them gone, L2 improves $v_p$ down to 1 km and
+leaves $v_s$ unharmed. $v_s$ below 750 m needs data that see it, so the next runs try the mute
+with the frequency stages (whose low frequencies helped $v_s$ at 750–1000 m before), and
+down-weighting instead of removing.
+
+**Reproduce:** `just in marmousi2-study muted_l2` (46 minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
