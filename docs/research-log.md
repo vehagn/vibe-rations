@@ -1875,8 +1875,9 @@ last digit (the deepest band now reaches 3125 m, the last free node, where it st
   same from the first stage on, so the low frequencies already see it the wrong way.
 - *They fit much less of the data* (93.2% of the L2 misfit against 57.9%) and do less for $v_p$
   at the top (0.976 against 0.900): of five iterations, four run on 0.6 and 1 Hz, where a 1.2
-  Hz Ricker has little energy (below 0.6 Hz the stage's own misfit is 2.8 times the full
-  band's, because the balance weights each stage's filtered data by its own small energy),
+  Hz Ricker has little energy (after its first iteration the 0.6 Hz stage's own misfit, 1.86,
+  is 2.8 times the full band's at the start, because the balance weights each stage's
+  filtered data by its own, small, energy),
   and each stage's first step is held to 2%.
 - Where the slow waves are more than about a period off (the first entry's 2 s at 0.8 s), even
   0.6 Hz isn't low enough: half a period at 0.6 Hz is 0.8 s, and the data have nothing much
