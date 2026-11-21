@@ -19,6 +19,7 @@ opens a shell there instead.
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
@@ -97,9 +98,12 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  interfaces.rs  plane waves at a planar interface, by position, sampling and order (ignored;
+                 `just interfaces`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
   reconstruction.rs  the rebuilt wavefield's drift (ignored; `just drift`)
-  common/        closed-form solutions and setup helpers the two share
+  common/        closed-form solutions and setup helpers the two share; plane.rs: plane waves
+                 at normal incidence on an interface, kept exactly 1D, and their exact answer
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -134,6 +138,22 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
+
+- **Interfaces** (`just interfaces`, `tests/common/plane.rs`; the log's "A planar
+  interface"). Layers are sampled at the nodes, so an interface acts midway between the
+  last node above it and the first below, wherever it lies: a layer's top on a node (both
+  of `examples/layered.toml`'s interfaces are) reflects $h/v$ early, a first-order error
+  (reflection misfit 35% for P, 57% for S at 20 and 11.6 ppw at $f_0$; transmission 6–7%).
+  Midway it is second order and the same at orders 4 to 16: at interfaces the model's
+  sampling, not the stencil, sets the error. Band-limiting density and the compliances
+  $1/\rho v_p^2$, $1/\rho v_s^2$ (a sinc tapered over ±4 nodes) makes the reflection
+  independent of the interface's position (P 1.2%, S 12.6%, second order); band-limiting
+  the moduli themselves leaves a position error, as arithmetic moduli would. Not adopted
+  yet: it changes every layered model and the baselines built on them, and a fluid needs
+  its own rule (a compliance band-limited into water would make $\mu$ zero four nodes
+  out). The test grid stays exactly 1D only because the values outside its sides copy the
+  nearest node's every half step (`extend_sideways`): with ordinary edges, waves from the
+  sides spoilt the transmitted P wave by 5% at 10 nodes from them, and by 1% at 30.
 
 - **The misfits meet the web page** (merged 2026-11-21). `InversionConfig.iterations` is now
   an `Option` (stages give their own), so ask `InversionConfig::stages()` how many iterations
@@ -395,7 +415,9 @@ doesn't show.
 - **Physics test baselines at the default, order 8 with optimised coefficients at
   $C = 0.85$, the time error removed** (fail if they get worse; update this list if they get
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
-  free-surface P doubling 2.52% (mostly the reference, above); CPML reflection
+  free-surface P doubling 2.52% (mostly the reference, above); a planar interface midway
+  between nodes, plane P and S waves, direct 0.010% and 0.026%, reflected 0.72% and 7.5%,
+  transmitted 0.078% and 0.44%; CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
   reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
   $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
