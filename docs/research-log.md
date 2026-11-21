@@ -1936,6 +1936,57 @@ they would do least of the three holds so far; the phase misfit is next.
 
 **Reproduce:** `just in marmousi2-study time_shifts_then_l2` (56 minutes on four cores).
 
+## 2026-11-21 — Marmousi2: the phase misfit, then L2
+
+**Question.** The time–frequency phase misfit compares the phases of the traces' local spectra,
+weighted towards where the observed data have energy, and doesn't cycle-skip while each
+phase difference is under $\pi$ [@fichtner2008]. Three iterations of it, then two of L2?
+
+**Method** (`tests/marmousi2_study.rs`, `phase_then_l2`). As the previous entries, with
+`misfit = "phase"` for three iterations (its scale $f_0$ is the sources' dominant frequency,
+1.2 Hz, the stage being unfiltered), then L2 for two.
+
+**Results.**
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| phase (3) | 95.4% | $v_p$ | 0.941, +0.50 | 0.949, +0.42 | 0.999, +0.05 | 1.002, −0.06 | 1.000, −0.00 |
+| | | $v_s$ | 1.004, −0.06 | 1.005, −0.09 | 1.006, −0.27 | 1.000, +0.06 | 1.000, −0.02 |
+| then L2 (2) | 80.0% | $v_p$ | 0.908, +0.53 | 0.951, +0.36 | 1.005, +0.00 | 1.002, −0.06 | 1.001, −0.07 |
+| | | $v_s$ | 0.992, +0.12 | 1.026, −0.14 | 1.022, −0.21 | 0.999, +0.05 | 1.000, +0.03 |
+
+Every step was the full one at the first trial; the phase misfit fell from 1.399 after its
+first iteration to 1.214 after its third. 3,066 s in all.
+
+- *The phase misfit moves $v_p$, and moves it right*: after three iterations it has the best
+  $v_p$ of every variant below 750 m (0.949 at 750–1000 m, where L2 reaches 0.994 in five), and
+  its cosines stay positive down to 1.5 km, where L2's and the stages' turn negative.
+- *It leaves $v_s$ alone, slightly the wrong way* (−0.06 to −0.27), and two L2 iterations
+  afterwards turn $v_s$ the way L2 does (−0.14, −0.21 below 750 m).
+- A plausible reading, not tested: the phase weights each time–frequency cell by the observed
+  data's energy there, but compares only phases, so the loud, slow, mispredicted arrivals at
+  near offsets weigh less than in L2, and the P and early S arrivals, which see $v_p$, count
+  for more.
+
+**All four, after five iterations** ($v_p$ / $v_s$ error ratio):
+
+| | L2 left | 500–750 m | 750–1000 m | 1000–1500 m |
+|---|---|---|---|---|
+| L2 | 57.9% | 0.900 / 0.973 | 0.994 / 1.095 | 1.020 / 1.070 |
+| stages, 0.6 → 1 Hz → all | 93.2% | 0.976 / **0.946** | 1.001 / **0.987** | 1.020 / 1.044 |
+| time shifts, then L2 | 83.5% | 0.958 / 0.990 | 0.996 / 1.018 | 1.005 / **1.016** |
+| phase, then L2 | 80.0% | 0.908 / 0.992 | **0.951** / 1.026 | 1.005 / 1.022 |
+
+None recovers $v_s$ below 1 km; each moves it away there, the time shifts least because they
+hardly move anything. Below 1.5 km nothing changes by more than 0.3%.
+
+**Decision.** For $v_s$, which the slow waves spoil, the stages are the best of the four; for
+$v_p$, the phase misfit. The receivers' side of the illumination is tried with the stages
+(next entry). The phase misfit's way with $v_p$ suggests running it before the stages, or
+alone for $v_p$, once the slow waves are muted; that waits for `feat/mutes`.
+
+**Reproduce:** `just in marmousi2-study phase_then_l2` (51 minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
