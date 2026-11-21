@@ -2,11 +2,58 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::ModelConfig;
 use crate::grid::Grid;
 use crate::npy;
+
+/// Where a configuration's `[model.files]` come from: the disk, relative to a directory, or
+/// bytes held in memory under the names the configuration gives them, as in a browser, which
+/// has no files.
+#[derive(Clone, Copy, Debug)]
+pub enum Files<'a> {
+    Dir(&'a Path),
+    Memory(&'a [(String, Vec<u8>)]),
+}
+
+impl Files<'_> {
+    /// The array `name` holds, and its shape.
+    fn read(&self, name: &Path) -> Result<(Vec<usize>, Vec<f32>)> {
+        match self {
+            Files::Dir(base) => {
+                let path = base.join(name);
+                npy::read(&path).with_context(|| format!("reading {}", path.display()))
+            }
+            Files::Memory(files) => {
+                let (_, bytes) = files
+                    .iter()
+                    .find(|(n, _)| Path::new(n) == name)
+                    .with_context(|| format!("{} wasn't given", name.display()))?;
+                npy::parse(bytes).with_context(|| format!("reading {}", name.display()))
+            }
+        }
+    }
+}
+
+/// Whether an array of `shape` is a section, (nz, nx), the same at every y, rather than the
+/// whole grid, (nz, ny, nx); an error if it is neither.
+fn is_section(shape: &[usize], grid: Grid, name: &Path) -> Result<bool> {
+    let [nx, ny, nz] = grid.n;
+    if shape == [nz, ny, nx] {
+        Ok(false)
+    } else if shape == [nz, nx] {
+        Ok(true)
+    } else {
+        bail!(
+            "{} has shape {shape:?}; the grid needs (nz, ny, nx) = {:?}, or (nz, nx) = {:?} \
+             for a section the same at every y",
+            name.display(),
+            [nz, ny, nx],
+            [nz, nx]
+        )
+    }
+}
 
 /// Isotropic elastic properties at every interior node, x fastest.
 #[derive(Clone, Debug)]
@@ -34,28 +81,35 @@ impl Model {
     /// Builds the model a configuration describes; `base` is the directory `.npy` paths are
     /// relative to.
     pub fn from_config(grid: Grid, cfg: &ModelConfig, base: &Path) -> Result<Self> {
+        Self::from_files(grid, cfg, Files::Dir(base))
+    }
+
+    /// Builds the model a configuration describes, its files from `files`. A file is either
+    /// the whole grid, (nz, ny, nx), or a section, (nz, nx), repeated along y: a 2.5D model.
+    pub fn from_files(grid: Grid, cfg: &ModelConfig, files: Files) -> Result<Self> {
         let mut model = match (&cfg.files, cfg.layers.is_empty()) {
-            (Some(_), false) => anyhow::bail!("the model takes either layers or files, not both"),
-            (None, true) => anyhow::bail!("the model needs [[model.layer]]s or [model.files]"),
+            (Some(_), false) => bail!("the model takes either layers or files, not both"),
+            (None, true) => bail!("the model needs [[model.layer]]s or [model.files]"),
             (None, false) => Self::layered(grid, cfg)?,
-            (Some(files), true) => {
+            (Some(names), true) => {
                 let load = |p: &Path| -> Result<Vec<f32>> {
-                    let path = base.join(p);
-                    let (shape, data) =
-                        npy::read(&path).with_context(|| format!("reading {}", path.display()))?;
-                    let want = [grid.n[2], grid.n[1], grid.n[0]];
-                    ensure!(
-                        shape == want,
-                        "{} has shape {shape:?}; the grid needs (nz, ny, nx) = {want:?}",
-                        path.display()
-                    );
-                    Ok(data)
+                    let (shape, data) = files.read(p)?;
+                    if !is_section(&shape, grid, p)? {
+                        return Ok(data);
+                    }
+                    let mut all = Vec::with_capacity(grid.interior_len());
+                    for row in data.chunks_exact(grid.n[0]) {
+                        for _ in 0..grid.n[1] {
+                            all.extend_from_slice(row);
+                        }
+                    }
+                    Ok(all)
                 };
                 Self {
                     grid,
-                    vp: load(&files.vp)?,
-                    vs: load(&files.vs)?,
-                    rho: load(&files.rho)?,
+                    vp: load(&names.vp)?,
+                    vs: load(&names.vs)?,
+                    rho: load(&names.rho)?,
                 }
             }
         };
@@ -73,6 +127,12 @@ impl Model {
     /// the files, read through a piece at a time. A layer that spheres cover entirely still
     /// counts, so in that rare case the answer is conservative.
     pub fn extremes(grid: Grid, cfg: &ModelConfig, base: &Path) -> Result<[f64; 2]> {
+        Self::extremes_in(grid, cfg, Files::Dir(base))
+    }
+
+    /// [`Model::extremes`] with the files from `files`: files on disk are streamed, files in
+    /// memory read whole.
+    pub fn extremes_in(grid: Grid, cfg: &ModelConfig, files: Files) -> Result<[f64; 2]> {
         let slow = |vp: f64, vs: f64| if vs > 0.0 { vs } else { vp };
         let (mut fast, mut slowest) = (f64::NEG_INFINITY, f64::INFINITY);
         let mut take = |vp: f64, vs: f64| {
@@ -80,8 +140,8 @@ impl Model {
             slowest = slowest.min(slow(vp, vs));
         };
         match (&cfg.files, cfg.layers.is_empty()) {
-            (Some(_), false) => anyhow::bail!("the model takes either layers or files, not both"),
-            (None, true) => anyhow::bail!("the model needs [[model.layer]]s or [model.files]"),
+            (Some(_), false) => bail!("the model takes either layers or files, not both"),
+            (None, true) => bail!("the model needs [[model.layer]]s or [model.files]"),
             (None, false) => {
                 let mut layers = cfg.layers.clone();
                 layers.sort_by(|a, b| a.top.total_cmp(&b.top));
@@ -99,29 +159,49 @@ impl Model {
                     take(layer.vp, layer.vs);
                 }
             }
-            (Some(files), true) => {
-                let want = vec![grid.n[2], grid.n[1], grid.n[0]];
-                let open = |p: &Path| -> Result<npy::Stream> {
-                    let path = base.join(p);
-                    let s = npy::stream(&path)
-                        .with_context(|| format!("reading {}", path.display()))?;
+            // A section's values are the grid's, so its extremes are too.
+            (Some(names), true) => match files {
+                Files::Dir(base) => {
+                    let open = |p: &Path| -> Result<npy::Stream> {
+                        let path = base.join(p);
+                        let s = npy::stream(&path)
+                            .with_context(|| format!("reading {}", path.display()))?;
+                        is_section(&s.shape, grid, &path)?;
+                        Ok(s)
+                    };
+                    let (mut vp, mut vs) = (open(&names.vp)?, open(&names.vs)?);
                     ensure!(
-                        s.shape == want,
-                        "{} has shape {:?}; the grid needs (nz, ny, nx) = {want:?}",
-                        path.display(),
-                        s.shape
+                        vp.shape == vs.shape,
+                        "{} and {} differ in shape",
+                        names.vp.display(),
+                        names.vs.display()
                     );
-                    Ok(s)
-                };
-                let (mut vp, mut vs) = (open(&files.vp)?, open(&files.vs)?);
-                let (mut a, mut b) = (Vec::new(), Vec::new());
-                while vp.next_chunk(&mut a, 1 << 16)? {
-                    vs.next_chunk(&mut b, 1 << 16)?;
-                    for (&p, &s) in a.iter().zip(&b) {
+                    let (mut a, mut b) = (Vec::new(), Vec::new());
+                    while vp.next_chunk(&mut a, 1 << 16)? {
+                        vs.next_chunk(&mut b, 1 << 16)?;
+                        for (&p, &s) in a.iter().zip(&b) {
+                            take(p as f64, s as f64);
+                        }
+                    }
+                }
+                Files::Memory(_) => {
+                    let read = |p: &Path| -> Result<Vec<f32>> {
+                        let (shape, data) = files.read(p)?;
+                        is_section(&shape, grid, p)?;
+                        Ok(data)
+                    };
+                    let (vp, vs) = (read(&names.vp)?, read(&names.vs)?);
+                    ensure!(
+                        vp.len() == vs.len(),
+                        "{} and {} differ in shape",
+                        names.vp.display(),
+                        names.vs.display()
+                    );
+                    for (&p, &s) in vp.iter().zip(&vs) {
                         take(p as f64, s as f64);
                     }
                 }
-            }
+            },
         }
         for s in &cfg.spheres {
             // The node nearest the centre: the distance is a sum over the axes, so the nearest
@@ -344,6 +424,51 @@ mod tests {
         let wrong = Grid::new([3, 4, 2], [10.0; 3]);
         let e = format!("{:#}", Model::from_config(wrong, &cfg, &dir).unwrap_err());
         assert!(e.contains("shape"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeats_a_section_along_y_from_disk_or_memory() {
+        let dir = std::env::temp_dir().join(format!("vibe-rations-section-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = Grid::new([4, 3, 2], [10.0; 3]);
+        // (nz, nx) = (2, 4): a value per x and z.
+        let section = |base: f32| (0..8).map(|n| base + n as f32).collect::<Vec<_>>();
+        let mut held = Vec::new();
+        for (name, base) in [("vp", 3000.0), ("vs", 1500.0), ("rho", 2500.0)] {
+            let path = dir.join(format!("{name}.npy"));
+            npy::write(&path, &[2, 4], &section(base)).unwrap();
+            held.push((format!("{name}.npy"), std::fs::read(&path).unwrap()));
+        }
+        let cfg = ModelConfig {
+            layers: vec![],
+            files: Some(ModelFiles {
+                vp: "vp.npy".into(),
+                vs: "vs.npy".into(),
+                rho: "rho.npy".into(),
+            }),
+            spheres: vec![],
+        };
+        let from_disk = Model::from_config(g, &cfg, &dir).unwrap();
+        let from_memory = Model::from_files(g, &cfg, Files::Memory(&held)).unwrap();
+        for m in [&from_disk, &from_memory] {
+            for j in 0..3 {
+                assert_eq!(m.vp[g.interior_idx(3, j, 1)], 3007.0);
+                assert_eq!(m.vs[g.interior_idx(1, j, 0)], 1501.0);
+            }
+        }
+        assert_eq!(from_disk.rho, from_memory.rho);
+        let extremes = [
+            Model::extremes(g, &cfg, &dir).unwrap(),
+            Model::extremes_in(g, &cfg, Files::Memory(&held)).unwrap(),
+        ];
+        assert_eq!(extremes, [[3007.0, 1500.0]; 2]);
+        // A file the configuration names but memory doesn't hold.
+        let e = format!(
+            "{:#}",
+            Model::from_files(g, &cfg, Files::Memory(&held[..2])).unwrap_err()
+        );
+        assert!(e.contains("rho.npy wasn't given"), "{e}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

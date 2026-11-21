@@ -506,8 +506,6 @@ fn extrude_makes_model_files_a_configuration_can_use() {
         "1",
         "--spacing",
         "2",
-        "--ny",
-        "25",
     ];
     let mut args = common.to_vec();
     args.extend([
@@ -523,11 +521,15 @@ fn extrude_makes_model_files_a_configuration_can_use() {
     let out = vibe(&args);
     assert!(out.status.success(), "{}", stderr(&out));
     let printed = String::from_utf8_lossy(&out.stdout);
-    assert!(printed.contains("points = [31, 25, 21]"), "{printed}");
+    assert!(
+        printed.contains("points = [31, <ny: any>, 21]"),
+        "{printed}"
+    );
+    // Sections, (nz, nx), which the configuration below repeats over its 25 nodes along y.
     for name in ["vp", "vs", "rho"] {
         let file = dir.join("model").join(format!("{name}.npy"));
         let (shape, _) = vibe_rations::npy::read(&file).unwrap();
-        assert_eq!(shape, [21, 25, 31]);
+        assert_eq!(shape, [21, 31]);
     }
     // Smoothed, the S speeds still climb to the right, inside the range they had.
     let (_, speeds) = vibe_rations::npy::read(&dir.join("model/vs.npy")).unwrap();

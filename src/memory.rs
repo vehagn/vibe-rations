@@ -20,7 +20,7 @@ use crate::fd::Stencil;
 use crate::gradient::{Strategy, checkpoint_interval, reconstruction_segment};
 use crate::grid::Grid;
 use crate::misfit::{Measure, Misfit};
-use crate::model::Model;
+use crate::model::{Files, Model};
 use crate::receiver::Component;
 use crate::simulation::timing;
 use crate::solver::{Band, BandSize};
@@ -383,7 +383,12 @@ fn part(what: impl Into<String>, bytes: u64) -> Part {
 /// spheres, or from its files read through a piece at a time. `base` is the directory relative
 /// paths start from.
 pub fn estimate(cfg: &Config, base: &Path) -> Result<Memory> {
-    Ok(plan(cfg, base)?.memory())
+    estimate_with(cfg, Files::Dir(base))
+}
+
+/// [`estimate`] with the model's files from `files`, e.g. held in memory by a browser.
+pub fn estimate_with(cfg: &Config, files: Files) -> Result<Memory> {
+    Ok(plan(cfg, files)?.memory())
 }
 
 /// The memory a gradient run of `cfg` would need ([`Plan::gradient_memory`]), worked out like
@@ -393,13 +398,13 @@ pub fn estimate_gradient(
     base: &Path,
     checkpoint_every: Option<usize>,
 ) -> Result<Memory> {
-    Ok(plan(cfg, base)?.gradient_memory(checkpoint_every))
+    Ok(plan(cfg, Files::Dir(base))?.gradient_memory(checkpoint_every))
 }
 
 /// The memory a gradient run of `cfg` that gets the forward wavefield back as `strategy`
 /// says would need ([`Plan::strategy_memory`]), worked out like [`estimate`].
 pub fn estimate_gradient_with(cfg: &Config, base: &Path, strategy: Strategy) -> Result<Memory> {
-    Ok(plan(cfg, base)?.strategy_memory(strategy))
+    Ok(plan(cfg, Files::Dir(base))?.strategy_memory(strategy))
 }
 
 /// The memory an inversion of `cfg` (`invert`) would need ([`Plan::inversion_memory`]),
@@ -466,16 +471,16 @@ pub fn estimate_synthetic_inversion(cfg: &Config, base: &Path) -> Result<Memory>
     Ok(Memory::of(parts))
 }
 
-fn plan(cfg: &Config, base: &Path) -> Result<Plan> {
-    let (grid, steps) = timed(cfg, base)?;
+fn plan(cfg: &Config, files: Files) -> Result<Plan> {
+    let (grid, steps) = timed(cfg, files)?;
     Plan::new(cfg, grid, steps)
 }
 
 /// The grid with its halo, and the steps of the run.
-fn timed(cfg: &Config, base: &Path) -> Result<(Grid, usize)> {
+fn timed(cfg: &Config, files: Files) -> Result<(Grid, usize)> {
     let taylor = Stencil::taylor(cfg.scheme.order)?;
     let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
-    let [vp_max, slowest] = Model::extremes(grid, &cfg.model, base)?;
+    let [vp_max, slowest] = Model::extremes_in(grid, &cfg.model, files)?;
     Ok((grid, timing(cfg, &grid, vp_max, slowest)?.steps))
 }
 

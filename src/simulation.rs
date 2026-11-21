@@ -16,7 +16,7 @@ use crate::fd::Stencil;
 use crate::grid::Grid;
 use crate::image;
 use crate::memory::{Memory, Plan, human};
-use crate::model::Model;
+use crate::model::{Files, Model};
 use crate::npy;
 use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
@@ -209,8 +209,13 @@ pub(crate) fn timing(cfg: &Config, grid: &Grid, vp_max: f64, slowest: f64) -> Re
 impl Simulation {
     /// Sets up a run; `base` is the directory relative paths in the configuration start from.
     pub fn new(cfg: &Config, base: &Path) -> Result<Self> {
-        // from_config validates the model.
-        let model = Model::from_config(Self::grid(cfg)?, &cfg.model, base)?;
+        Self::with_files(cfg, Files::Dir(base))
+    }
+
+    /// Sets up a run with the model's files from `files`, e.g. held in memory by a browser.
+    pub fn with_files(cfg: &Config, files: Files) -> Result<Self> {
+        // from_files validates the model.
+        let model = Model::from_files(Self::grid(cfg)?, &cfg.model, files)?;
         Self::set_up(cfg, model)
     }
 

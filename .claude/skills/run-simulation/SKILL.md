@@ -14,6 +14,11 @@ Copy the closest of `examples/explosion.toml` (homogeneous half-space, explosion
 into `examples/` for a new example (`tests/examples.rs` then requires it to set up without
 warnings). Every key is documented in `src/config.rs`; unknown keys are errors.
 
+For a realistic model, `[model.files]` takes `.npy` arrays, (nz, ny, nx) or a section
+(nz, nx) repeated along y; `vibe-rations extrude` makes them from 2D SEG-Y sections.
+`examples/marmousi2-50m.toml`, `examples/marmousi2-central.toml` and `examples/marmousi2/`
+use Marmousi2 (after `just marmousi2`).
+
 Positions are metres from the first node; z points down; with `free_surface = true`
 (default) z = 0 is the surface.
 

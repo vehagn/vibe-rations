@@ -53,8 +53,12 @@ fn header(shape: &[usize], len: usize) -> Result<Vec<u8>> {
 
 /// Reads an array of float32 or float64 values, as float32.
 pub fn read(path: &Path) -> Result<(Vec<usize>, Vec<f32>)> {
-    let bytes = fs::read(path)?;
-    let h = parse_header(&bytes)?;
+    parse(&fs::read(path)?)
+}
+
+/// An array of float32 or float64 values held in memory, as float32: its shape and values.
+pub fn parse(bytes: &[u8]) -> Result<(Vec<usize>, Vec<f32>)> {
+    let h = parse_header(bytes)?;
     let count: usize = h.shape.iter().product();
     let data = &bytes[h.data_start..];
     let width = if h.wide { 8 } else { 4 };

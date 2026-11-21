@@ -31,9 +31,9 @@ order = 8
 optimised_for = 4.2  # the true model's points per shortest wavelength at 3 Hz
 
 [model.files]
-vp = "../../data/marmousi2/25m-central-smooth/vp.npy"
-vs = "../../data/marmousi2/25m-central-smooth/vs.npy"
-rho = "../../data/marmousi2/25m-central/rho.npy"  # as it is: only vp and vs are inverted
+vp = "25m-central-smooth/vp.npy"
+vs = "25m-central-smooth/vs.npy"
+rho = "25m-central/rho.npy"  # as it is: only vp and vs are inverted
 
 [[source]]
 position = [1000.0, 500.0, 50.0]

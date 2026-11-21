@@ -98,6 +98,12 @@ Web Worker per core; otherwise it runs on one thread. `?threads=N` picks the num
 `?example=layered` an example. Measured on a 10-core Apple Silicon Mac with the explosion
 example: one thread 51 Mcell/s, ten threads 234 Mcell/s.
 
+An example may take its model from `.npy` files (`[model.files]`): `web/build.sh` copies them
+next to it, and the page fetches them, so the browser, which has no files, gets them as the
+command line would. An example whose files aren't there is left out of the build: the
+Marmousi2 ones until `just in marmousi2` has made theirs. Served by `vibe-rations serve`, the
+page uploads them to the server with the configuration.
+
 **Hosting.** `web/Containerfile` builds a 4 MB image: static-web-server, non-root, read-only
 root filesystem, with the headers above (`web/sws.toml`). GitHub Actions publish it to
 `ghcr.io/vehagn/vibe-rations-web` for amd64 and arm64 on every push to `main`
@@ -124,7 +130,7 @@ a free surface $z = 0$ is the surface.
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
-| `[model.files]` | Or `.npy` arrays of shape (nz, ny, nx) for `vp`, `vs`, `rho`, relative to the configuration; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
+| `[model.files]` | Or `.npy` arrays for `vp`, `vs`, `rho`, relative to the configuration: shape (nz, ny, nx), or (nz, nx) for a section the same at every $y$; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
 | `[[model.sphere]]` | Spheres painted over the model |
 | `[[source]]` | `position`, `wavelet` (Ricker or Gaussian), and one of `explosion`, `moment`, `double_couple` (strike, dip, rake, m0) or `force` |
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
@@ -363,19 +369,23 @@ progress are marked interrupted.
 Marmousi2 (Martin, Wiley & Marfurt 2006), the elastic successor of Marmousi (Versteeg 1994),
 is a 17 km section of a faulted margin under 450 m of water, 3.5 km deep, sampled every
 1.25 m. `just marmousi2` downloads it (three SEG-Y files, 467 MB, checked against their
-SHA-256 sums) into `data/marmousi2/`, which git ignores, and makes model files from it with
-`vibe-rations extrude`:
+SHA-256 sums) into `data/marmousi2/` and makes model files from it with `vibe-rations
+extrude`, a few hundred kilobytes each, in `examples/marmousi2/` (both git-ignored):
 
 ```bash
 just in marmousi2                                 # once
 just in run examples/marmousi2/marmousi2.toml     # about a minute
 ```
 
+Two of them run in the web page too, which the image build includes them in:
+`examples/marmousi2-50m.toml`, the whole section decimated to 50 m (1 M nodes, 15 s on ten
+threads of an M1 Max), and `examples/marmousi2-central.toml`, its central 6 km at 25 m (21 s).
+
 `extrude` reads a 2D section as SEG-Y (IBM or IEEE floats), averages it over each node's
 cell (density arithmetically, $\rho v_p^2$ and $\rho v_s^2$ harmonically, the long-wave
 averages across fine layers of Backus 1962; a node is fluid when most of its cell is),
-optionally smooths the solid part for a starting model, and repeats the section along $y$: a
-2.5D model through which the waves spread in 3D. `examples/marmousi2/` has the whole section
+optionally smooths the solid part for a starting model, and writes sections, (nz, nx), which
+a run repeats along $y$: a 2.5D model through which the waves spread in 3D. `examples/marmousi2/` has the whole section
 at 25 m (`marmousi2.toml`: an air gun in the water, ocean-bottom nodes along the seafloor)
 and its central 6 km for gradients and inversion (`central-true.toml`, the model as it is,
 and `central.toml`, the start: $v_p$ and $v_s$ smoothed over 250 m). The sediments under

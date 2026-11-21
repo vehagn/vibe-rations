@@ -3,13 +3,16 @@
 //! of the gather, as RGBA pixels, between chunks.
 //!
 //! The pictures come from [`vibe_rations::view::View`], which `vibe-rations serve` shares;
-//! this crate only checks what a browser can't do and turns errors into JavaScript ones.
+//! this crate only checks what a browser can't do and turns errors into JavaScript ones. A
+//! browser has no files, so the page fetches the model files a configuration names and hands
+//! them over as [`ModelFiles`].
 
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use vibe_rations::config::Config;
 use vibe_rations::memory::{self, Memory};
+use vibe_rations::model::Files;
 use vibe_rations::simulation::Simulation;
 use vibe_rations::view::{self, InversionView, View};
 use wasm_bindgen::prelude::*;
@@ -67,6 +70,25 @@ impl Frame {
     }
 }
 
+/// The model files a configuration names (`Simulator.modelFiles`), by those names, as the
+/// page fetched them.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct ModelFiles(Vec<(String, Vec<u8>)>);
+
+#[wasm_bindgen]
+impl ModelFiles {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> ModelFiles {
+        ModelFiles::default()
+    }
+
+    /// Adds the `.npy` file the configuration calls `name`.
+    pub fn add(&mut self, name: String, bytes: Vec<u8>) {
+        self.0.push((name, bytes));
+    }
+}
+
 /// A simulation the page can step and look at.
 #[wasm_bindgen]
 pub struct Simulator(View);
@@ -77,20 +99,27 @@ fn js(e: anyhow::Error) -> JsError {
 
 #[wasm_bindgen]
 impl Simulator {
+    /// The model files a configuration names, as it names them (relative to it); none if it
+    /// has none, or doesn't parse (setting it up then says why).
+    #[wasm_bindgen(js_name = modelFiles)]
+    pub fn model_files(config: &str) -> Vec<String> {
+        model_files(config)
+    }
+
     /// The memory a configuration would need, as JSON (`memory::Memory`: parts, resident,
-    /// peak, plus the browser's limit), without setting it up.
+    /// peak, plus the browser's limit), without setting it up; `files` holds its model files.
     #[wasm_bindgen(js_name = estimateMemory)]
-    pub fn estimate_memory(config: &str) -> Result<String, JsError> {
-        let m = estimate(config).map_err(js)?;
+    pub fn estimate_memory(config: &str, files: &ModelFiles) -> Result<String, JsError> {
+        let m = estimate(config, &files.0).map_err(js)?;
         let mut value = serde_json::to_value(&m).expect("Memory serialises");
         value["limit"] = serde_json::json!(BROWSER_LIMIT);
         Ok(value.to_string())
     }
 
-    /// Sets up a run from a TOML configuration.
+    /// Sets up a run from a TOML configuration and the model files it names.
     #[wasm_bindgen(constructor)]
-    pub fn new(config: &str) -> Result<Simulator, JsError> {
-        setup(config).map(Simulator).map_err(js)
+    pub fn new(config: &str, files: &ModelFiles) -> Result<Simulator, JsError> {
+        setup(config, &files.0).map(Simulator).map_err(js)
     }
 
     /// The run's settings as JSON: `run.json`'s fields, plus the receivers' positions.
@@ -265,17 +294,35 @@ pub fn synthetic(text: &str, truth: &str, observed: &str) -> Result<String, JsEr
 pub const BROWSER_LIMIT: u64 = 4 << 30;
 const MARGIN: u64 = 128 << 20;
 
-/// The memory a configuration would need in the browser, part by part, without setting it up.
-pub fn estimate(config: &str) -> Result<Memory> {
-    let cfg = browser_config(config)?;
-    memory::estimate(&cfg, Path::new("."))
+/// The model files `config` names, in the order vp, vs, rho, each once.
+pub fn model_files(config: &str) -> Vec<String> {
+    let Ok(cfg) = Config::from_toml(config) else {
+        return vec![];
+    };
+    let mut names = Vec::new();
+    for f in cfg.model.files.iter().flat_map(|f| [&f.vp, &f.vs, &f.rho]) {
+        let name = f.to_string_lossy().into_owned();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
-fn browser_config(config: &str) -> Result<Config> {
+/// The memory a configuration would need in the browser, part by part, without setting it
+/// up; `files` holds its model files by name.
+pub fn estimate(config: &str, files: &[(String, Vec<u8>)]) -> Result<Memory> {
+    memory::estimate_with(&Config::from_toml(config)?, Files::Memory(files))
+}
+
+/// A configuration for an inversion in the browser. Its models come from layers and spheres:
+/// `InversionView` reads model files from a directory, which a browser hasn't got.
+fn inversion_config(config: &str) -> Result<Config> {
     let cfg = Config::from_toml(config)?;
     ensure!(
         cfg.model.files.is_none(),
-        "the browser can't read model files; use [[model.layer]]s and [[model.sphere]]s"
+        "the browser's inversions can't read model files; use [[model.layer]]s and \
+         [[model.sphere]]s, or the run server"
     );
     Ok(cfg)
 }
@@ -283,14 +330,14 @@ fn browser_config(config: &str) -> Result<Config> {
 /// The memory an inversion of synthetic data from the start `config` would need in the
 /// browser.
 pub fn estimate_inversion(config: &str) -> Result<Memory> {
-    let cfg = browser_config(config)?;
+    let cfg = inversion_config(config)?;
     memory::estimate_synthetic_inversion(&cfg, Path::new("."))
 }
 
 /// Sets up an inversion of synthetic data for the browser, if it fits.
 pub fn setup_inversion(start: &str, truth: &str) -> Result<InversionView> {
-    let cfg = browser_config(start)?;
-    let truth = browser_config(truth).context("in the true model")?;
+    let cfg = inversion_config(start)?;
+    let truth = inversion_config(truth).context("in the true model")?;
     let m = memory::estimate_synthetic_inversion(&cfg, Path::new("."))?;
     ensure!(
         m.peak + MARGIN <= BROWSER_LIMIT,
@@ -302,10 +349,11 @@ pub fn setup_inversion(start: &str, truth: &str) -> Result<InversionView> {
     InversionView::new(&cfg, &truth, Path::new("."))
 }
 
-/// Sets a run up for the browser: no model files, and no more memory than WebAssembly has.
-pub fn setup(config: &str) -> Result<View> {
-    let cfg = browser_config(config)?;
-    let m = memory::estimate(&cfg, Path::new("."))?;
+/// Sets a run up for the browser, its model files from `files`: no more memory than
+/// WebAssembly has.
+pub fn setup(config: &str, files: &[(String, Vec<u8>)]) -> Result<View> {
+    let cfg = Config::from_toml(config)?;
+    let m = memory::estimate_with(&cfg, Files::Memory(files))?;
     ensure!(
         m.peak + MARGIN <= BROWSER_LIMIT,
         "this run needs {} of memory, and a browser gives WebAssembly at most {}; use a \
@@ -313,7 +361,10 @@ pub fn setup(config: &str) -> Result<View> {
         memory::human(m.peak),
         memory::human(BROWSER_LIMIT)
     );
-    Ok(View::new(Simulation::new(&cfg, Path::new("."))?))
+    Ok(View::new(Simulation::with_files(
+        &cfg,
+        Files::Memory(files),
+    )?))
 }
 
 #[cfg(test)]
@@ -347,17 +398,17 @@ mod tests {
 
     #[test]
     fn sets_up_and_steps() {
-        let mut v = setup(CONFIG).unwrap();
+        let mut v = setup(CONFIG, &[]).unwrap();
         assert_eq!(v.advance(5, None).unwrap(), 5);
     }
 
     #[test]
     fn estimates_memory_and_refuses_runs_too_large_for_the_browser() {
-        let m = estimate(CONFIG).unwrap();
-        assert_eq!(m, setup(CONFIG).unwrap().sim.info.memory);
-        let e = format!("{:#}", setup(&grown(CONFIG)).err().unwrap());
+        let m = estimate(CONFIG, &[]).unwrap();
+        assert_eq!(m, setup(CONFIG, &[]).unwrap().sim.info.memory);
+        let e = format!("{:#}", setup(&grown(CONFIG), &[]).err().unwrap());
         assert!(e.contains("at most 4.00 GiB"), "{e}");
-        assert!(estimate(&grown(CONFIG)).unwrap().peak > BROWSER_LIMIT);
+        assert!(estimate(&grown(CONFIG), &[]).unwrap().peak > BROWSER_LIMIT);
     }
 
     /// The test configuration on a grid far too large for a browser.
@@ -384,7 +435,7 @@ mod tests {
         let truth = settings::default_truth(&with).unwrap();
         let (start, truth) = settings::synthetic(&with, &truth, "observed").unwrap();
         let m = estimate_inversion(&start).unwrap();
-        assert!(m.peak > estimate(&start).unwrap().peak);
+        assert!(m.peak > estimate(&start, &[]).unwrap().peak);
         let mut inv = setup_inversion(&start, &truth).unwrap();
         while inv.advance().unwrap() {}
         let s = inv.status();
@@ -402,12 +453,30 @@ mod tests {
     }
 
     #[test]
-    fn refuses_model_files() {
+    fn runs_model_files_it_is_given() {
         let text = CONFIG.replace(
             "[[model.layer]]\n        top = 0.0\n        vp = 2000.0\n        vs = 1000.0\n        rho = 2000.0",
-            "[model.files]\nvp = \"a.npy\"\nvs = \"b.npy\"\nrho = \"c.npy\"",
+            "[model.files]\nvp = \"m/vp.npy\"\nvs = \"m/vs.npy\"\nrho = \"m/rho.npy\"",
         );
-        let e = format!("{:#}", setup(&text).err().unwrap());
-        assert!(e.contains("model files"), "{e}");
+        assert_eq!(model_files(&text), ["m/vp.npy", "m/vs.npy", "m/rho.npy"]);
+        assert!(model_files(CONFIG).is_empty() && model_files("not toml").is_empty());
+        // Sections, (nz, nx), the same as the layer at every y.
+        let section = |v: f32| vibe_rations::npy::to_bytes(&[16, 24], &[v; 16 * 24]).unwrap();
+        let files = vec![
+            ("m/vp.npy".to_string(), section(2000.0)),
+            ("m/vs.npy".to_string(), section(1000.0)),
+            ("m/rho.npy".to_string(), section(2000.0)),
+        ];
+        let (mut from_files, mut layered) =
+            (setup(&text, &files).unwrap(), setup(CONFIG, &[]).unwrap());
+        assert_eq!(estimate(&text, &files).unwrap(), from_files.sim.info.memory);
+        from_files.advance(5, None).unwrap();
+        layered.advance(5, None).unwrap();
+        assert_eq!(
+            from_files.traces_npy("vz").unwrap(),
+            layered.traces_npy("vz").unwrap()
+        );
+        let e = format!("{:#}", setup(&text, &files[..2]).err().unwrap());
+        assert!(e.contains("m/rho.npy wasn't given"), "{e}");
     }
 }

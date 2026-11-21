@@ -1,0 +1,46 @@
+# The central 6 km of Marmousi2 (Martin, Wiley & Marfurt 2006) at 25 m: the faults and the
+# anticline below them, under 450 m of water. An air gun in the water fires into
+# ocean-bottom nodes; watch the waves convert to slow S waves in the soft sediments.
+#
+#   just marmousi2                            # once: fetches Marmousi2, makes the model files
+#   just run examples/marmousi2-central.toml
+#
+# The model is a section the same at every y (2.5D), in examples/marmousi2/25m-central/;
+# marmousi2-50m.toml has the whole of it, coarser.
+
+[grid]
+points = [241, 41, 141]
+spacing = 25.0
+
+[time]
+duration = 4.0
+
+[boundary]
+pml_width = 16  # 41 nodes along y leave 9 outside the layers
+
+[model.files]  # relative to this file
+vp = "marmousi2/25m-central/vp.npy"
+vs = "marmousi2/25m-central/vs.npy"
+rho = "marmousi2/25m-central/rho.npy"
+
+[[source]]
+position = [3000.0, 500.0, 50.0]  # in the water, 50 m down
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[receivers]
+components = ["vx", "vz"]
+
+[[receivers.line]]  # on the seafloor's first solid nodes
+from = [500.0, 500.0, 475.0]
+to = [5500.0, 500.0, 475.0]
+count = 201
+
+[[snapshot]]
+field = "vz"
+plane = "xz"
+at = 500.0
+interval = 0.5
+
+[output]
+dir = "out/marmousi2-central"
