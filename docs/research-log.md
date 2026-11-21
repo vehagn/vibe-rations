@@ -1919,8 +1919,8 @@ afterwards behave like L2's first two (83.5% here, 83.7% there, the same signs b
 in all.
 
 - *The time shifts barely move the model.* Their misfit, $\tfrac12 \sum \tau^2$ over 2,010
-  traces, is 14.6, an RMS shift of 0.12 s, and its gradient predicts it only over tiny steps:
-  each trace's shift is the parabola through its correlation's peak, continuous but with a
+  traces, is 14.6, an RMS shift of 0.12 s, and its gradient predicts it only over tiny steps,
+  most likely (not measured trace by trace) because each trace's shift is the parabola through its correlation's peak, continuous but with a
   derivative that jumps when the peak moves to another lag (2026-11-20, "Choosing the misfit,
   and frequency continuation"), and near offsets here hold several arrivals of similar size,
   the slow waves among them, whose correlation peaks trade places as the model changes.
