@@ -34,14 +34,12 @@ struct Case {
 }
 
 impl Case {
-    /// `examples/marmousi2/central.toml` and `central-true.toml`, with `inversion` (lines of
-    /// `[inversion]`) in place of the start's `iterations = 5`.
-    fn central(inversion: &str) -> Case {
+    /// `examples/marmousi2/central.toml` and `central-true.toml`, the start's `[inversion]`
+    /// as `variant` makes it (`central_text`).
+    fn central(variant: Variant) -> Case {
         let base = PathBuf::from("examples/marmousi2");
         let read = |name: &str| std::fs::read_to_string(base.join(name)).unwrap();
-        let start = read("central.toml");
-        assert!(start.contains("\niterations = 5\n"), "central.toml changed");
-        let start = start.replace("\niterations = 5\n", &format!("\n{inversion}\n"));
+        let start = central_text(variant);
         let missing = base.join("25m-central/vp.npy");
         assert!(
             missing.is_file(),
@@ -127,6 +125,64 @@ impl Case {
                 sim.receivers.traces.into()
             })
             .collect()
+    }
+}
+
+/// A variant of the start's `[inversion]`: keys in place of its `iterations = 5`, and
+/// `[[inversion.stage]]` tables after the section, which ends the file.
+type Variant = (&'static str, &'static str);
+
+/// `examples/marmousi2/central.toml`'s text with `variant`'s inversion.
+fn central_text((keys, tables): Variant) -> String {
+    let text = std::fs::read_to_string("examples/marmousi2/central.toml").unwrap();
+    assert!(text.contains("\niterations = 5\n"), "central.toml changed");
+    let inversion = text
+        .rfind("\n[inversion]\n")
+        .expect("an [inversion] section");
+    assert!(
+        !text[inversion + 1..].contains("\n["),
+        "[inversion] no longer ends central.toml"
+    );
+    let text = text.replace("\niterations = 5\n", &format!("\n{keys}\n"));
+    format!("{}\n{tables}\n", text.trim_end())
+}
+
+const L2: Variant = ("iterations = 5", "");
+const FREQUENCY_STAGES: Variant = (
+    "",
+    "[[inversion.stage]]\nmax_frequency = 0.6\niterations = 2\n\
+     [[inversion.stage]]\nmax_frequency = 1.0\niterations = 2\n\
+     [[inversion.stage]]\niterations = 1",
+);
+const TIME_SHIFTS_THEN_L2: Variant = (
+    "max_shift = 0.8",
+    "[[inversion.stage]]\nmisfit = \"traveltime\"\niterations = 3\n\
+     [[inversion.stage]]\niterations = 2",
+);
+const PHASE_THEN_L2: Variant = (
+    "",
+    "[[inversion.stage]]\nmisfit = \"phase\"\niterations = 3\n\
+     [[inversion.stage]]\niterations = 2",
+);
+
+/// Every variant's configuration parses and has the stages it means, each with five
+/// iterations in all.
+#[test]
+fn the_variants_parse() {
+    for (variant, stages) in [
+        (L2, 1),
+        (FREQUENCY_STAGES, 3),
+        (TIME_SHIFTS_THEN_L2, 2),
+        (PHASE_THEN_L2, 2),
+        (("iterations = 0", ""), 1),
+    ] {
+        let cfg = Config::from_toml(&central_text(variant)).unwrap();
+        let inversion = cfg.inversion.unwrap();
+        assert_eq!(inversion.fixed_above, Some(500.0));
+        let s = inversion.stages().unwrap();
+        assert_eq!(s.len(), stages, "{variant:?}");
+        let total: usize = s.iter().map(|s| s.iterations).sum();
+        assert!(total == 5 || variant.0 == "iterations = 0", "{variant:?}");
     }
 }
 
@@ -525,7 +581,7 @@ const CENTRAL_OFFSETS: [f64; 4] = [0.0, 1000.0, 2000.0, 3000.0];
 #[test]
 #[ignore = "a study: `just marmousi2-study misfit_by_arrival` (about 20 minutes)"]
 fn misfit_by_arrival() {
-    let case = Case::central("iterations = 0");
+    let case = Case::central(("iterations = 0", ""));
     let lines = central_lines();
     split_by_arrival(&case, &lines, &CENTRAL_OFFSETS, Some(lines[1]));
 }
@@ -533,45 +589,25 @@ fn misfit_by_arrival() {
 #[test]
 #[ignore = "a study: `just marmousi2-study l2` (about 40 minutes)"]
 fn l2() {
-    invert("l2", &Case::central("iterations = 5"));
+    invert("l2", &Case::central(L2));
 }
 
 #[test]
 #[ignore = "a study: `just marmousi2-study frequency_stages` (about 50 minutes)"]
 fn frequency_stages() {
-    invert(
-        "frequency-stages",
-        &Case::central(
-            "[[inversion.stage]]\nmax_frequency = 0.6\niterations = 2\n\
-             [[inversion.stage]]\nmax_frequency = 1.0\niterations = 2\n\
-             [[inversion.stage]]\niterations = 1",
-        ),
-    );
+    invert("frequency-stages", &Case::central(FREQUENCY_STAGES));
 }
 
 #[test]
 #[ignore = "a study: `just marmousi2-study time_shifts_then_l2` (about 45 minutes)"]
 fn time_shifts_then_l2() {
-    invert(
-        "time-shifts-then-l2",
-        &Case::central(
-            "max_shift = 0.8\n\
-             [[inversion.stage]]\nmisfit = \"traveltime\"\niterations = 3\n\
-             [[inversion.stage]]\niterations = 2",
-        ),
-    );
+    invert("time-shifts-then-l2", &Case::central(TIME_SHIFTS_THEN_L2));
 }
 
 #[test]
 #[ignore = "a study: `just marmousi2-study phase_then_l2` (about 45 minutes)"]
 fn phase_then_l2() {
-    invert(
-        "phase-then-l2",
-        &Case::central(
-            "[[inversion.stage]]\nmisfit = \"phase\"\niterations = 3\n\
-             [[inversion.stage]]\niterations = 2",
-        ),
-    );
+    invert("phase-then-l2", &Case::central(PHASE_THEN_L2));
 }
 
 /// The split on a small two-layer survey adds up: its parts make the misfit `l2_misfit`
