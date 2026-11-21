@@ -28,7 +28,7 @@ use crate::config::{Coefficients, Config, InversionConfig, Parameter, shot_dir};
 use crate::gradient::{balancing_weights, gradient, l2_misfit};
 use crate::model::Model;
 use crate::npy;
-use crate::simulation::{Simulation, stable_dt};
+use crate::simulation::{Simulation, stable_dt, timing};
 
 /// The limited-memory BFGS approximation of the inverse Hessian: the last few changes of the
 /// unknowns (s) and of the gradient (y).
@@ -278,6 +278,49 @@ fn norm(a: &[f64]) -> f64 {
 
 fn axpy(y: &mut [f64], a: f64, x: &[f64]) {
     y.iter_mut().zip(x).for_each(|(y, x)| *y += a * x);
+}
+
+/// What a synthetic inversion's two runs must share so that the observed traces (from the true
+/// model) and the synthetic ones (from the models tried) are sampled alike and computed by the
+/// same operator: the time step, the P speed that sets the layers' damping, and the band the
+/// optimised coefficients are designed for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Operator {
+    pub dt: f64,
+    pub pml_vp_max: f64,
+    /// None for Taylor coefficients.
+    pub optimised_for: Option<f64>,
+}
+
+/// The operator for both `start` and `truth` (configurations on one grid that differ in their
+/// models): what `start` pins, and otherwise the time step and layers the faster of the two
+/// models needs and the band the slower one does. Worked out from the models' extremes,
+/// without setting either run up.
+pub fn shared_operator(start: &Config, truth: &Config, base: &Path) -> Result<Operator> {
+    let grid = Simulation::grid(start)?;
+    ensure!(
+        Simulation::grid(truth)? == grid,
+        "the true model must be on the start's grid"
+    );
+    let [vp_s, slow_s] = Model::extremes(grid, &start.model, base)?;
+    let [vp_t, slow_t] = Model::extremes(grid, &truth.model, base).context("in the true model")?;
+    let (vp_max, slowest) = (vp_s.max(vp_t), slow_s.min(slow_t));
+    let mut fixed = start.clone();
+    if start.scheme.coefficients == Coefficients::Optimised && start.scheme.optimised_for.is_none()
+    {
+        // As Inversion::new pins it, with the band capped at 0.9π.
+        let ppw = timing(start, &grid, vp_max, slowest)?.ppw;
+        fixed.scheme.optimised_for = Some(ppw.max(2.0 / 0.9));
+    }
+    let t = timing(&fixed, &grid, vp_max, slowest)?;
+    Ok(Operator {
+        dt: t.dt,
+        pml_vp_max: start.boundary.pml_vp_max.unwrap_or(vp_max),
+        optimised_for: match fixed.scheme.coefficients {
+            Coefficients::Optimised => fixed.scheme.optimised_for,
+            Coefficients::Taylor => None,
+        },
+    })
 }
 
 /// One shot of the survey: its configuration (one source, the inversion's time step and
@@ -565,6 +608,23 @@ impl Inversion {
     /// The misfit of the model as it now stands.
     pub fn misfit(&self) -> f64 {
         self.misfit
+    }
+
+    /// The gradient of the misfit with respect to `p`'s relative change, m₀ ∂χ/∂m, at every
+    /// interior node: zero where `p` may not change, None if it isn't inverted.
+    pub fn gradient_of(&self, p: Parameter) -> Option<Vec<f32>> {
+        let mut offset = 0;
+        for (q, nodes) in &self.free {
+            if *q == p {
+                let mut g = vec![0.0; self.model.grid.interior_len()];
+                for (i, &n) in nodes.iter().enumerate() {
+                    g[n] = self.g[offset + i] as f32;
+                }
+                return Some(g);
+            }
+            offset += nodes.len();
+        }
+        None
     }
 
     /// Unknowns: the inverted parameters at their free nodes.
@@ -1315,6 +1375,76 @@ mod tests {
         let m = inv.model_at(&x);
         assert!(m.vs[..16 * 16 * 3].iter().all(|&v| v == 0.0));
         m.validate().unwrap();
+    }
+
+    /// The gradient on the grid: the unknowns' gradient at the free nodes, zero elsewhere, and
+    /// nothing for a parameter that isn't inverted.
+    #[test]
+    fn puts_the_gradient_on_the_grid() {
+        let cfg = survey(SOLID, r#"parameters = ["vs"]"#);
+        let truth = survey(&SOLID.replace("1300.0", "1350.0"), "");
+        let settings = cfg.inversion.clone().unwrap();
+        let inv = Inversion::new(&cfg, start(&cfg), vec![recorded(&truth)], &settings).unwrap();
+        let g = inv.gradient_of(Parameter::Vs).unwrap();
+        assert_eq!(g.len(), inv.model.grid.interior_len());
+        let (_, nodes) = &inv.free[0];
+        let free: f64 = nodes.iter().map(|&n| (g[n] as f64).abs()).sum();
+        assert!(free > 0.0);
+        let outside: f32 = (0..g.len())
+            .filter(|n| nodes.binary_search(n).is_err())
+            .map(|n| g[n].abs())
+            .sum();
+        assert_eq!(outside, 0.0);
+        for (i, &n) in nodes.iter().enumerate() {
+            assert_eq!(g[n], inv.g[i] as f32);
+        }
+        assert!(inv.gradient_of(Parameter::Vp).is_none());
+    }
+
+    /// A start and a true model share the operator the faster and the slower of them need,
+    /// unless the start pins it.
+    #[test]
+    fn shares_an_operator_between_two_models() {
+        let unpinned = |layers: &str| {
+            let mut c = survey(layers, "");
+            c.time.dt = None;
+            c
+        };
+        let slow = unpinned(SOLID);
+        let fast = unpinned(&SOLID.replace("vp = 2000.0", "vp = 2600.0"));
+        let soft = unpinned(&SOLID.replace("vs = 1300.0", "vs = 900.0"));
+        let base = Path::new(".");
+        let own = |c: &Config| {
+            let sim = Simulation::new(c, base).unwrap();
+            (sim.solver.dt, sim.info.points_per_wavelength)
+        };
+        // The faster model sets the time step and the layers, the softer one the band.
+        let op = shared_operator(&slow, &fast, base).unwrap();
+        assert_eq!(op.pml_vp_max, 2600.0);
+        let mut pinned = fast.clone();
+        pinned.scheme.optimised_for = op.optimised_for;
+        assert!((op.dt - Simulation::new(&pinned, base).unwrap().solver.dt).abs() < 1e-15);
+        assert!(op.dt < own(&slow).0);
+        let op = shared_operator(&slow, &soft, base).unwrap();
+        assert_eq!(op.optimised_for, Some(own(&soft).1.max(2.0 / 0.9)));
+        assert_eq!(op.pml_vp_max, 2000.0);
+        // What the start pins stays.
+        let mut fixed = slow.clone();
+        fixed.time.dt = Some(5e-4);
+        fixed.boundary.pml_vp_max = Some(3000.0);
+        fixed.scheme.coefficients = Coefficients::Taylor;
+        let op = shared_operator(&fixed, &fast, base).unwrap();
+        assert_eq!(
+            op,
+            Operator {
+                dt: 5e-4,
+                pml_vp_max: 3000.0,
+                optimised_for: None
+            }
+        );
+        let mut other = fast.clone();
+        other.grid.points = [16, 16, 16];
+        assert!(shared_operator(&slow, &other, base).is_err());
     }
 
     /// λ ≥ 0 survives projection in every case: vp inverted alone (vp held above √2 vs), and

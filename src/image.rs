@@ -17,6 +17,44 @@ fn diverging(v: f32) -> [f32; 3] {
     }
 }
 
+/// Dark violet through blue, teal and green to yellow (viridis's stops), for t in [0, 1]: a
+/// sequential scale whose lightness rises steadily, for models.
+fn sequential(t: f32) -> [f32; 3] {
+    const STOPS: [[f32; 3]; 5] = [
+        [0.267, 0.005, 0.329],
+        [0.229, 0.322, 0.546],
+        [0.128, 0.567, 0.551],
+        [0.369, 0.789, 0.383],
+        [0.993, 0.906, 0.144],
+    ];
+    let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) } * 4.0;
+    let i = (t.floor() as usize).min(3);
+    let f = t - i as f32;
+    std::array::from_fn(|c| STOPS[i][c] * (1.0 - f) + STOPS[i + 1][c] * f)
+}
+
+fn rgba(colours: impl Iterator<Item = [f32; 3]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for c in colours {
+        out.extend(c.map(|c| (c * 255.0).round() as u8));
+        out.push(255);
+    }
+    out
+}
+
+/// Values from `lo` (dark) to `hi` (light), RGBA; beyond them the ends' colours.
+pub fn sequential_rgba(values: &[f32], lo: f32, hi: f32) -> Vec<u8> {
+    let span = if hi > lo { hi - lo } else { 1.0 };
+    rgba(values.iter().map(|&v| sequential((v - lo) / span)))
+}
+
+/// Signed values, RGBA: blue (negative) through white to red (positive), linear in value /
+/// `clip`, so that two pictures with the same clip compare.
+pub fn signed_rgba(values: &[f32], clip: f32) -> Vec<u8> {
+    let clip = if clip > 0.0 { clip } else { 1.0 };
+    rgba(values.iter().map(|&v| diverging(v / clip)))
+}
+
 /// A 2D slice of a wavefield, row-major with the top row first.
 pub struct Section<'a> {
     pub width: usize,
@@ -148,6 +186,25 @@ mod tests {
         assert_eq!(diverging(-1.0), [0.0, 0.0, 1.0]);
         assert_eq!(diverging(7.0), diverging(1.0));
         assert_eq!(diverging(f32::NAN), [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn model_and_signed_colours() {
+        let rgba = sequential_rgba(&[1000.0, 2000.0, 3000.0, 5000.0], 1000.0, 3000.0);
+        assert_eq!(&rgba[..4], &[68, 1, 84, 255]);
+        assert_eq!(&rgba[8..12], &[253, 231, 37, 255]);
+        assert_eq!(&rgba[12..16], &rgba[8..12], "saturates above hi");
+        // Lightness rises along the scale.
+        let light = |c: &[u8]| c[0] as u32 + c[1] as u32 + c[2] as u32;
+        assert!(light(&rgba[..4]) < light(&rgba[4..8]) && light(&rgba[4..8]) < light(&rgba[8..12]));
+        let rgba = signed_rgba(&[-2.0, -1.0, 0.0, 0.5], 2.0);
+        assert_eq!(&rgba[..4], &[0, 0, 255, 255]);
+        assert_eq!(
+            &rgba[4..8],
+            &[128, 128, 255, 255],
+            "linear, not a square root"
+        );
+        assert_eq!(&rgba[8..12], &[255, 255, 255, 255]);
     }
 
     fn size(path: &Path) -> (u32, u32) {

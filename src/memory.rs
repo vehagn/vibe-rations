@@ -305,6 +305,28 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
 }
 
+/// The memory of an inversion of synthetic data, as the web page and the run server do it
+/// ([`crate::view::InversionView`]): [`estimate_inversion`]'s, and the pictures of it, which
+/// hold the start and the true model, and the model as it stands with its gradient. The true
+/// model's forward runs come first and need less: they are the inversion's forward runs.
+pub fn estimate_synthetic_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
+    let m = estimate_inversion(cfg, base)?;
+    let interior = cfg.grid.grid()?.interior_len() as u64;
+    let parameters = cfg.inversion.as_ref().map_or(0, |i| i.parameters.len()) as u64;
+    let mut parts = m.parts;
+    parts.extend([
+        part(
+            "pictures: the starting and the true model",
+            2 * 12 * interior,
+        ),
+        part(
+            "pictures: the model as it stands and its gradient",
+            (12 + 4 * parameters) * interior,
+        ),
+    ]);
+    Ok(Memory::of(parts))
+}
+
 fn plan(cfg: &Config, base: &Path) -> Result<Plan> {
     let (grid, steps) = timed(cfg, base)?;
     Plan::new(cfg, grid, steps)

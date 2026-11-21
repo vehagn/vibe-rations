@@ -1,13 +1,20 @@
 //! Live pictures of a run, for the web app: a section of the wavefield and the gather so far,
 //! as RGBA pixels (the browser draws them) or PNG (a server sends them). The browser's solver
-//! and `vibe-rations serve` share it, so both draw the same pictures.
+//! and `vibe-rations serve` share it, so both draw the same pictures. An inversion on
+//! synthetic data ([`InversionView`]) is stepped a unit of work at a time and pictured the same
+//! way: the model, its update, the true update and the gradient.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
+use serde_json::json;
 
-use crate::config::PlaneKind;
+use crate::config::{Config, InversionConfig, Parameter, PlaneKind};
+use crate::grid::Grid;
 use crate::image;
+use crate::inversion::{Inversion, Observed};
+use crate::model::Model;
 use crate::npy;
 use crate::receiver::Component;
 use crate::simulation::Simulation;
@@ -20,8 +27,10 @@ pub struct Frame {
     pub height: usize,
     /// RGBA, row by row from the top.
     pub rgba: Vec<u8>,
-    /// The value drawn at full colour.
+    /// The value drawn at full colour: the top of the colour scale.
     pub clip: f32,
+    /// The bottom of the colour scale: -clip for signed pictures.
+    pub low: f32,
 }
 
 impl Frame {
@@ -141,6 +150,7 @@ impl View {
             height: section.height,
             rgba: image::section_rgba(&section),
             clip,
+            low: -clip,
         })
     }
 
@@ -154,6 +164,7 @@ impl View {
             height: rows,
             rgba: image::gather_rgba(r.nodes.len(), r.samples, r.recorded(), &r.traces[c], rows),
             clip: 1.0,
+            low: -1.0,
         })
     }
 
@@ -173,6 +184,454 @@ impl View {
             .iter()
             .position(|&x| x == c)
             .with_context(|| format!("the receivers don't record {name}"))
+    }
+}
+
+/// The plane `plane` (xy, xz or yz) through node `index` along its normal: its axis, and the
+/// two axes across and down it.
+fn plane_axes(plane: &str) -> Result<(usize, usize, usize)> {
+    Ok(match plane {
+        "xy" => (2, 0, 1),
+        "xz" => (1, 0, 2),
+        "yz" => (0, 1, 2),
+        _ => bail!("unknown plane {plane}; use xy, xz or yz"),
+    })
+}
+
+/// A section through values on the interior nodes of `grid`, row-major from the top, and its
+/// width and height.
+fn cut(grid: &Grid, values: &[f32], plane: &str, index: usize) -> Result<(Vec<f32>, usize, usize)> {
+    let (normal, across, down) = plane_axes(plane)?;
+    let n = grid.n;
+    ensure!(
+        index < n[normal],
+        "plane index {index} is off the grid (0..{})",
+        n[normal]
+    );
+    let (w, h) = (n[across], n[down]);
+    let mut out = Vec::with_capacity(w * h);
+    for r in 0..h {
+        for c in 0..w {
+            let mut ijk = [0; 3];
+            ijk[normal] = index;
+            ijk[across] = c;
+            ijk[down] = r;
+            out.push(values[grid.interior_idx(ijk[0], ijk[1], ijk[2])]);
+        }
+    }
+    Ok((out, w, h))
+}
+
+/// A section scaled up for the screen as wavefield sections are, coloured by `colour`.
+fn picture(
+    grid: &Grid,
+    values: &[f32],
+    plane: &str,
+    index: usize,
+    colour: impl Fn(&[f32]) -> Vec<u8>,
+) -> Result<(Vec<u8>, usize, usize)> {
+    let (v, w, h) = cut(grid, values, plane, index)?;
+    let factor = (SECTION_PIXELS / w.max(h)).clamp(1, 8);
+    let up = upsample(&v, w, h, factor);
+    Ok((colour(&up), (w - 1) * factor + 1, (h - 1) * factor + 1))
+}
+
+/// What a picture of an inversion shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    /// The model as it stands.
+    Model,
+    /// Its change from the start.
+    Update,
+    /// The true model less the start: what the update would be if the inversion found it.
+    TrueUpdate,
+    /// The gradient's opposite, -m₀ ∂χ/∂m: the way the misfit falls fastest.
+    Descent,
+}
+
+impl Show {
+    pub fn parse(name: &str) -> Result<Self> {
+        Ok(match name {
+            "model" => Show::Model,
+            "update" => Show::Update,
+            "true-update" => Show::TrueUpdate,
+            "descent" => Show::Descent,
+            _ => bail!("unknown picture {name}; use model, update, true-update or descent"),
+        })
+    }
+}
+
+fn parameter(name: &str) -> Result<Parameter> {
+    Ok(match name {
+        "vp" => Parameter::Vp,
+        "vs" => Parameter::Vs,
+        "rho" => Parameter::Rho,
+        _ => bail!("unknown parameter {name}; use vp, vs or rho"),
+    })
+}
+
+fn values(m: &Model, p: Parameter) -> &[f32] {
+    match p {
+        Parameter::Vp => &m.vp,
+        Parameter::Vs => &m.vs,
+        Parameter::Rho => &m.rho,
+    }
+}
+
+/// An inversion's models and gradient as they last stood, for pictures. Cloning shares them,
+/// so a server can keep a copy to draw from while the inversion moves on.
+#[derive(Clone)]
+pub struct Pictures {
+    start: Arc<Model>,
+    truth: Option<Arc<Model>>,
+    /// The model as it stands; the start's own until the first iteration.
+    model: Arc<Model>,
+    /// m₀ ∂χ/∂m for vp, vs and ρ, where inverted, once computed.
+    gradient: [Option<Arc<Vec<f32>>>; 3],
+}
+
+impl Pictures {
+    /// `parameter` (vp, vs or rho) on `plane` (xy, xz or yz) through node `index`, showing
+    /// `show` (model, update, true-update or descent). Models are coloured from the smallest
+    /// to the largest value of the start and the truth, updates on one scale, the largest true
+    /// change (or else the largest change so far) divided by `gain`, and the gradient on its
+    /// largest value divided by `gain`.
+    pub fn section(
+        &self,
+        parameter_name: &str,
+        show: &str,
+        plane: &str,
+        index: usize,
+        gain: f32,
+    ) -> Result<Frame> {
+        let p = parameter(parameter_name)?;
+        ensure!(gain > 0.0, "gain must be positive");
+        let grid = &self.start.grid;
+        let start = values(&self.start, p);
+        let largest = |v: &mut dyn Iterator<Item = f32>| v.fold(0.0f32, |m, x| m.max(x.abs()));
+        let difference = |m: &Model| -> Vec<f32> {
+            values(m, p).iter().zip(start).map(|(a, b)| a - b).collect()
+        };
+        let true_change = self.truth.as_ref().map(|t| difference(t));
+        let update_clip = || {
+            let true_largest = true_change
+                .as_ref()
+                .map_or(0.0, |d| largest(&mut d.iter().copied()));
+            if true_largest > 0.0 {
+                true_largest
+            } else {
+                largest(&mut difference(&self.model).into_iter())
+            }
+        };
+        let signed = |v: &[f32], clip: f32| -> Result<Frame> {
+            let clip = if clip > 0.0 { clip / gain } else { 1.0 };
+            let (rgba, width, height) =
+                picture(grid, v, plane, index, |u| image::signed_rgba(u, clip))?;
+            Ok(Frame {
+                width,
+                height,
+                rgba,
+                clip,
+                low: -clip,
+            })
+        };
+        match Show::parse(show)? {
+            Show::Model => {
+                let mut range = [f32::INFINITY, f32::NEG_INFINITY];
+                for m in std::iter::once(&self.start).chain(&self.truth) {
+                    for &v in values(m, p) {
+                        range = [range[0].min(v), range[1].max(v)];
+                    }
+                }
+                let [mut lo, mut hi] = range;
+                if hi <= lo {
+                    // A homogeneous model: a band around it.
+                    (lo, hi) = (0.95 * lo, 1.05 * hi.max(1e-3));
+                }
+                let (rgba, width, height) =
+                    picture(grid, values(&self.model, p), plane, index, |u| {
+                        image::sequential_rgba(u, lo, hi)
+                    })?;
+                Ok(Frame {
+                    width,
+                    height,
+                    rgba,
+                    clip: hi,
+                    low: lo,
+                })
+            }
+            Show::Update => signed(&difference(&self.model), update_clip()),
+            Show::TrueUpdate => {
+                let d = true_change
+                    .as_ref()
+                    .context("this inversion has no true model")?;
+                signed(d, update_clip())
+            }
+            Show::Descent => {
+                let g = self.gradient[p as usize]
+                    .as_ref()
+                    .with_context(|| format!("there is no gradient for {parameter_name} (yet)"))?;
+                let descent: Vec<f32> = g.iter().map(|v| -v).collect();
+                signed(&descent, largest(&mut descent.iter().copied()))
+            }
+        }
+    }
+
+    /// The model as it stands, `parameter` (vp, vs or rho) as an `.npy` file shaped (nz, ny,
+    /// nx) like model files.
+    pub fn npy(&self, parameter_name: &str) -> Result<Vec<u8>> {
+        let g = self.model.grid;
+        npy::to_bytes(
+            &[g.n[2], g.n[1], g.n[0]],
+            values(&self.model, parameter(parameter_name)?),
+        )
+    }
+
+    /// Bytes held: each model and gradient once, however many share it.
+    pub fn memory_bytes(&self) -> usize {
+        let model = |m: &Model| 4 * (m.vp.len() + m.vs.len() + m.rho.len());
+        let mut bytes = model(&self.start) + self.truth.as_deref().map_or(0, model);
+        if !Arc::ptr_eq(&self.model, &self.start) {
+            bytes += model(&self.model);
+        }
+        bytes
+            + self
+                .gradient
+                .iter()
+                .flatten()
+                .map(|g| 4 * g.len())
+                .sum::<usize>()
+    }
+}
+
+/// Where an inversion on synthetic data is: each stage is a unit of work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// The true model's traces of this shot (from 0).
+    Observing(usize),
+    /// The misfit and gradient at the start.
+    Starting,
+    /// L-BFGS iteration this (from 1).
+    Iterating(usize),
+    Done,
+}
+
+/// An inversion of synthetic data: a start (a configuration with `[inversion]`) and a true
+/// model (the same configuration with another model), whose traces are the observed data. The
+/// browser's solver and `vibe-rations serve` step it a unit at a time ([`Self::advance`]) so
+/// they can report progress, picture it and stop between units.
+pub struct InversionView {
+    cfg: Config,
+    truth: Config,
+    base: PathBuf,
+    settings: InversionConfig,
+    observed: Vec<Observed>,
+    inversion: Option<Inversion>,
+    stage: Stage,
+    /// Why it stopped before its last iteration, if it did.
+    stopped: Option<String>,
+    first_misfit: Option<f64>,
+    pub pictures: Pictures,
+}
+
+impl InversionView {
+    /// Sets up nothing yet but the two models: `cfg` is the start, with its `[inversion]`;
+    /// `truth` the same survey with the true model. Both must be sampled alike (the same time
+    /// step: `settings::synthetic` in the web crate pins it for both).
+    pub fn new(cfg: &Config, truth: &Config, base: &Path) -> Result<Self> {
+        let settings = cfg
+            .inversion
+            .clone()
+            .context("the configuration has no [inversion] section")?;
+        ensure!(
+            truth.sources.len() == cfg.sources.len(),
+            "the true model's survey has {} source(s), the start's {}",
+            truth.sources.len(),
+            cfg.sources.len()
+        );
+        let grid = Simulation::grid(cfg)?;
+        ensure!(
+            Simulation::grid(truth)? == grid,
+            "the true model must be on the start's grid"
+        );
+        let start = Arc::new(Model::from_config(grid, &cfg.model, base)?);
+        let true_model =
+            Model::from_config(grid, &truth.model, base).context("in the true model")?;
+        Ok(Self {
+            cfg: cfg.clone(),
+            truth: truth.clone(),
+            base: base.to_path_buf(),
+            observed: Vec::with_capacity(cfg.sources.len()),
+            inversion: None,
+            stage: Stage::Observing(0),
+            stopped: None,
+            first_misfit: None,
+            pictures: Pictures {
+                model: start.clone(),
+                start,
+                truth: Some(Arc::new(true_model)),
+                gradient: [None, None, None],
+            },
+            settings,
+        })
+    }
+
+    pub fn stage(&self) -> Stage {
+        self.stage
+    }
+
+    /// Whether the inversion is set up: its starting misfit and gradient computed.
+    pub fn started(&self) -> bool {
+        self.inversion.is_some()
+    }
+
+    /// Units of work in all: a forward run per shot, the start, the iterations.
+    pub fn units(&self) -> usize {
+        self.cfg.sources.len() + 1 + self.settings.iterations
+    }
+
+    /// Units done.
+    pub fn done(&self) -> usize {
+        let shots = self.cfg.sources.len();
+        match self.stage {
+            Stage::Observing(s) => s,
+            Stage::Starting => shots,
+            Stage::Iterating(i) => shots + i,
+            Stage::Done => self.units(),
+        }
+    }
+
+    /// Does the next unit of work; false once there is none left.
+    pub fn advance(&mut self) -> Result<bool> {
+        let shots = self.cfg.sources.len();
+        let iterations = self.settings.iterations;
+        self.stage = match self.stage {
+            Stage::Observing(s) => {
+                let mut sim = Simulation::new(&self.truth.shot(s)?, &self.base)
+                    .context("setting up the true model")?;
+                sim.run(None, false)?;
+                let r = &sim.receivers;
+                let shape = vec![r.nodes.len(), r.samples];
+                self.observed.push(Observed {
+                    shapes: Some(vec![shape; r.components.len()]),
+                    times: Some(sim.sample_times().iter().map(|&t| t as f32).collect()),
+                    traces: std::mem::take(&mut sim.receivers.traces),
+                });
+                if s + 1 < shots {
+                    Stage::Observing(s + 1)
+                } else {
+                    Stage::Starting
+                }
+            }
+            Stage::Starting => {
+                let observed = std::mem::take(&mut self.observed);
+                let inversion = Inversion::new(
+                    &self.cfg,
+                    (*self.pictures.start).clone(),
+                    observed,
+                    &self.settings,
+                )?;
+                self.first_misfit = Some(inversion.misfit());
+                self.inversion = Some(inversion);
+                self.picture();
+                if iterations > 0 {
+                    Stage::Iterating(1)
+                } else {
+                    Stage::Done
+                }
+            }
+            Stage::Iterating(i) => {
+                let inversion = self.inversion.as_mut().expect("set up at the start");
+                let stepped = inversion.iterate()?;
+                if stepped.is_none() {
+                    self.stopped = Some("no step lowers the misfit further".into());
+                }
+                self.picture();
+                if stepped.is_some() && i < iterations {
+                    Stage::Iterating(i + 1)
+                } else {
+                    Stage::Done
+                }
+            }
+            Stage::Done => Stage::Done,
+        };
+        Ok(self.stage != Stage::Done)
+    }
+
+    /// Takes the pictures of the inversion as it now stands.
+    fn picture(&mut self) {
+        let Some(inversion) = &self.inversion else {
+            return;
+        };
+        // Freed first, so the old and the new are never held together.
+        self.pictures.gradient = [None, None, None];
+        for p in [Parameter::Vp, Parameter::Vs, Parameter::Rho] {
+            self.pictures.gradient[p as usize] = inversion.gradient_of(p).map(Arc::new);
+        }
+        if inversion.iteration > 0 {
+            self.pictures.model = Arc::new(inversion.model.clone());
+        }
+    }
+
+    /// Where it is, as JSON: the stage (`observing` with its `shot`, `starting`, `iterating`
+    /// with its `iteration`, `done`), the units done of all, the misfit at the start and now,
+    /// every iteration (`inversion::Iteration`), why it stopped early if it did, and the most
+    /// memory it has held.
+    pub fn status(&self) -> serde_json::Value {
+        let (stage, shot, iteration) = match self.stage {
+            Stage::Observing(s) => ("observing", Some(s), None),
+            Stage::Starting => ("starting", None, None),
+            Stage::Iterating(i) => ("iterating", None, Some(i)),
+            Stage::Done => ("done", None, None),
+        };
+        let inv = self.inversion.as_ref();
+        json!({
+            "stage": stage,
+            "shot": shot,
+            "iteration": iteration,
+            "shots": self.cfg.sources.len(),
+            "iterations": self.settings.iterations,
+            "parameters": self.settings.parameters,
+            "units": self.units(),
+            "done": self.done(),
+            "unknowns": inv.map(Inversion::unknowns),
+            "starting_misfit": self.first_misfit,
+            "misfit": inv.map(Inversion::misfit),
+            "history": inv.map_or(json!([]), |i| json!(i.history)),
+            "stopped": self.stopped,
+            "memory_bytes": self.memory_bytes(),
+        })
+    }
+
+    /// The most memory held at once so far: the inversion's ([`Inversion::memory_bytes`])
+    /// with the pictures.
+    pub fn memory_bytes(&self) -> usize {
+        self.inversion.as_ref().map_or(0, |i| i.memory_bytes) + self.pictures.memory_bytes()
+    }
+
+    /// What `invert` writes after each iteration: the model as `vp.npy`, `vs.npy` and
+    /// `rho.npy`, and `inversion.json` with the settings and every iteration's misfit.
+    pub fn write_outputs(&self, out: &Path) -> Result<()> {
+        std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+        let m = &self.pictures.model;
+        let shape = [m.grid.n[2], m.grid.n[1], m.grid.n[0]];
+        for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
+            npy::write(&out.join(format!("{name}.npy")), &shape, values)?;
+        }
+        let inv = self.inversion.as_ref();
+        let summary = json!({
+            "settings": self.settings,
+            "unknowns": inv.map(Inversion::unknowns),
+            "starting_misfit": self.first_misfit,
+            "iterations": inv.map_or(json!([]), |i| json!(i.history)),
+            "memory_bytes": inv.map(|i| i.memory_bytes),
+            "stopped": self.stopped,
+        });
+        std::fs::write(
+            out.join("inversion.json"),
+            serde_json::to_string_pretty(&summary)? + "\n",
+        )?;
+        Ok(())
     }
 }
 
@@ -301,6 +760,149 @@ mod tests {
         let bytes = v.traces_npy("vx").unwrap();
         assert!(bytes.starts_with(b"\x93NUMPY"));
         assert_eq!(bytes.len(), 128 + 4 * 5 * v.sim.receivers.samples);
+    }
+
+    /// A start and a true model with a faster sphere: two shots, receivers on the surface,
+    /// the top held fixed, sampled alike.
+    fn inversion_pair(iterations: usize) -> (Config, Config) {
+        let config = |sphere: &str, inversion: &str| {
+            Config::from_toml(&format!(
+                r#"
+                [grid]
+                points = [24, 20, 18]
+                spacing = 10.0
+                [time]
+                duration = 0.15
+                dt = 5e-4
+                [boundary]
+                pml_width = 4
+                pml_vp_max = 2700.0
+                [scheme]
+                coefficients = "taylor"
+                [[model.layer]]
+                top = 0.0
+                vp = 2400.0
+                vs = 1300.0
+                rho = 2100.0
+                {sphere}
+                [[source]]
+                position = [80.0, 90.0, 30.0]
+                force = [0.0, 0.0, 1e9]
+                wavelet = {{ kind = "ricker", frequency = 15.0 }}
+                [[source]]
+                position = [150.0, 100.0, 30.0]
+                force = [1e9, 0.0, 0.0]
+                wavelet = {{ kind = "ricker", frequency = 15.0 }}
+                [receivers]
+                components = ["vx", "vz"]
+                [[receivers.line]]
+                from = [60.0, 70.0, 0.0]
+                to = [170.0, 70.0, 0.0]
+                count = 10
+                [[receivers.line]]
+                from = [60.0, 120.0, 0.0]
+                to = [170.0, 120.0, 0.0]
+                count = 10
+                {inversion}
+                "#
+            ))
+            .unwrap()
+        };
+        let sphere = "[[model.sphere]]\ncenter = [115.0, 95.0, 100.0]\nradius = 25.0\n\
+                      vp = 2600.0\nvs = 1450.0\nrho = 2100.0";
+        let inversion = format!(
+            "[inversion]\nobserved = \"observed\"\niterations = {iterations}\nfixed_above = 40.0\n\
+             memory = 1"
+        );
+        (config("", &inversion), config(sphere, ""))
+    }
+
+    /// The inversion goes through its stages a unit at a time, lowers the misfit, draws every
+    /// picture, writes what `invert` writes, and holds what the estimate says.
+    #[test]
+    fn steps_an_inversion_of_synthetic_data() {
+        let (start, truth) = inversion_pair(2);
+        let base = Path::new(".");
+        let mut v = InversionView::new(&start, &truth, base).unwrap();
+        assert_eq!((v.units(), v.done()), (5, 0));
+        assert!(v.pictures.section("vs", "descent", "xz", 9, 1.0).is_err());
+        let mut stages = vec![v.stage()];
+        while v.advance().unwrap() {
+            stages.push(v.stage());
+        }
+        stages.push(v.stage());
+        assert_eq!(
+            stages,
+            [
+                Stage::Observing(0),
+                Stage::Observing(1),
+                Stage::Starting,
+                Stage::Iterating(1),
+                Stage::Iterating(2),
+                Stage::Done
+            ]
+        );
+        assert!(!v.advance().unwrap(), "nothing left to do");
+        let s = v.status();
+        assert_eq!(
+            (s["stage"].as_str(), s["done"].as_u64()),
+            (Some("done"), Some(5))
+        );
+        let first = s["starting_misfit"].as_f64().unwrap();
+        let last = s["misfit"].as_f64().unwrap();
+        assert_eq!(s["history"].as_array().unwrap().len(), 2);
+        assert!(last < 0.8 * first, "{last} vs {first}");
+
+        // Pictures: the sizes of a wavefield section, models on the start and truth's range.
+        let model = v.pictures.section("vs", "model", "xz", 9, 1.0).unwrap();
+        assert_eq!((model.width, model.height), (23 * 8 + 1, 17 * 8 + 1));
+        assert_eq!((model.low, model.clip), (1300.0, 1450.0));
+        let truth = v
+            .pictures
+            .section("vs", "true-update", "xz", 9, 2.0)
+            .unwrap();
+        assert_eq!(truth.clip, 75.0, "the largest true change over the gain");
+        let update = v.pictures.section("vs", "update", "xz", 9, 2.0).unwrap();
+        assert_eq!(update.clip, truth.clip, "on the same scale");
+        let descent = v.pictures.section("vp", "descent", "xy", 10, 1.0).unwrap();
+        assert!(descent.clip > 0.0 && descent.low == -descent.clip);
+        assert!(
+            v.pictures.section("rho", "descent", "xz", 9, 1.0).is_err(),
+            "not inverted"
+        );
+        assert!(
+            v.pictures.section("vs", "model", "xz", 20, 1.0).is_err(),
+            "y has 20 nodes"
+        );
+        assert!(v.pictures.section("vq", "model", "xz", 0, 1.0).is_err());
+        assert!(v.pictures.npy("vs").unwrap().starts_with(b"\x93NUMPY"));
+
+        // The memory planned for it, exactly, with the pictures it holds by now (and L-BFGS's
+        // one pair, as full as the plan counts it).
+        let planned = crate::memory::estimate_synthetic_inversion(&start, base).unwrap();
+        assert_eq!(v.memory_bytes() as u64, planned.peak);
+
+        let dir = std::env::temp_dir().join(format!("vibe-rations-view-{}", std::process::id()));
+        v.write_outputs(&dir).unwrap();
+        for f in ["vp.npy", "vs.npy", "rho.npy", "inversion.json"] {
+            assert!(dir.join(f).is_file(), "{f}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Observed traces sampled at other times than the synthetics are refused at the start.
+    #[test]
+    fn refuses_a_truth_sampled_otherwise() {
+        let (start, mut truth) = inversion_pair(0);
+        truth.time.dt = Some(4e-4);
+        let mut v = InversionView::new(&start, &truth, Path::new(".")).unwrap();
+        v.advance().unwrap();
+        v.advance().unwrap();
+        let e = format!("{:#}", v.advance().unwrap_err());
+        assert!(e.contains("sampl"), "{e}");
+        let mut other = truth.clone();
+        other.grid.points = [24, 20, 16];
+        assert!(InversionView::new(&start, &other, Path::new(".")).is_err());
     }
 
     #[test]
