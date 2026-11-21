@@ -11,7 +11,8 @@ mod common;
 
 use std::f64::consts::PI;
 
-use common::plane::{LOWER, PlaneWave, UPPER, Wave};
+use common::plane::{LOWER, PlaneWave, Traces, UPPER, Wave};
+use vibe_rations::config::Interfaces;
 
 const H: f64 = 10.0;
 const DELTAS: [f64; 4] = [0.0, 0.25, 0.5, 0.75];
@@ -19,9 +20,12 @@ const DELTAS: [f64; 4] = [0.0, 0.25, 0.5, 0.75];
 /// How a layered model is put onto the nodes.
 #[derive(Clone, Copy, Debug)]
 enum Sampling {
-    /// As `[[model.layer]]`s are now: each node takes the medium it lies in, a node on the
-    /// interface the one below.
+    /// `[[model.layer]]`s as they are by default, `interfaces = "nodes"`: each node takes the
+    /// medium it lies in, a node on the interface the one below.
     Node,
+    /// `[[model.layer]]`s with `interfaces = "band-limited"`: [`Sampling::Band`] at ±4 as
+    /// `vibe_rations::model` does it.
+    Layers,
     /// Each node takes its cell's average over [z - h/2, z + h/2]: density arithmetically,
     /// the moduli ρvp² and ρvs² harmonically (as compliances).
     Cell,
@@ -30,22 +34,30 @@ enum Sampling {
     Band(f64),
     /// The same applied to the moduli themselves rather than their inverses.
     BandModuli(f64),
+    /// [`Sampling::Band`] with the step clamped to [0, 1], so no layer overshoots.
+    BandClamped(f64),
+    /// The same band-limited step applied to density and the logarithms of the moduli,
+    /// which stay positive however large the contrast.
+    BandLog(f64),
 }
 
 impl Sampling {
     fn name(self) -> String {
         match self {
             Sampling::Node => "node".into(),
+            Sampling::Layers => "band-limited".into(),
             Sampling::Cell => "cell".into(),
             Sampling::Band(w) => format!("band ±{w}"),
             Sampling::BandModuli(w) => format!("band moduli ±{w}"),
+            Sampling::BandClamped(w) => format!("band clamped ±{w}"),
+            Sampling::BandLog(w) => format!("band log ±{w}"),
         }
     }
 
     /// How much of a node u node spacings below the interface the lower medium takes.
     fn fraction_below(self, u: f64) -> f64 {
         match self {
-            Sampling::Node => {
+            Sampling::Node | Sampling::Layers => {
                 if u >= 0.0 {
                     1.0
                 } else {
@@ -53,7 +65,8 @@ impl Sampling {
                 }
             }
             Sampling::Cell => (u + 0.5).clamp(0.0, 1.0),
-            Sampling::Band(w) | Sampling::BandModuli(w) => {
+            Sampling::BandClamped(w) => Sampling::Band(w).fraction_below(u).clamp(0.0, 1.0),
+            Sampling::Band(w) | Sampling::BandModuli(w) | Sampling::BandLog(w) => {
                 // The tapered sinc's integral from -w to u, normalised, by the midpoint rule.
                 let kernel = |x: f64| {
                     let sinc = if x == 0.0 {
@@ -85,6 +98,7 @@ impl Sampling {
         let rho = above * UPPER[2] + below * LOWER[2];
         let modulus = |a: f64, b: f64| match self {
             Sampling::BandModuli(_) => above * a + below * b,
+            Sampling::BandLog(_) => (above * a.ln() + below * b.ln()).exp(),
             _ => 1.0 / (above / a + below / b),
         };
         let m = modulus(UPPER[2] * UPPER[0].powi(2), LOWER[2] * LOWER[0].powi(2));
@@ -106,15 +120,23 @@ fn row(wave: Wave, sampling: Sampling, scale: usize, order: usize, delta: f64) {
     let interface = p.interface;
     let traces = match sampling {
         Sampling::Node => p.run(None),
+        Sampling::Layers => {
+            p.interfaces = Interfaces::BandLimited;
+            p.run(None)
+        }
         _ => p.run(Some(&|z| sampling.medium(z, interface))),
     };
-    let [direct, r, t] = p.fits(&traces);
+    print_row(&p, &traces, wave, sampling, delta);
+}
+
+fn print_row(p: &PlaneWave, traces: &Traces, wave: Wave, sampling: Sampling, delta: f64) {
+    let [direct, r, t] = p.fits(traces);
     let node = p.node_time();
     println!(
         "{:<4} {:<16} {:>5} {:>5.2} | {:>7.3}% | {:>7.3}% {:>7.4} {:>6.3}h | {:>7.3}% {:>7.4} {:>6.3}h",
         format!("{wave:?}"),
         sampling.name(),
-        order,
+        p.order,
         delta,
         100.0 * direct.misfit,
         100.0 * r.misfit,
@@ -135,9 +157,12 @@ fn row(wave: Wave, sampling: Sampling, scale: usize, order: usize, delta: f64) {
 fn interfaces_by_position_and_sampling() {
     let samplings = [
         Sampling::Node,
+        Sampling::Layers,
         Sampling::Cell,
         Sampling::Band(4.0),
         Sampling::BandModuli(4.0),
+        Sampling::BandClamped(4.0),
+        Sampling::BandLog(4.0),
     ];
     for scale in [1, 2] {
         let p = PlaneWave::interface(Wave::P, scale, 0.0);
@@ -184,6 +209,52 @@ fn interfaces_by_band_limit_width() {
         for w in [2.0, 4.0, 8.0] {
             for delta in [0.0, 0.25] {
                 row(wave, Sampling::Band(w), 1, 8, delta);
+            }
+        }
+    }
+}
+
+/// A soft sediment on rock (shear modulus 48 times larger, R = -0.55 for P, -0.80 for S),
+/// where the band-limited step's overshoot must be limited (`MAX_STIFFENING` in
+/// `vibe_rations::model`): what that costs against node sampling and cell averages. The
+/// frequency keeps S at 11.6 points per wavelength at f0 in the sediment.
+#[test]
+#[ignore = "a study: `just interfaces`"]
+fn interfaces_at_a_large_contrast() {
+    let sediment = [1800.0, 400.0, 1900.0];
+    let rock = [4500.0, 2600.0, 2600.0];
+    let f0 = 10.0 * sediment[1] / UPPER[1];
+    header();
+    for wave in [Wave::P, Wave::S] {
+        // In wavelengths, the distances of the other studies.
+        let gaps = match wave {
+            Wave::P => [26, 78, 52],
+            Wave::S => [10, 17, 20],
+        };
+        for sampling in [Sampling::Node, Sampling::Layers, Sampling::Cell] {
+            for delta in [0.0, 0.25, 0.5] {
+                let mut p = PlaneWave::new(wave, H, f0, sediment, rock, gaps, delta);
+                let interface = p.interface;
+                let traces = match sampling {
+                    Sampling::Node => p.run(None),
+                    Sampling::Layers => {
+                        p.interfaces = Interfaces::BandLimited;
+                        p.run(None)
+                    }
+                    // Sampling::medium is for UPPER and LOWER; these media need their own.
+                    _ => p.run(Some(&|z| {
+                        let below = Sampling::Cell.fraction_below((z - interface) / H);
+                        let above = 1.0 - below;
+                        let rho = above * sediment[2] + below * rock[2];
+                        let modulus = |a: f64, b: f64| 1.0 / (above / a + below / b);
+                        let m =
+                            modulus(sediment[2] * sediment[0].powi(2), rock[2] * rock[0].powi(2));
+                        let mu =
+                            modulus(sediment[2] * sediment[1].powi(2), rock[2] * rock[1].powi(2));
+                        [(m / rho).sqrt(), (mu / rho).sqrt(), rho]
+                    })),
+                };
+                print_row(&p, &traces, wave, sampling, delta);
             }
         }
     }

@@ -1752,6 +1752,79 @@ sinc and its taper here are ours, not checked against Mittet's paper.
 **Reproduce:** `just interfaces` (3 minutes);
 `just physics a_planar_interface_reflects_and_transmits_plane_waves`.
 
+## 2026-11-21 — Band-limited layers, opt in
+
+**Question.** The planar-interface entry found that band-limiting density and compliances
+puts an interface where it lies. Can layers be built that way in general, including water
+and large contrasts, and what would making it the default change?
+
+**Method.** `[model] interfaces = "band-limited"` (`model::layer_profile`): each layer
+weighs the difference of the steps at its top and bottom, and density and the compliances
+$1/\rho v_p^2$, $1/\rho v_s^2$ are the weighted means. Two problems needed rules. (1) The
+step's 7.3% overshoot, across a contrast $r$ in compliance, takes the stiffer side's
+compliance $c$ to $c(1 - 0.073(r - 1))$: negative above $r = 14.7$ (a soft sediment on rock,
+water on rock), and stiff enough to shorten $\Delta t$ well before. (2) A fluid's S
+compliance is infinite, so averaging it would make $\mu$ zero four nodes into the solid.
+Candidates for (1), in the study's plane-wave setup (`just interfaces`; 20 and 11.6 points
+per wavelength at $f_0$, $\delta$ from 0 to 0.75): the step clamped to $[0, 1]$, and the
+logarithms of the moduli band-limited instead. Then a large contrast, a sediment
+($v_p = 1800$, $v_s = 400$ m/s, $\rho = 1900$) on rock (4500, 2600, 2600; 48 times the shear
+modulus, $R = -0.55$ for P, $-0.80$ for S) at $f_0 = 3.5$ Hz, $\delta$ = 0, 0.25 and 0.5.
+Last, `just physics` and the unit tests with the default flipped to band-limited.
+
+**Results.**
+
+- *Clamping* the step costs most of the gain: P reflection 2.5–6.6% (band-limited 1.2%), S
+  15–24% (12.6%), no better than cell averages.
+- *Logarithms* of the moduli stay positive but leave a position error, shifts of
+  $-0.10$ to $-0.12$ $h/v$ for P (3.4–4.5%) and $-0.05$ to $-0.09$ for S: like moduli,
+  only compliances put the interface where it lies.
+- *At the large contrast* (reflection misfits; transmitted S in brackets):
+
+  | Layers | P, $\delta$ = 0 / 0.25 / 0.5 | S, $\delta$ = 0 / 0.25 / 0.5 |
+  |---|---|---|
+  | node | 13.5 / 6.8 / 0.07% | 57.7 / 31.2 / 2.4% (25.7 / 14.1 / 3.3%) |
+  | sinc, clamped so no modulus stiffens by more than 1.25 | 0.60 / 0.48 / 0.23% | 11.9 / 8.7 / 6.1% (11.5 / 8.5 / 6.8%) |
+  | cell averages | 0.37 / 0.26 / 0.07% | 9.1 / 8.0 / 2.4% (9.3 / 7.5 / 3.3%) |
+
+  Cell averages, which never overshoot and also keep the interface in place, beat the
+  clamped sinc here; at the moderate contrast the sinc beats them (P 1.2% against
+  2.9–4.2%, S 12.6% against 18–22%).
+- *The rule*, then: an interface takes the sinc step unless its contrast would let the
+  overshoot stiffen a modulus by more than 1.25 (`MAX_STIFFENING`: a compliance ratio above
+  3.7, P and, between solids, S), and cell averages otherwise. Water: a node is fluid if the
+  layer it lies in is, as with node sampling; a solid node takes the solids' S compliance
+  alone, at most half its P modulus where a fluid's P compliance reaches it, so its bulk
+  modulus stays positive ($\lambda \ge 0$). Through the configuration the plane-wave tests
+  give the study's numbers exactly (`band_limited_interfaces_act_where_they_lie`: P 1.19%
+  and 1.17%, S 12.6% and 12.8% with the interface on a node and a quarter of one off).
+- *The overshoot speeds up some nodes*: 3022 m/s next to a 3000 m/s layer (2200 above),
+  2179 m/s in 2000 m/s rock under water, so $\Delta t$ shrinks by 0.7–8% and
+  `pml_vp_max` grows with it.
+- *`just physics` with band-limited layers as the default*: the analytic tests, CPML,
+  reciprocity, the dot-product test and the sphere inversion are unchanged; the long run
+  drains to $2.5 \times 10^{-6}$ and $9.6 \times 10^{-7}$ (node-sampled $2.7 \times 10^{-6}$
+  and $1.1 \times 10^{-6}$); the walls-and-water wavefield rebuilt backwards drifts
+  $1.8 \times 10^{-6}$ ($9.6 \times 10^{-7}$). Three gradient checks fail, and in the unit
+  tests the inversion's set-up test: it expects `pml_vp_max` to be the fastest layer's
+  (2000, now 2179). The gradient checks perturb every node except those at the model's
+  fastest speed; band-limited, the fastest is an overshoot plane (3022 m/s) and the 3000 m/s
+  layer just below it is perturbed past it, which shortens $\Delta t$: the perturbed run has
+  1280 samples against the observed 1270, and with water the $v_p$ check is off by 1%. Both
+  models of a check have the same $\Delta t$ (checked: 253 steps at order 4, 285 at order 8,
+  against 251 and 283 node-sampled), so the gradient isn't at fault; it is with respect to
+  node values, which band-limiting only sets.
+
+**Decision.** Band-limited layers are opt-in; node sampling stays the default. Making them
+the default needs the gradient checks to spare nodes near the fastest speed (or pin
+$\Delta t$ and `pml_vp_max`), the inversion test's expected `pml_vp_max`, and the baselines
+above. Spheres are still node-sampled.
+
+**Reproduce:** `just interfaces` (`interfaces_at_a_large_contrast` for the table);
+`just physics band_limited_interfaces_act_where_they_lie`; `just unit model::`. For the
+default flipped, move `#[default]` in `config::Interfaces` to `BandLimited` and run
+`just physics` and `just unit`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -1781,8 +1854,10 @@ sinc and its taper here are ours, not checked against Mittet's paper.
 - **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
   node-sampled layers put an interface midway between nodes (first-order error),
   band-limiting density and compliances [@mittet2017] makes it second order wherever it
-  lies, and the stencil's order doesn't matter. Still open: whether layers (and spheres)
-  should be band-limited by default, and how where a fluid meets a solid; oblique incidence
+  lies, and the stencil's order doesn't matter. Band-limited layers are opt-in
+  (2026-11-21, "Band-limited layers, opt in"). Still open: whether they should be the
+  default (the gradient checks' mask first), spheres, and how accurate the water rule is
+  against a fluid–solid reference (Scholte waves); oblique incidence
   with converted waves, which needs point sources and an exact reference, or plane waves
   at an angle in a grid whose sides wrap around; and the S reflection's second-order error
   at the point densities FWI runs at.
