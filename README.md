@@ -455,14 +455,18 @@ start, five iterations each:
 | stages with the receivers' side | 93.9% | 0.984 / 1.005 / 1.027 | 0.979 / 0.996 / 1.076 |
 | L2, the slow waves muted | 85.7% | 0.916 / 0.971 / 0.999 | 0.970 / 1.004 / 1.001 |
 | stages, the slow waves muted | 89.2% | 0.972 / 0.995 / 1.003 | 0.966 / 1.009 / 1.004 |
+| stages, the slow waves muted after 0.6 Hz | 91.3% | 0.973 / 0.995 / 1.017 | 0.947 / 0.991 / 1.031 |
 
 Each cell is $\lVert m - m_\text{true} \rVert / \lVert m_0 - m_\text{true} \rVert$ over the
 depth band (below 1, nearer the truth). Muting what arrives after a 600 m/s line
 (`[[inversion.mute]]`; down-weighting to 0.1 does the same) stops $v_s$ turning away below
 750 m and lets L2 improve $v_p$ down to 1 km, the only run nearer the truth over every free
 node; but it also removes the low-frequency slow waves that made the unmuted stages the best
-for $v_s$ above 1 km. A mute per stage, keeping them at 0.6 Hz, is the next thing to try. The
-research log ("Marmousi2" and the entries after it) has the details.
+for $v_s$ above 1 km. Keeping them at 0.6 Hz and muting them above (`[[inversion.stage.mute]]`)
+brings that back, at the cost of moving $v_s$ further away at 1–1.5 km: nothing tried recovers
+$v_s$ below 1 km. Every choice here (the mute line, the stages, which variant does best) was
+made on this part against its own true model, and the held-out western 6 km hasn't been run
+yet. The research log ("Marmousi2" and the entries after it) has the details.
 
 ## Numerics
 

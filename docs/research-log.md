@@ -2637,6 +2637,58 @@ that size has been compared both ways.
 counts_what_an_inversion_allocates`, `just memory examples/marmousi2/central.toml --invert
 --reconstruct`.
 
+## 2026-11-21 — Marmousi2: the slow waves kept at 0.6 Hz, muted above
+
+**Question.** Unmuted, the stages' 0.6 Hz iterations turned $v_s$ towards the truth at
+750–1000 m; muted, they didn't, so it was the slow waves at frequencies low enough to be
+within half a cycle that carried it (2026-11-21, "Marmousi2: the stages with the slow waves
+muted"). Keep them in the 0.6 Hz stage and mute them in the later ones?
+
+**Method** (`tests/marmousi2_study.rs`, `stages_muted_after_the_first`). The stages (below
+0.6 Hz for two iterations, below 1 Hz for two, then all for one) with the slow waves' mute
+(600 m/s from 0.87 s, taper 0.42 s) as a stage's own (`[[inversion.stage.mute]]`) in the
+second and third stages only. Chosen, like every variant here, on this part against its own
+truth (2026-11-21, "Marmousi2: the mute line without the truth, and a held-out part").
+
+**Results.** After each stage:
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| 0.6 Hz (2) | 97.9% | $v_p$ | 0.992, +0.28 | 0.998, +0.07 | 1.015, −0.21 | 0.999, +0.05 | 1.001, −0.07 |
+| | | $v_s$ | 0.970, +0.39 | 0.988, +0.16 | 1.029, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+| then 1.0 Hz, muted (2) | 92.2% | $v_p$ | 0.979, +0.38 | 0.997, +0.11 | 1.017, −0.23 | 0.999, +0.05 | 1.001, −0.08 |
+| | | $v_s$ | 0.949, +0.45 | 0.991, +0.14 | 1.031, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+| then all, muted (1) | 91.3% | $v_p$ | 0.973, +0.41 | 0.995, +0.14 | 1.017, −0.23 | 0.999, +0.05 | 1.001, −0.08 |
+| | | $v_s$ | 0.947, +0.45 | 0.991, +0.13 | 1.031, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+
+The 0.6 Hz stage is the unmuted stages' to the last digit, as it should be. 3,608 s.
+
+After five iterations ($v_p$ / $v_s$ error ratio):
+
+| | L2 left | 500–750 m | 750–1000 m | 1000–1500 m |
+|---|---|---|---|---|
+| L2, muted | 85.7% | 0.916 / 0.970 | **0.971** / 1.004 | **0.999** / **1.001** |
+| stages, unmuted | 93.2% | 0.976 / **0.946** | 1.001 / **0.987** | 1.020 / 1.044 |
+| stages, muted | 89.2% | 0.972 / 0.966 | 0.995 / 1.009 | 1.003 / 1.004 |
+| stages, muted after 0.6 Hz | 91.3% | 0.973 / 0.947 | 0.995 / 0.991 | 1.017 / 1.031 |
+
+- *It keeps what the low frequencies gave $v_s$ above 1 km* (0.947 and 0.991, the unmuted
+  stages' 0.946 and 0.987), which muting every stage lost (0.966 and 1.009).
+- *And what they cost below 1 km.* The 0.6 Hz stage already moves $v_s$ at 1–1.5 km away
+  (1.029, −0.12), the same slow waves that help above 1 km; the muted stages after it don't
+  undo that (1.031), only stop it growing, where the unmuted ones went on to 1.044.
+- $v_p$ follows the stages, not muted L2 (0.973, 0.995, 1.017 against 0.916, 0.971, 0.999):
+  four of the five iterations are at low frequencies again.
+
+**Decision.** No variant here recovers $v_s$ below 1 km, and each trades it against
+something: muted L2 is the safest (nothing gets worse, $v_p$ improves down to 1 km), the
+stages with the slow waves kept at 0.6 Hz the best for $v_s$ above 1 km at a cost of 3% below
+it. These rankings come from this part and its own truth, and are untested on the held-out
+part. The rest of the follow-ups were not run (open questions).
+
+**Reproduce:** `just in marmousi2-study stages_muted_after_the_first` (60 minutes on four
+cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2661,9 +2713,19 @@ counts_what_an_inversion_allocates`, `just memory examples/marmousi2/central.tom
   nothing recovers either below 1 km. Muting them (2026-11-21, "Marmousi2: L2 with the slow
   seafloor waves muted" and the two entries after it) stops the damage: L2 then improves $v_p$
   down to 1 km and leaves $v_s$ alone, but the low-frequency slow waves that had helped $v_s$
-  go too. Still to try: a mute per stage that keeps them at 0.6 Hz and removes them above,
-  windowed time shifts, the phase misfit with the mute, more iterations, and a better shallow
-  start.
+  go too; kept at 0.6 Hz and muted above, they help $v_s$ above 1 km and hurt it below
+  (2026-11-21, "Marmousi2: the slow waves kept at 0.6 Hz, muted above"). What the mute leaves
+  of $v_s$'s gradient at 1–1.5 km points slightly away on both components, from arrivals before
+  the line, not split further ("Marmousi2: what the mute removes"). Every ranking so far is the
+  central part's against its own truth. Written but not run (`tests/marmousi2_study.rs`):
+  the held-out western part (`west_l2`, `west_muted_l2` with its own 690 m/s line,
+  `west_stages_muted_after_the_first`), muted L2 with the receivers' side
+  (`muted_l2_with_receivers_side`), time shifts in a window around the early arrivals, then L2
+  (`windowed_time_shifts_then_l2`), muted L2 for twenty iterations (`muted_l2_longer`), and
+  L2 with the wavefields rebuilt (`l2_rebuilt`). Not written: the phase misfit with the mute; a
+  first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
+  one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
+  which stacks and f-k spectra within 1 km couldn't do; and a better shallow start.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
