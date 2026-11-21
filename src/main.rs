@@ -120,9 +120,10 @@ enum Command {
     /// and a sample per depth, the first at the surface.
     ///
     /// Averages them over cells `spacing` wide around each node (ρ arithmetically, ρvp² and
-    /// ρvs² harmonically; a node is fluid if most of its cell is) and repeats the section
-    /// `ny` times along y. Writes vp.npy, vs.npy and rho.npy (shape nz, ny, nx) for
-    /// [model.files], and prints the [grid] they fit.
+    /// ρvs² harmonically; a node is fluid if most of its cell is). Writes vp.npy, vs.npy and
+    /// rho.npy for [model.files]: sections, shape (nz, nx), which a run repeats along y to
+    /// whatever the grid has, or with --ny the whole grid, (nz, ny, nx). Prints the [grid]
+    /// they fit.
     Extrude {
         /// P-wave speed, SEG-Y.
         vp: PathBuf,
@@ -136,9 +137,10 @@ enum Command {
         /// The nodes' spacing in metres.
         #[arg(long)]
         spacing: f64,
-        /// Nodes along y.
+        /// Repeat the section this many times along y, writing the whole grid; by default
+        /// the files are sections, a twentieth or less of the size.
         #[arg(long)]
-        ny: usize,
+        ny: Option<usize>,
         /// Keep only this part along x, in metres from the first trace: FROM,TO.
         #[arg(long, value_delimiter = ',', value_name = "FROM,TO")]
         x: Option<Vec<f64>>,
@@ -407,17 +409,24 @@ fn run() -> Result<()> {
             let [vp, vs, rho] = [&vp, &vs, &rho].map(|p| section::read_segy(p));
             let m = section::extrude(&vp?, &vs?, &rho?, &e)?;
             std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
-            let [nx, ny, nz] = m.n;
+            let [nx, _, nz] = m.n;
             for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
-                npy::write(&out.join(format!("{name}.npy")), &[nz, ny, nx], values)?;
+                npy::write(&out.join(format!("{name}.npy")), &m.shape, values)?;
             }
+            let (what, ny) = match ny {
+                Some(ny) => (format!("{nx} × {ny} × {nz} nodes"), ny.to_string()),
+                None => (
+                    format!("sections of {nx} × {nz} nodes"),
+                    "<ny: any>".to_string(),
+                ),
+            };
             let range = |v: &[f32], solid: bool| {
                 let it = v.iter().copied().filter(|&x| !solid || x > 0.0);
                 let lo = it.clone().fold(f32::INFINITY, f32::min);
                 format!("{lo:.0}–{:.0}", it.fold(0.0, f32::max))
             };
             println!(
-                "wrote {}/{{vp,vs,rho}}.npy: {nx} × {ny} × {nz} nodes {spacing} m apart\n\
+                "wrote {}/{{vp,vs,rho}}.npy: {what} {spacing} m apart\n\
                  vp {} m/s, vs {} m/s where solid ({} of {} nodes in a y plane fluid), \
                  rho {} kg/m³\n\
                  [grid]\npoints = [{nx}, {ny}, {nz}]\nspacing = {spacing:?}",

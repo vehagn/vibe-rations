@@ -97,8 +97,9 @@ pub struct Extrusion {
     pub input_spacing: f64,
     /// The nodes' spacing in metres.
     pub spacing: f64,
-    /// Nodes along y.
-    pub ny: usize,
+    /// Nodes along y to repeat the section over; none to keep it a section, (nz, nx), which
+    /// `[model.files]` repeats along y itself.
+    pub ny: Option<usize>,
     /// The part of the section to keep along x, in metres from its first trace; all of it by
     /// default.
     pub x: Option<[f64; 2]>,
@@ -116,8 +117,10 @@ pub struct Extrusion {
 /// A model on the nodes, x fastest, then y, then z: as `[model.files]` reads it.
 #[derive(Debug, Clone)]
 pub struct Extruded {
-    /// Nodes along x, y and z.
+    /// Nodes along x, y and z; along y, 1 for a section.
     pub n: [usize; 3],
+    /// The arrays' shape: (nz, ny, nx), or (nz, nx) for a section.
+    pub shape: Vec<usize>,
     pub vp: Vec<f32>,
     pub vs: Vec<f32>,
     pub rho: Vec<f32>,
@@ -154,7 +157,7 @@ pub fn extrude(vp: &Section, vs: &Section, rho: &Section, e: &Extrusion) -> Resu
         e.input_spacing > 0.0 && e.spacing > 0.0,
         "spacings must be positive"
     );
-    ensure!(e.ny >= 1, "the model needs at least one node along y");
+    ensure!(e.ny != Some(0), "the model needs at least one node along y");
     let d = e.input_spacing;
     let axis = |range: Option<[f64; 2]>, len: usize, name: &str| -> Result<Vec<Range<usize>>> {
         let end = (len - 1) as f64 * d;
@@ -236,17 +239,22 @@ pub fn extrude(vp: &Section, vs: &Section, rho: &Section, e: &Extrusion) -> Resu
         "the largest density is {rho_max} kg/m³: is it in g/cm³? Scale it by 1000"
     );
     // The same plane at every y.
+    let ny = e.ny.unwrap_or(1);
     let [vp, vs, rho] = plane.map(|p| {
-        let mut out = Vec::with_capacity(nx * e.ny * nz);
+        let mut out = Vec::with_capacity(nx * ny * nz);
         for row in p.chunks_exact(nx) {
-            for _ in 0..e.ny {
+            for _ in 0..ny {
                 out.extend_from_slice(row);
             }
         }
         out
     });
     Ok(Extruded {
-        n: [nx, e.ny, nz],
+        n: [nx, ny, nz],
+        shape: match e.ny {
+            Some(ny) => vec![nz, ny, nx],
+            None => vec![nz, nx],
+        },
         vp,
         vs,
         rho,
@@ -390,7 +398,7 @@ mod tests {
         }
     }
 
-    fn extrusion(spacing: f64, ny: usize) -> Extrusion {
+    fn extrusion(spacing: f64, ny: Option<usize>) -> Extrusion {
         Extrusion {
             input_spacing: 1.0,
             spacing,
@@ -446,9 +454,9 @@ mod tests {
             (false, false) => 1.0,
         });
         let rho = uniform(9, 13, |_, s| if water(s) { 1.0 } else { 2.0 });
-        let m = extrude(&vp, &vs, &rho, &extrusion(4.0, 3)).unwrap();
+        let m = extrude(&vp, &vs, &rho, &extrusion(4.0, Some(3))).unwrap();
         // Nodes at x = 0, 4, 8 and z = 0, 4, 8, 12.
-        assert_eq!(m.n, [3, 3, 4]);
+        assert_eq!((m.n, m.shape.as_slice()), ([3, 3, 4], &[4, 3, 3][..]));
         assert_eq!(m.vp.len(), 36);
         let at = |v: &[f32], i: usize, j: usize, k: usize| v[(k * 3 + j) * 3 + i];
         for j in 0..3 {
@@ -477,10 +485,11 @@ mod tests {
         let e = Extrusion {
             x: Some([2.0, 4.0]),
             z: Some([3.0, 4.0]),
-            ..extrusion(0.5, 1)
+            ..extrusion(0.5, None)
         };
         let m = extrude(&vp, &vs, &rho, &e).unwrap();
-        assert_eq!(m.n, [5, 1, 3]);
+        // Without ny, a section: (nz, nx).
+        assert_eq!((m.n, m.shape.as_slice()), ([5, 1, 3], &[3, 5][..]));
         // The node at x = 2.5 lies between samples and its cell [2.25, 2.75) holds none: the
         // nearest one, rounding up, stands for it.
         assert!((m.vp[1] - 2330.0).abs() < 1e-3, "{}", m.vp[1]);
@@ -495,27 +504,27 @@ mod tests {
         assert!(
             err(Extrusion {
                 speed_scale: 1.0,
-                ..extrusion(1.0, 1)
+                ..extrusion(1.0, Some(1))
             })
             .contains("km/s")
         );
         assert!(
             err(Extrusion {
                 rho_scale: 1.0,
-                ..extrusion(1.0, 1)
+                ..extrusion(1.0, Some(1))
             })
             .contains("g/cm³")
         );
         assert!(
             err(Extrusion {
                 x: Some([1.0, 5.0]),
-                ..extrusion(1.0, 1)
+                ..extrusion(1.0, Some(1))
             })
             .contains("inside the section")
         );
         let short = uniform(4, 3, |_, _| 1.0);
         assert!(
-            extrude(&vp, &short, &rho, &extrusion(1.0, 1))
+            extrude(&vp, &short, &rho, &extrusion(1.0, Some(1)))
                 .unwrap_err()
                 .to_string()
                 .contains("differ")
@@ -523,7 +532,7 @@ mod tests {
         // vs too close to vp: no positive bulk modulus.
         let fast = one(1.9);
         assert!(
-            extrude(&vp, &fast, &rho, &extrusion(1.0, 1))
+            extrude(&vp, &fast, &rho, &extrusion(1.0, Some(1)))
                 .unwrap_err()
                 .to_string()
                 .contains("unphysical")
