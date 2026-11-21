@@ -1,0 +1,68 @@
+# The central 6 km of Marmousi2 (x = 6 to 12 km of the section: the faults and the anticline
+# below them) at 25 m, five shots into ocean-bottom nodes: the "observed" data for
+# central.toml, which starts from a smoothed version of this model.
+#
+#   just marmousi2                                       # the model files, once
+#   just run examples/marmousi2/central-true.toml --shots   # observed data, shot by shot
+#   just run examples/marmousi2/central-true.toml           # all five at once, for `gradient`
+#
+# 1.4 M nodes, 1750 steps a shot: about 15 s each on four cores.
+
+[grid]
+points = [241, 41, 141]
+spacing = 25.0
+
+[time]
+duration = 3.5
+# Pinned, with the operator and the layers below, so the observed and the synthetic traces
+# share their sampling and their numerics (the stable limit is 2.33 ms here).
+dt = 0.002
+
+[boundary]
+pml_width = 16
+pml_vp_max = 4700.0
+
+[scheme]
+order = 8
+optimised_for = 4.2  # the points per shortest wavelength of this model at 3 Hz
+
+[model.files]
+vp = "../../data/marmousi2/25m-central/vp.npy"
+vs = "../../data/marmousi2/25m-central/vs.npy"
+rho = "../../data/marmousi2/25m-central/rho.npy"
+
+[[source]]
+position = [1000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [2000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [3000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [4000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [5000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[receivers]
+components = ["vx", "vz"]
+
+[[receivers.line]]  # on the seafloor's first solid nodes
+from = [500.0, 500.0, 475.0]
+to = [5500.0, 500.0, 475.0]
+count = 201
+
+[output]
+dir = "out/marmousi2/central-true"

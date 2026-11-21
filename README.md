@@ -124,7 +124,7 @@ a free surface $z = 0$ is the surface.
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
-| `[model.files]` | Or `.npy` arrays of shape (nz, ny, nx) for `vp`, `vs`, `rho` |
+| `[model.files]` | Or `.npy` arrays of shape (nz, ny, nx) for `vp`, `vs`, `rho`, relative to the configuration; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
 | `[[model.sphere]]` | Spheres painted over the model |
 | `[[source]]` | `position`, `wavelet` (Ricker or Gaussian), and one of `explosion`, `moment`, `double_couple` (strike, dip, rake, m0) or `force` |
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
@@ -357,6 +357,49 @@ update and gradient as PNG. Each run keeps its
 configuration, model files, status and outputs in a directory of its own under the server's
 `--data`; after a restart, finished runs' results are still there, and runs that were in
 progress are marked interrupted.
+
+## Marmousi2
+
+Marmousi2 (Martin, Wiley & Marfurt 2006), the elastic successor of Marmousi (Versteeg 1994),
+is a 17 km section of a faulted margin under 450 m of water, 3.5 km deep, sampled every
+1.25 m. `just marmousi2` downloads it (three SEG-Y files, 467 MB, checked against their
+SHA-256 sums) into `data/marmousi2/`, which git ignores, and makes model files from it with
+`vibe-rations extrude`:
+
+```bash
+just in marmousi2                                 # once
+just in run examples/marmousi2/marmousi2.toml     # about a minute
+```
+
+`extrude` reads a 2D section as SEG-Y (IBM or IEEE floats), averages it over each node's
+cell (density arithmetically, $\rho v_p^2$ and $\rho v_s^2$ harmonically, the long-wave
+averages across fine layers of Backus 1962; a node is fluid when most of its cell is),
+optionally smooths the solid part for a starting model, and repeats the section along $y$: a
+2.5D model through which the waves spread in 3D. `examples/marmousi2/` has the whole section
+at 25 m (`marmousi2.toml`: an air gun in the water, ocean-bottom nodes along the seafloor)
+and its central 6 km for gradients and inversion (`central-true.toml`, the model as it is,
+and `central.toml`, the start: $v_p$ and $v_s$ smoothed over 250 m). The sediments under
+the seafloor have S waves as slow as 303 m/s, so at 25 m the grid carries 3 Hz: a Ricker
+wavelet at 1.2 Hz.
+
+`just in marmousi2-bench` times them on the dev container's four cores (Apple M1 Max, Colima,
+8 GiB; two runs):
+
+| Run | Nodes × steps | Wall | Speed | Peak memory (planned) |
+|---|---|---|---|---|
+| Forward, whole section, order 8 | 3.94 M × 3,034 | 68–69 s | 178–181 Mcell/s | 425 MiB (471) |
+| Forward, whole section, order 4 | 3.94 M × 2,694 | 41–43 s | 258–271 Mcell/s | 420 MiB (433) |
+| Gradient, central part, order 8 | 1.39 M × 1,750 | 68–71 s | 4.5–4.6 forward runs | 4.29 GiB (4.27) |
+| Gradient, central part, order 4 | 1.39 M × 1,750 | 52–53 s | 4.3–4.4 forward runs | 3.90 GiB (3.86) |
+
+The peak is the resident memory measured, the plan `vibe-rations memory`'s. Order 4 runs
+faster on the same grid, but at 4 points per wavelength it is outside its range; for order 8's
+accuracy it would take about four times as long. A gradient holds 26 times the forward run's
+memory, so one of the whole section (15 GiB) doesn't fit the container, and the gradient runs
+use the central part. Five iterations of `invert` from the smoothed start (40 minutes, 4.4 GiB)
+bring the misfit to 58% of the start's, but not the model nearer the truth: the slow waves
+along the seafloor seem to dominate the misfit. The research log ("Marmousi2") has the
+details.
 
 ## Numerics
 

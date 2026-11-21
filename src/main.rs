@@ -9,7 +9,7 @@ use vibe_rations::gradient::{Strategy, balancing_weights, gradient_with, l2_misf
 use vibe_rations::inversion::Inversion;
 use vibe_rations::npy;
 use vibe_rations::simulation::{self, Simulation};
-use vibe_rations::{memory, remote, server};
+use vibe_rations::{memory, remote, section, server};
 
 /// 3D elastic seismic wave simulator.
 #[derive(Parser)]
@@ -117,6 +117,50 @@ enum Command {
         balance: bool,
         #[command(flatten)]
         strategy: StrategyArgs,
+    },
+    /// Make model files from a 2D section: SEG-Y files of vp, vs and ρ, a trace per x position
+    /// and a sample per depth, the first at the surface.
+    ///
+    /// Averages them over cells `spacing` wide around each node (ρ arithmetically, ρvp² and
+    /// ρvs² harmonically; a node is fluid if most of its cell is) and repeats the section
+    /// `ny` times along y. Writes vp.npy, vs.npy and rho.npy (shape nz, ny, nx) for
+    /// [model.files], and prints the [grid] they fit.
+    Extrude {
+        /// P-wave speed, SEG-Y.
+        vp: PathBuf,
+        /// S-wave speed, SEG-Y; 0 in fluids.
+        vs: PathBuf,
+        /// Density, SEG-Y.
+        rho: PathBuf,
+        /// The section's sample spacing in metres, along x and z alike.
+        #[arg(long)]
+        input_spacing: f64,
+        /// The nodes' spacing in metres.
+        #[arg(long)]
+        spacing: f64,
+        /// Nodes along y.
+        #[arg(long)]
+        ny: usize,
+        /// Keep only this part along x, in metres from the first trace: FROM,TO.
+        #[arg(long, value_delimiter = ',', value_name = "FROM,TO")]
+        x: Option<Vec<f64>>,
+        /// Keep only this part along z, in metres from the first sample, which becomes the
+        /// surface: FROM,TO.
+        #[arg(long, value_delimiter = ',', value_name = "FROM,TO")]
+        z: Option<Vec<f64>>,
+        /// Multiply the speeds by this to make them m/s: 1000 for km/s.
+        #[arg(long, default_value_t = 1.0)]
+        speed_scale: f64,
+        /// Multiply the densities by this to make them kg/m³: 1000 for g/cm³.
+        #[arg(long, default_value_t = 1.0)]
+        rho_scale: f64,
+        /// Smooth the solid part with a Gaussian of this standard deviation in metres, leaving
+        /// the fluid as it is: a starting model for an inversion.
+        #[arg(long, value_name = "METRES")]
+        smooth: Option<f64>,
+        /// The directory to write the model files into.
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Work out the memory a simulation needs, part by part, without setting it up.
     Memory {
@@ -381,6 +425,62 @@ fn run() -> Result<()> {
             if let Some(free) = memory::available() {
                 println!("  {:>10}  available now", memory::human(free));
             }
+        }
+        Command::Extrude {
+            vp,
+            vs,
+            rho,
+            input_spacing,
+            spacing,
+            ny,
+            x,
+            z,
+            speed_scale,
+            rho_scale,
+            smooth,
+            out,
+        } => {
+            let pair = |v: Option<Vec<f64>>, name: &str| -> Result<Option<[f64; 2]>> {
+                v.map(|v| match v[..] {
+                    [from, to] => Ok([from, to]),
+                    _ => anyhow::bail!("--{name} takes two numbers, FROM,TO"),
+                })
+                .transpose()
+            };
+            let e = section::Extrusion {
+                input_spacing,
+                spacing,
+                ny,
+                x: pair(x, "x")?,
+                z: pair(z, "z")?,
+                speed_scale,
+                rho_scale,
+                smooth,
+            };
+            let [vp, vs, rho] = [&vp, &vs, &rho].map(|p| section::read_segy(p));
+            let m = section::extrude(&vp?, &vs?, &rho?, &e)?;
+            std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+            let [nx, ny, nz] = m.n;
+            for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
+                npy::write(&out.join(format!("{name}.npy")), &[nz, ny, nx], values)?;
+            }
+            let range = |v: &[f32], solid: bool| {
+                let it = v.iter().copied().filter(|&x| !solid || x > 0.0);
+                let lo = it.clone().fold(f32::INFINITY, f32::min);
+                format!("{lo:.0}–{:.0}", it.fold(0.0, f32::max))
+            };
+            println!(
+                "wrote {}/{{vp,vs,rho}}.npy: {nx} × {ny} × {nz} nodes {spacing} m apart\n\
+                 vp {} m/s, vs {} m/s where solid ({} of {} nodes in a y plane fluid), \
+                 rho {} kg/m³\n\
+                 [grid]\npoints = [{nx}, {ny}, {nz}]\nspacing = {spacing:?}",
+                out.display(),
+                range(&m.vp, false),
+                range(&m.vs, true),
+                m.fluid_nodes,
+                nx * nz,
+                range(&m.rho, false),
+            );
         }
         Command::Invert { config, out } => {
             let (cfg, sim, planned) = load(&config, Kind::Invert)?;

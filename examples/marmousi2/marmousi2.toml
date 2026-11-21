@@ -1,0 +1,54 @@
+# Marmousi2 (Martin, Wiley & Marfurt 2006): 17 km of a faulted, salt-flanked margin under
+# 450 m of water, 3.5 km deep, at 25 m. The section is the same at every y (2.5D) and the
+# waves still spread in 3D. An air gun in the water fires into ocean-bottom nodes along the
+# seafloor; the snapshots show the water wave, reflections and conversions to S waves in the
+# soft sediments below the seafloor, and Scholte waves crawling along it.
+#
+# The model files aren't in the repository: `just marmousi2` fetches Marmousi2 (467 MB)
+# into data/marmousi2 and makes them. Then
+#
+#   just run examples/marmousi2/marmousi2.toml
+#
+# 4.0 M nodes, 2900 steps: about two minutes on four cores, 0.4 GiB.
+
+[grid]
+points = [681, 41, 141]  # as `just marmousi2` prints them
+spacing = 25.0
+
+[time]
+duration = 6.0
+
+[boundary]
+pml_width = 16  # 41 nodes along y leave 9 outside the layers, room for the receivers
+
+[scheme]
+order = 8  # the default; `just marmousi2-bench` runs order 4 too
+
+[model.files]  # relative to this file
+vp = "../../data/marmousi2/25m/vp.npy"
+vs = "../../data/marmousi2/25m/vs.npy"
+rho = "../../data/marmousi2/25m/rho.npy"
+
+[[source]]
+position = [8500.0, 500.0, 50.0]  # in the water, 50 m down
+explosion = 1e12
+# The sediments below the seafloor have S waves as slow as 303 m/s, so at 25 m the grid holds
+# 4 points per shortest wavelength up to 3 Hz (2.5 times the Ricker's peak frequency).
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[receivers]
+components = ["vx", "vz"]
+
+[[receivers.line]]  # on the seafloor's first solid nodes, one per node
+from = [500.0, 500.0, 475.0]
+to = [16500.0, 500.0, 475.0]
+count = 641
+
+[[snapshot]]
+field = "vz"
+plane = "xz"
+at = 500.0
+interval = 0.5
+
+[output]
+dir = "out/marmousi2"

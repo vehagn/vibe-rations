@@ -120,6 +120,39 @@ gradient config observed *args:
 invert config *args:
     cargo run --release -- invert {{ config }} {{ args }}
 
+# Fetches Marmousi2 (Martin, Wiley & Marfurt 2006; vp, vs and density as SEG-Y, 467 MB, from
+# the Madagascar project's mirror, since SEG's own link is gone) into data/marmousi2 unless
+# it is there, checks it, and makes model files from it, nodes `spacing` metres apart and `ny`
+# of them along y: the whole section in data/marmousi2/<spacing>m, and its central 6 km (the
+# faults and the anticline below them) in <spacing>m-central, as it is and smoothed (a
+# starting model). examples/marmousi2 uses them.
+[group("simulate")]
+marmousi2 spacing="25" ny="41":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=data/marmousi2
+    mkdir -p "$dir"
+    for f in vp vs density; do
+      file="$dir/${f}_marmousi-ii.segy"
+      [[ -f $file ]] && continue
+      echo "downloading $file (156 MB)"
+      curl -fL --compressed -o "$file.part" "https://www.ahay.org/data/marm2/${f}_marmousi-ii.segy"
+      mv "$file.part" "$file"
+    done
+    (cd "$dir" && sha256sum --check --quiet) < examples/marmousi2/marmousi2.sha256
+    extrude=(cargo run --release --quiet -- extrude "$dir"/{vp,vs,density}_marmousi-ii.segy
+      --input-spacing 1.25 --speed-scale 1000 --rho-scale 1000
+      --spacing {{ spacing }} --ny {{ ny }})
+    "${extrude[@]}" --out "$dir/{{ spacing }}m"
+    "${extrude[@]}" --x 6000,12000 --out "$dir/{{ spacing }}m-central"
+    "${extrude[@]}" --x 6000,12000 --smooth 250 --out "$dir/{{ spacing }}m-central-smooth"
+
+# Times forward runs of Marmousi2 and gradient runs of its central part at orders 4 and 8,
+# and measures their memory (after `just marmousi2`; about 10 minutes on four cores)
+[group("simulate")]
+marmousi2-bench:
+    examples/marmousi2/bench.sh
+
 # Set up a simulation without running it: grid, time step, accuracy and memory
 [group("simulate")]
 check config:

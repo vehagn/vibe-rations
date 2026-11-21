@@ -1,0 +1,78 @@
+# The central 6 km of Marmousi2 as an inversion starts from it: vp and vs smoothed with a
+# Gaussian 250 m wide below the seafloor, the water and the density as they are. Same shots,
+# receivers and numerics as central-true.toml, whose traces are the observed data.
+#
+#   just run examples/marmousi2/central-true.toml --shots --out out/marmousi2/observed
+#   just invert examples/marmousi2/central.toml
+#
+# or one gradient, all five shots fired at once, against central-true.toml's own run:
+#
+#   just run examples/marmousi2/central-true.toml
+#   just gradient examples/marmousi2/central.toml out/marmousi2/central-true
+#
+# A gradient run needs 4.3 GiB (`just memory examples/marmousi2/central.toml --gradient`).
+
+[grid]
+points = [241, 41, 141]
+spacing = 25.0
+
+[time]
+duration = 3.5
+# Pinned, with the operator and the layers below, so the observed and the synthetic traces
+# share their sampling and their numerics (2.33 ms is the true model's stable limit).
+dt = 0.002
+
+[boundary]
+pml_width = 16
+pml_vp_max = 4700.0
+
+[scheme]
+order = 8
+optimised_for = 4.2  # the true model's points per shortest wavelength at 3 Hz
+
+[model.files]
+vp = "../../data/marmousi2/25m-central-smooth/vp.npy"
+vs = "../../data/marmousi2/25m-central-smooth/vs.npy"
+rho = "../../data/marmousi2/25m-central/rho.npy"  # as it is: only vp and vs are inverted
+
+[[source]]
+position = [1000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [2000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [3000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [4000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[[source]]
+position = [5000.0, 500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+
+[receivers]
+components = ["vx", "vz"]
+
+[[receivers.line]]  # on the seafloor's first solid nodes
+from = [500.0, 500.0, 475.0]
+to = [5500.0, 500.0, 475.0]
+count = 201
+
+[output]
+dir = "out/marmousi2/central"
+
+[inversion]
+observed = "../../out/marmousi2/observed"  # relative to this file
+parameters = ["vp", "vs"]
+iterations = 5
+fixed_above = 500.0  # the water, and the seafloor's first solid nodes, where the receivers are

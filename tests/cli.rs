@@ -457,3 +457,114 @@ fn reports_a_missing_file_and_fails() {
         stderr(&out)
     );
 }
+
+/// A SEG-Y file of IEEE floats (format 5): `traces` columns of samples.
+fn segy(path: &Path, traces: &[Vec<f32>]) {
+    let mut b = vec![0u8; 3600];
+    b[3220..3222].copy_from_slice(&(traces[0].len() as i16).to_be_bytes());
+    b[3224..3226].copy_from_slice(&5i16.to_be_bytes());
+    for t in traces {
+        b.extend_from_slice(&[0u8; 240]);
+        b.extend(t.iter().flat_map(|v| v.to_be_bytes()));
+    }
+    fs::write(path, b).unwrap();
+}
+
+#[test]
+fn extrude_makes_model_files_a_configuration_can_use() {
+    let dir = scratch("extrude");
+    // 61 traces of 41 samples 1 m apart, in km/s and g/cm³: water down to 10 m over a solid
+    // whose S speed grows to the right.
+    let section = |water: f32, solid: &dyn Fn(usize) -> f32| -> Vec<Vec<f32>> {
+        (0..61)
+            .map(|t| {
+                (0..41)
+                    .map(|s| if s <= 10 { water } else { solid(t) })
+                    .collect()
+            })
+            .collect()
+    };
+    segy(&dir.join("vp.sgy"), &section(1.5, &|_| 2.5));
+    segy(
+        &dir.join("vs.sgy"),
+        &section(0.0, &|t| 1.0 + 0.01 * t as f32),
+    );
+    segy(&dir.join("rho.sgy"), &section(1.0, &|_| 2.2));
+    let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+    let (vp, vs, rho, model) = (
+        path("vp.sgy"),
+        path("vs.sgy"),
+        path("rho.sgy"),
+        path("model"),
+    );
+    let common = [
+        "extrude",
+        &vp,
+        &vs,
+        &rho,
+        "--input-spacing",
+        "1",
+        "--spacing",
+        "2",
+        "--ny",
+        "25",
+    ];
+    let mut args = common.to_vec();
+    args.extend([
+        "--speed-scale",
+        "1000",
+        "--rho-scale",
+        "1000",
+        "--smooth",
+        "4",
+        "--out",
+        &model,
+    ]);
+    let out = vibe(&args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(printed.contains("points = [31, 25, 21]"), "{printed}");
+    for name in ["vp", "vs", "rho"] {
+        let file = dir.join("model").join(format!("{name}.npy"));
+        let (shape, _) = vibe_rations::npy::read(&file).unwrap();
+        assert_eq!(shape, [21, 25, 31]);
+    }
+    // Smoothed, the S speeds still climb to the right, inside the range they had.
+    let (_, speeds) = vibe_rations::npy::read(&dir.join("model/vs.npy")).unwrap();
+    let solid: Vec<f32> = speeds.into_iter().filter(|&v| v > 0.0).collect();
+    let [lo, hi] = [solid[0], solid[30]];
+    assert!(1000.0 < lo && lo < hi && hi < 1600.0, "{lo} {hi}");
+    // A configuration takes them as they are.
+    let config = dir.join("model.toml");
+    let toml = r#"
+[grid]
+points = [31, 25, 21]
+spacing = 2.0
+[time]
+duration = 0.01
+[boundary]
+pml_width = 10
+[model.files]
+vp = "model/vp.npy"
+vs = "model/vs.npy"
+rho = "model/rho.npy"
+[[source]]
+position = [30.0, 24.0, 20.0]
+force = [0.0, 0.0, 1.0]
+wavelet = { kind = "ricker", frequency = 50.0 }
+"#;
+    fs::write(&config, toml).unwrap();
+    let out = vibe(&["check", config.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("vs 0–"), "{}", stderr(&out));
+    // Two numbers or none.
+    let mut args = common.to_vec();
+    args.extend(["--x", "10", "--out", &model]);
+    let out = vibe(&args);
+    assert!(
+        stderr(&out).contains("--x takes two numbers"),
+        "{}",
+        stderr(&out)
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
