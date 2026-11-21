@@ -1073,6 +1073,66 @@ correctly by any filter.
 **Reproduce:** `just physics misfits_gradients`; the table,
 `cargo test --release --lib misfit_study -- --ignored --nocapture`.
 
+## 2026-11-21 — The misfits and stages on two test inversions
+
+**Question.** Do the new misfits and frequency-continuation stages (previous entries) help
+the inversion, and where? Frequency continuation and traveltime-like misfits exist to widen
+the basin of attraction when the starting model is more than half a period off
+[@bunks1995; @luo1991; @fichtner2008]; with a start inside the basin, L2 should do at least as
+well.
+
+**Method** (`tests/inversion_study.rs`, `just study`). Two surveys, each inverted from the
+same start by every variant; after each stage, the balanced L2 misfit of the model (one scale
+for every variant, relative to the start's) and the model error over a target, relative to
+the start's error.
+
+- *Sphere*: `an_inversion_finds_a_sphere`'s survey (two force shots at 12 Hz, 50 surface
+  receivers, the top 60 m fixed), $v_p$ and $v_s$ from the homogeneous start, 6 iterations;
+  the target is the sphere.
+- *Slow start*: a homogeneous model ($v_p = 2400$, $v_s = 1300$ m/s), started 20% too slow
+  in both, 60 × 36 × 28 nodes of 10 m, two force shots at 30 m depth and 400 m apart, 43
+  receivers on a 420 m surface line, 0.5 s, nothing fixed, 8 iterations. At the far offsets
+  the start's S waves come about half a period (40 ms at 12 Hz) late. The target is every
+  free node below 60 m.
+
+**Results.**
+
+| Sphere, 6 iterations | L2 left | $v_s$ error | $v_p$ error |
+|---|---|---|---|
+| L2 | 5.4% | 81.1% | 100.9% |
+| L2 below 6 Hz (3), then all (3) | 36.1% → 7.1% | 82.8% → 78.9% | 98.9% |
+| time shifts (3), then L2 (3) | 61.1% → 9.7% | 95.9% → 86.5% | 100.6% |
+| phase (6) | 12.4% | 86.8% | 101.5% |
+| phase (3), then L2 (3) | 32.5% → 7.9% | 94.8% → 84.4% | 100.9% |
+
+| Slow start, 8 iterations | L2 left | $v_s$ error below 60 m | $v_p$ error |
+|---|---|---|---|
+| L2 | 10.5% | 101.7% | 100.3% |
+| L2 below 4 Hz (3), 8 Hz (3), then all (2) | 86.3% → 55.4% → 35.1% | 100.0% | 100.2% |
+| time shifts (4), then L2 (4) | 67.0% → 16.6% | 99.3% | 99.9% |
+| phase (4), then L2 (4) | 88.4% → 29.2% | 100.7% | 100.1% |
+
+Each variant took 70–80 s (sphere) or 170–290 s (slow start) on 4 cores shared with other
+work.
+
+On the sphere, whose start is well inside L2's basin, L2 fits the data best; going through
+6 Hz first ends with the smallest $v_s$ error (78.9% against 81.1%) at a little more misfit.
+The time shifts and phases ignore amplitudes, so they fit less of the L2 misfit, and three
+L2 iterations afterwards don't make up for it. On the slow start the test does not
+discriminate: no variant changed the deep model in 8 iterations (errors 99–102%), while L2
+lowered its misfit to 10.5%: the updates went where the preconditioned gradient is largest,
+around the sources and receivers, which nothing held fixed here. The low-passed stages kept
+little of the data's energy (a 12 Hz Ricker keeps about 0.5% of its energy below 4 Hz, as a
+research agent measured for the filter) and moved slowly.
+
+**Decision.** Keep L2 on the traces as recorded as the default; the misfits and stages are
+options, with exact gradients, for starts outside L2's basin. Testing that they widen the
+basin needs a survey with more propagation (several wavelengths to the targets) and more
+iterations than this machine affords for a test, and a reference for what reaches the deep
+model (fixing the near-surface, or the receivers' side of the illumination; next entries).
+
+**Reproduce:** `just study sphere`; `just study slow_start` (about 6 and 15 minutes).
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

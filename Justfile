@@ -60,6 +60,12 @@ physics *args:
 accuracy:
     cargo test --release --test accuracy -- --ignored --nocapture --test-threads 1
 
+# The inversion study: each misfit and frequency-continuation stage on two small surveys
+# (about 25 minutes). The research log records the results.
+[group("check")]
+study *args:
+    cargo test --release --test inversion_study {{ args }} -- --ignored --nocapture --test-threads 1
+
 # rustfmt and clippy with -D warnings
 [group("check")]
 lint:

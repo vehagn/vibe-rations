@@ -19,6 +19,7 @@ opens a shell there instead.
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
 | `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~25 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
@@ -87,6 +88,7 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
   common/        closed-form solutions and setup helpers the two share
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
