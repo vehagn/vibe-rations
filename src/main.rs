@@ -288,7 +288,12 @@ fn run() -> Result<()> {
                             format!("{:?}", s.phase).to_lowercase(),
                             done,
                             left,
-                            s.error.as_deref().unwrap_or(&s.name),
+                            match (&s.error, s.kind) {
+                                (Some(e), _) => e.clone(),
+                                (None, server::Kind::Inversion) =>
+                                    format!("{} (inversion)", s.name),
+                                (None, server::Kind::Run) => s.name.clone(),
+                            },
                             if s.headless || s.phase.finished() {
                                 ""
                             } else {

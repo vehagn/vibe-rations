@@ -6,18 +6,28 @@
 //! --remote` and the web page both use its HTTP API. It listens on localhost only by default:
 //! reach it through an SSH tunnel, which authenticates and encrypts, rather than exposing it.
 //!
+//! A run may also be an inversion of synthetic data (`kind=inversion`, as the web page makes
+//! them): its configuration is the start, with `[inversion]`, and it needs `truth.toml`, the
+//! same survey with the true model. It runs in a thread of its own a unit at a time
+//! ([`InversionView`]): pausing takes effect between units, its progress is in units, and
+//! after each iteration it writes what `invert` writes.
+//!
 //! ```text
 //! GET    /api/info                        version, threads, memory available
-//! POST   /api/estimate                    body: TOML → the memory it needs (memory::Memory)
+//! POST   /api/estimate?kind=K             body: TOML → the memory it needs (memory::Memory)
 //! GET    /api/runs                        every run's status, newest first
-//! POST   /api/runs?name=N                 body: TOML → a new run; `needs` lists files to upload
+//! POST   /api/runs?name=N&kind=K          body: TOML → a new run (K: run, the default, or
+//!                                         inversion); `needs` lists files to upload
 //! GET    /api/runs/ID                     its status
-//! PUT    /api/runs/ID/files/PATH          body: a model file the configuration names
+//! PUT    /api/runs/ID/files/PATH          body: a file it needs (model files, truth.toml)
+//! GET    /api/runs/ID/files/PATH          one of them back
 //! POST   /api/runs/ID/start?paused=B      sets it up (allocating), then runs it or holds it
 //! POST   /api/runs/ID/pause, …/resume
 //! DELETE /api/runs/ID                     stops it and deletes it with its files
 //! GET    /api/runs/ID/section?field=F&plane=P&index=I&gain=G   PNG, with an X-Clip header
 //! GET    /api/runs/ID/gather?component=C&rows=R                PNG
+//! GET    /api/runs/ID/model?parameter=M&show=S&plane=P&index=I&gain=G
+//!                                         an inversion's picture: PNG, X-Clip and X-Low
 //! GET    /api/runs/ID/traces/C.npy        the traces of component C so far
 //! GET    /api/runs/ID/config              its configuration
 //! GET    /api/runs/ID/outputs             the files it wrote: [{path, bytes}]
@@ -31,7 +41,7 @@ use std::fs::{self, File};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Component as PathPart, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,7 +52,7 @@ use tiny_http::{Header, Method, Request, Response};
 use crate::config::Config;
 use crate::memory;
 use crate::simulation::Simulation;
-use crate::view::View;
+use crate::view::{InversionView, Pictures, View};
 
 /// Where a run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +76,33 @@ impl Phase {
         matches!(self, Phase::Done | Phase::Failed | Phase::Interrupted)
     }
 }
+
+/// What a run computes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A simulation.
+    #[default]
+    Run,
+    /// An inversion of synthetic data: the configuration is the start, `truth.toml` the truth.
+    Inversion,
+}
+
+impl Kind {
+    fn parse(query: &BTreeMap<String, String>) -> Result<Kind, Error> {
+        match query.get("kind").map(String::as_str) {
+            None | Some("run") => Ok(Kind::Run),
+            Some("inversion") => Ok(Kind::Inversion),
+            Some(k) => Err(Error(
+                400,
+                format!("unknown kind {k}; use run or inversion"),
+            )),
+        }
+    }
+}
+
+/// The file an inversion's true model comes in.
+pub const TRUTH: &str = "truth.toml";
 
 /// A run, as clients see it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,6 +130,12 @@ pub struct Status {
     /// chunks, which saves the per-chunk work (unless a watched run shares the machine).
     #[serde(default)]
     pub headless: bool,
+    #[serde(default)]
+    pub kind: Kind,
+    /// An inversion's progress (`InversionView::status`): its stage, misfits and iterations.
+    /// Its `step` and `total_steps` count units: shots, the start, iterations.
+    #[serde(default)]
+    pub inversion: Option<serde_json::Value>,
 }
 
 /// How to serve.
@@ -117,6 +160,8 @@ struct Run {
     /// Requests waiting for `state`: the scheduler lets them in before its next chunk, since
     /// the mutex isn't fair and would otherwise go straight back to the scheduler.
     waiting: AtomicUsize,
+    /// Deleted: an inversion's thread stops after its unit and writes nothing more.
+    deleted: AtomicBool,
 }
 
 struct Shared {
@@ -127,6 +172,8 @@ struct Shared {
 
 struct State {
     view: Option<View>,
+    /// An inversion's pictures as of its last unit (its thread holds the inversion).
+    pictures: Option<Pictures>,
     /// Steps per scheduling round, adapted to the chunk length wanted.
     chunk: usize,
     /// Cell updates and seconds spent, for the speed.
@@ -160,10 +207,12 @@ impl Run {
             }),
             state: Mutex::new(State {
                 view: None,
+                pictures: None,
                 chunk: 1,
                 work: (0.0, 0.0),
             }),
             waiting: AtomicUsize::new(0),
+            deleted: AtomicBool::new(false),
         }
     }
 
@@ -296,7 +345,8 @@ impl Run {
     fn step(&self, watched: bool) -> Turn {
         let headless = {
             let sh = self.shared();
-            if sh.status.phase != Phase::Running {
+            // An inversion steps in a thread of its own.
+            if sh.status.phase != Phase::Running || sh.status.kind == Kind::Inversion {
                 return Turn::Idle;
             }
             !sh.watched()
@@ -307,7 +357,9 @@ impl Run {
         let Ok(mut guard) = self.state.try_lock() else {
             return Turn::Yielded;
         };
-        let State { view, chunk, work } = &mut *guard;
+        let State {
+            view, chunk, work, ..
+        } = &mut *guard;
         let Some(v) = view.as_mut() else {
             let mut sh = self.shared();
             sh.status.phase = Phase::Failed;
@@ -494,7 +546,10 @@ fn route(
         }))),
         (Post, ["api", "estimate"]) => {
             let cfg = Config::from_toml(&body_text(request)?)?;
-            let m = memory::estimate(&cfg, &server.data)?;
+            let m = match Kind::parse(query)? {
+                Kind::Run => memory::estimate(&cfg, &server.data)?,
+                Kind::Inversion => memory::estimate_synthetic_inversion(&cfg, &server.data)?,
+            };
             let mut value = serde_json::to_value(m).expect("Memory serialises");
             value["limit"] = serde_json::json!(memory::available());
             Ok(Reply::Json(value))
@@ -507,7 +562,7 @@ fn route(
         }
         (Post, ["api", "runs"]) => {
             let name = query.get("name").map_or("run.toml", String::as_str);
-            create(server, name, &body_text(request)?).map(|s| json(&s))
+            create(server, name, &body_text(request)?, Kind::parse(query)?).map(|s| json(&s))
         }
         (Get, ["api", "runs", id]) => Ok(json(&status(&*find(server, id)?))),
         (Delete, ["api", "runs", id]) => {
@@ -517,13 +572,27 @@ fn route(
                 .unwrap()
                 .remove(*id)
                 .ok_or_else(|| not_found("such run"))?;
+            run.deleted.store(true, Ordering::SeqCst);
             // Waits for the scheduler to let go of it, then frees its memory.
-            run.state().view = None;
+            let mut st = run.state();
+            st.view = None;
+            st.pictures = None;
+            drop(st);
             fs::remove_dir_all(&run.dir).map_err(|e| Error(500, e.to_string()))?;
             Ok(Reply::Empty)
         }
         (Put, ["api", "runs", id, "files", rest @ ..]) => {
             upload(&*find(server, id)?, &rest.join("/"), request).map(|s| json(&s))
+        }
+        (Get, ["api", "runs", id, "files", rest @ ..]) => {
+            let run = find(server, id)?;
+            let name = rest.join("/");
+            if !uploads(&run)?.contains(&name) {
+                return Err(not_found("such file"));
+            }
+            let path = inside(&run.dir, &name)?;
+            let file = File::open(&path).map_err(|_| not_found("such file yet"))?;
+            Ok(Reply::File(file, content_type(&path)))
         }
         (Post, ["api", "runs", id, "start"]) => {
             start(server, &find(server, id)?, flag(query, "paused")).map(|s| json(&s))
@@ -561,6 +630,28 @@ fn route(
                 "image/png",
                 frame.png()?,
                 vec![("X-Clip", frame.clip.to_string())],
+            ))
+        }
+        (Get, ["api", "runs", id, "model"]) => {
+            let run = find(server, id)?;
+            run.shared().pictured = Some(Instant::now());
+            let pictures = run.state().pictures.clone().ok_or_else(|| {
+                conflict("this run has no inversion in memory; its outputs can still be fetched")
+            })?;
+            let frame = pictures.section(
+                query.get("parameter").map_or("vs", String::as_str),
+                query.get("show").map_or("model", String::as_str),
+                query.get("plane").map_or("xz", String::as_str),
+                number(query, "index", 0.0)? as usize,
+                number(query, "gain", 1.0)? as f32,
+            )?;
+            Ok(Reply::Bytes(
+                "image/png",
+                frame.png()?,
+                vec![
+                    ("X-Clip", frame.clip.to_string()),
+                    ("X-Low", frame.low.to_string()),
+                ],
             ))
         }
         (Get, ["api", "runs", id, "gather"]) => {
@@ -670,15 +761,24 @@ fn number(query: &BTreeMap<String, String>, key: &str, default: f64) -> Result<f
 }
 
 /// A new run from a configuration: its directory, configuration and status.
-fn create(server: &Server, name: &str, toml: &str) -> Result<Status, Error> {
+fn create(server: &Server, name: &str, toml: &str, kind: Kind) -> Result<Status, Error> {
     let cfg = Config::from_toml(toml)?;
-    let needs: Vec<String> = match &cfg.model.files {
+    let mut needs: Vec<String> = match &cfg.model.files {
         Some(f) => [&f.vp, &f.vs, &f.rho]
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
         None => vec![],
     };
+    if kind == Kind::Inversion {
+        if cfg.inversion.is_none() {
+            return Err(Error(
+                400,
+                "an inversion needs an [inversion] section".into(),
+            ));
+        }
+        needs.push(TRUTH.into());
+    }
     for n in &needs {
         relative(n)?;
     }
@@ -715,11 +815,32 @@ fn create(server: &Server, name: &str, toml: &str) -> Result<Status, Error> {
         info: None,
         live: false,
         headless: false,
+        kind,
+        inversion: None,
     };
     let run = Run::new(dir, status.clone());
     run.save(&status);
     server.runs.lock().unwrap().insert(id, Arc::new(run));
     Ok(status)
+}
+
+/// The files a run takes besides its configuration: the model files it names, and an
+/// inversion's truth.
+fn uploads(run: &Run) -> Result<Vec<String>, Error> {
+    let text =
+        fs::read_to_string(run.dir.join("config.toml")).map_err(|e| Error(500, e.to_string()))?;
+    let cfg = Config::from_toml(&text)?;
+    let mut names: Vec<String> = cfg
+        .model
+        .files
+        .iter()
+        .flat_map(|f| [&f.vp, &f.vs, &f.rho])
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if run.shared().status.kind == Kind::Inversion {
+        names.push(TRUTH.into());
+    }
+    Ok(names)
 }
 
 /// Stores a model file the configuration names.
@@ -762,7 +883,11 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
     let text =
         fs::read_to_string(run.dir.join("config.toml")).map_err(|e| Error(500, e.to_string()))?;
     let cfg = Config::from_toml(&text)?;
-    let need = memory::estimate(&cfg, &run.dir)?.peak;
+    let kind = run.shared().status.kind;
+    let need = match kind {
+        Kind::Run => memory::estimate(&cfg, &run.dir)?.peak,
+        Kind::Inversion => memory::estimate_synthetic_inversion(&cfg, &run.dir)?.peak,
+    };
     if let Some(mut free) = memory::available() {
         if need > free {
             free += evict(server, run, need - free);
@@ -777,6 +902,9 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
                 ),
             ));
         }
+    }
+    if kind == Kind::Inversion {
+        return start_inversion(run, &cfg, st, paused);
     }
     let sim = Simulation::new(&cfg, &run.dir)?;
     let out = run.dir.join("out");
@@ -800,6 +928,99 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
     Ok(s)
 }
 
+/// Sets an inversion up and starts its thread, which holds it at its first unit if `paused`.
+fn start_inversion(
+    run: &Arc<Run>,
+    cfg: &Config,
+    mut st: MutexGuard<'_, State>,
+    paused: bool,
+) -> Result<Status, Error> {
+    let text = fs::read_to_string(run.dir.join(TRUTH)).map_err(|e| Error(500, e.to_string()))?;
+    let truth = Config::from_toml(&text).map_err(|e| Error(400, format!("in {TRUTH}: {e:#}")))?;
+    if truth.model.files.is_some() {
+        return Err(Error(
+            400,
+            format!("{TRUTH} must give its model as layers and spheres"),
+        ));
+    }
+    let view = InversionView::new(cfg, &truth, &run.dir)?;
+    // What the page needs to draw it, from the configuration: setting up a run for its info
+    // would allocate a whole wavefield.
+    let grid = cfg.grid.grid()?;
+    let info = serde_json::json!({
+        "points": grid.n,
+        "spacing": grid.h,
+        "extent": grid.extent(),
+        "sources": cfg.sources.iter().map(|s| serde_json::json!({ "position": s.position }))
+            .collect::<Vec<_>>(),
+        "receiver_positions": cfg.receivers.positions()?,
+        "receivers": cfg.receivers.positions()?.len(),
+        "components": cfg.receivers.components.iter().map(|c| c.name()).collect::<Vec<_>>(),
+    });
+    st.pictures = Some(view.pictures.clone());
+    let mut sh = run.shared();
+    sh.status.info = Some(info);
+    sh.status.total_steps = view.units();
+    sh.status.inversion = Some(view.status());
+    sh.status.live = true;
+    sh.status.phase = if paused {
+        Phase::Paused
+    } else {
+        Phase::Running
+    };
+    run.save(&sh.status);
+    let s = sh.status();
+    drop(sh);
+    drop(st);
+    let run = run.clone();
+    std::thread::spawn(move || invert(&run, view));
+    Ok(s)
+}
+
+/// Steps an inversion a unit at a time while it is running, waiting while it is paused,
+/// writing its model and history after each unit from the start on.
+fn invert(run: &Run, mut view: InversionView) {
+    loop {
+        loop {
+            if run.deleted.load(Ordering::SeqCst) {
+                return;
+            }
+            match run.shared().status.phase {
+                Phase::Running => break,
+                Phase::Paused => {}
+                _ => return,
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let result = view.advance().and_then(|more| {
+            if view.started() && !run.deleted.load(Ordering::SeqCst) {
+                view.write_outputs(&run.dir.join("out"))?;
+            }
+            Ok(more)
+        });
+        if run.deleted.load(Ordering::SeqCst) {
+            return;
+        }
+        run.state().pictures = Some(view.pictures.clone());
+        let mut sh = run.shared();
+        let status = &mut sh.status;
+        status.step = view.done();
+        status.inversion = Some(view.status());
+        match result {
+            Err(e) => {
+                status.phase = Phase::Failed;
+                status.error = Some(format!("{e:#}"));
+            }
+            Ok(false) => status.phase = Phase::Done,
+            Ok(true) => {}
+        }
+        run.save(status);
+        if status.phase.finished() {
+            return;
+        }
+    }
+}
+
 /// Frees the wavefields of finished runs, oldest first, until about `wanted` bytes are free
 /// or none is left; returns what it freed.
 fn evict(server: &Server, keep: &Arc<Run>, wanted: u64) -> u64 {
@@ -816,8 +1037,10 @@ fn evict(server: &Server, keep: &Arc<Run>, wanted: u64) -> u64 {
         let Ok(mut st) = r.state.try_lock() else {
             continue;
         };
-        if let Some(v) = st.view.take() {
-            freed += v.sim.info.memory.resident;
+        let pictures = st.pictures.take().map_or(0, |p| p.memory_bytes() as u64);
+        let view = st.view.take().map_or(0, |v| v.sim.info.memory.resident);
+        if pictures + view > 0 {
+            freed += pictures + view;
             let mut sh = r.shared();
             sh.status.live = false;
             r.save(&sh.status);

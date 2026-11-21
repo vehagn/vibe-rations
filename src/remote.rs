@@ -16,7 +16,7 @@ use ureq::http::Response;
 
 use crate::config::Config;
 use crate::memory::human;
-use crate::server::{Phase, Status};
+use crate::server::{Kind, Phase, Status, TRUTH};
 use crate::simulation::human_time;
 
 /// A connection to a run server.
@@ -179,6 +179,24 @@ impl Remote {
         self.post(&format!("/api/runs/{}/start", encode(&status.id)), "")
     }
 
+    /// Starts an inversion of synthetic data named `name`: `start` is the configuration it
+    /// starts from, with `[inversion]`, and `truth` the same survey with the true model, both
+    /// sampled alike (as the web page makes them).
+    pub fn submit_inversion(&self, name: &str, start: &str, truth: &str) -> Result<Status> {
+        let status: Status = self.post(
+            &format!("/api/runs?name={}&kind=inversion", encode(name)),
+            start,
+        )?;
+        ensure!(
+            status.needs == [TRUTH],
+            "the inversion needs {:?} besides its true model",
+            status.needs
+        );
+        let url = self.url(&format!("/api/runs/{}/files/{TRUTH}", encode(&status.id)));
+        self.check(self.agent.put(&url).send(truth))?;
+        self.post(&format!("/api/runs/{}/start", encode(&status.id)), "")
+    }
+
     /// Stops a run and deletes it with its files.
     pub fn delete(&self, id: &str) -> Result<()> {
         self.check(
@@ -280,13 +298,26 @@ impl Remote {
     }
 }
 
-/// A run's progress in one line: share done, step, speed and time left.
+/// A run's progress in one line: share done, step, speed and time left; for an inversion, its
+/// units of work (shots, the start, iterations) and its misfit.
 pub fn progress_line(s: &Status) -> String {
     let share = if s.total_steps > 0 {
         100.0 * s.step as f64 / s.total_steps as f64
     } else {
         0.0
     };
+    if s.kind == Kind::Inversion {
+        let mut line = format!("{share:5.1}%  {}/{} units", s.step, s.total_steps);
+        let i = s.inversion.as_ref();
+        if let Some(stage) = i.and_then(|i| i["stage"].as_str()) {
+            line += &format!("  {stage}");
+        }
+        let misfit = |k: &str| i.and_then(|i| i[k].as_f64());
+        if let (Some(now), Some(first)) = (misfit("misfit"), misfit("starting_misfit")) {
+            line += &format!("  misfit {:.1}% of the start", 100.0 * now / first);
+        }
+        return line;
+    }
     let mut line = format!("{share:5.1}%  step {}/{}", s.step, s.total_steps);
     if let Some(left) = seconds_left(s) {
         line += &format!("  {:.0} Mcell/s  {} left", s.speed, human_time(left));

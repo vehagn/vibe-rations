@@ -337,3 +337,147 @@ fn status_answers_promptly_during_a_headless_run() {
     assert_eq!(r.follow(&id, false).unwrap().phase, Phase::Done);
     fs::remove_dir_all(dir).unwrap();
 }
+
+/// The start of a small synthetic inversion (two shots, the top held fixed) and its truth, with
+/// a faster sphere, sampled alike: what the web page sends.
+fn inversion_pair() -> (String, String) {
+    let config = |sphere: &str, inversion: &str| {
+        format!(
+            r#"
+[grid]
+points = [24, 20, 18]
+spacing = 10.0
+[time]
+duration = 0.15
+dt = 5e-4
+[boundary]
+pml_width = 4
+pml_vp_max = 2700.0
+[scheme]
+coefficients = "taylor"
+[[model.layer]]
+top = 0.0
+vp = 2400.0
+vs = 1300.0
+rho = 2100.0
+{sphere}
+[[source]]
+position = [80.0, 90.0, 30.0]
+force = [0.0, 0.0, 1e9]
+wavelet = {{ kind = "ricker", frequency = 15.0 }}
+[[source]]
+position = [150.0, 100.0, 30.0]
+force = [1e9, 0.0, 0.0]
+wavelet = {{ kind = "ricker", frequency = 15.0 }}
+[receivers]
+components = ["vx", "vz"]
+[[receivers.line]]
+from = [60.0, 70.0, 0.0]
+to = [170.0, 70.0, 0.0]
+count = 12
+{inversion}
+"#
+        )
+    };
+    let sphere = "[[model.sphere]]\ncenter = [115.0, 95.0, 100.0]\nradius = 25.0\n\
+                  vp = 2600.0\nvs = 1450.0\nrho = 2100.0";
+    (
+        config(
+            "",
+            "[inversion]\nobserved = \"observed\"\niterations = 2\nfixed_above = 40.0",
+        ),
+        config(sphere, ""),
+    )
+}
+
+/// An inversion on the server ends where the same inversion here does, bit for bit; it
+/// pictures and writes what the page and `invert` expect, and lists as one.
+#[test]
+fn an_inversion_on_the_server_gives_what_one_here_does() {
+    use vibe_rations::config::Config;
+    use vibe_rations::server::Kind;
+    use vibe_rations::view::InversionView;
+
+    let dir = scratch("inversion");
+    let (start, truth) = inversion_pair();
+    let server = Server::start(&dir.join("data"), None);
+    let u = &server.url;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let post = |path: &str, body: &str| {
+        let mut r = agent.post(&format!("{u}{path}")).send(body).unwrap();
+        (r.status().as_u16(), r.body_mut().read_to_string().unwrap())
+    };
+    // Its memory, more than a forward run's; and no [inversion], no inversion.
+    let peak = |body: &str| {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["peak"]
+            .as_u64()
+            .unwrap()
+    };
+    let (code, inversion) = post("/api/estimate?kind=inversion", &start);
+    assert_eq!(code, 200, "{inversion}");
+    assert!(peak(&inversion) > peak(&post("/api/estimate", &start).1));
+    assert_eq!(post("/api/runs?kind=inversion", &truth).0, 400);
+
+    let r = server.client();
+    let s = r.submit_inversion("sphere.toml", &start, &truth).unwrap();
+    assert_eq!((s.kind, s.total_steps), (Kind::Inversion, 5));
+    let end = r.follow(&s.id, false).unwrap();
+    assert_eq!(end.phase, Phase::Done, "{:?}", end.error);
+    let status = end.inversion.unwrap();
+    assert_eq!(status["history"].as_array().unwrap().len(), 2);
+    assert_eq!(end.step, 5);
+    assert!(remote::progress_line(&r.status(&s.id).unwrap()).contains("5/5 units"));
+
+    // The same here.
+    let base = Path::new(".");
+    let (start_cfg, truth_cfg) = (
+        Config::from_toml(&start).unwrap(),
+        Config::from_toml(&truth).unwrap(),
+    );
+    let mut here = InversionView::new(&start_cfg, &truth_cfg, base).unwrap();
+    while here.advance().unwrap() {}
+    assert_eq!(here.status()["misfit"], status["misfit"]);
+    let out = dir.join("out");
+    assert!(r.download(&s.id, &out).unwrap() >= 4);
+    assert_eq!(
+        fs::read(out.join("vs.npy")).unwrap(),
+        here.pictures.npy("vs").unwrap()
+    );
+    let summary: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("inversion.json")).unwrap()).unwrap();
+    assert_eq!(summary["iterations"].as_array().unwrap().len(), 2);
+
+    // Its pictures, and its true model back; nothing else of the run's.
+    let picture = agent
+        .get(&format!(
+            "{u}/api/runs/{}/model?parameter=vs&show=update&plane=xz&index=9&gain=1",
+            s.id
+        ))
+        .call()
+        .unwrap();
+    assert_eq!(picture.status().as_u16(), 200);
+    assert!(picture.headers().contains_key("x-low"));
+    let mut t = agent
+        .get(&format!("{u}/api/runs/{}/files/truth.toml", s.id))
+        .call()
+        .unwrap();
+    assert_eq!(t.body_mut().read_to_string().unwrap(), truth);
+    for other in ["status.json", "config.toml", "out/vs.npy"] {
+        let code = agent
+            .get(&format!("{u}/api/runs/{}/files/{other}", s.id))
+            .call()
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(code, 404, "{other}");
+    }
+    let list = Command::new(BIN)
+        .args(["remote", u, "list"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&list.stdout).contains("sphere.toml (inversion)"));
+    fs::remove_dir_all(dir).unwrap();
+}
