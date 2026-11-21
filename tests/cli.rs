@@ -338,7 +338,8 @@ fn invert_writes_the_model_and_its_history() {
         survey.replace("vp = 2000.0", "vp = 2080.0")
             + "\n[inversion]\nobserved = \"observed\"\nmisfit = \"traveltime\"\n\
                [[inversion.stage]]\nmax_frequency = 8.0\niterations = 1\n\
-               [[inversion.stage]]\nmisfit = \"l2\"\niterations = 1\n",
+               [[inversion.stage]]\nmisfit = \"l2\"\niterations = 1\n\
+               [[inversion.stage]]\nmax_frequency = 6.0\niterations = 0\n",
     )
     .unwrap();
     let out = vibe(&[
@@ -358,7 +359,8 @@ fn invert_writes_the_model_and_its_history() {
         serde_json::from_str(&fs::read_to_string(model_out.join("inversion.json")).unwrap())
             .unwrap();
     let stages = info["stages"].as_array().unwrap();
-    assert_eq!(stages.len(), 2, "{info}");
+    // The last stage takes no step, but it was begun.
+    assert_eq!(stages.len(), 3, "{info}");
     assert_eq!(stages[0]["misfit"], "traveltime", "{info}");
     assert_eq!(
         stages[1]["max_frequency"],

@@ -572,9 +572,11 @@ pub struct InversionConfig {
     /// the source side alone.
     #[serde(default)]
     pub receiver_runs: usize,
-    /// Factors on the preconditioner for each inverted parameter: a change of variables that
-    /// scales that parameter's steps, e.g. `rho = 0.3` where density takes up what the
-    /// velocities should explain. 1 by default.
+    /// Factors on the preconditioner for the inverted parameters: a change of variables that
+    /// sets each one's share of the steps, e.g. `rho = 0.3` where density takes up what the
+    /// velocities should explain. Positive, 1 by default. Only their ratios matter: one
+    /// factor on every inverted parameter, or on the only one, changes nothing (limit the
+    /// steps with `initial_step` and `max_step`).
     #[serde(default)]
     pub scale: ParameterScale,
     /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice

@@ -319,13 +319,57 @@ impl Misfit {
         self.compute(synthetic, true)
     }
 
-    /// Each component's weight in the misfit: the L2 misfit's; 1 for the trace-by-trace
-    /// misfits, which weigh traces, not components.
-    pub fn component_weights(&self) -> Vec<f64> {
-        match self.measure.kind {
-            MisfitKind::L2 => self.weights.clone(),
-            _ => vec![1.0; self.observed.len()],
-        }
+    /// How strongly the misfit weighs each trace (per component, per receiver) in the
+    /// Gauss–Newton Hessian: the square of its adjoint source's size per unit change of the
+    /// trace. The L2 misfit's is its weight. The time shift's derivative is about the
+    /// observed slope over its energy, ∂T/∂s ≈ ḋ/Σḋ², so its weight is 1/Σḋ²; the phase
+    /// misfit compares unit phasors, about ‖δs‖²/E per trace (E the observed energy), divided
+    /// by the component's number of measured traces as its normalisation does. Quiet traces,
+    /// which the trace-by-trace misfits leave out, weigh 0. Built from the observed traces only.
+    pub fn receiver_weights(&self) -> Vec<Vec<f64>> {
+        let n = self.samples;
+        let mut first = 0;
+        self.observed
+            .iter()
+            .enumerate()
+            .map(|(c, o)| {
+                let traces = o.len() / n;
+                let active = match self.measure.kind {
+                    MisfitKind::L2 => 1,
+                    _ => self.weights[first..first + traces]
+                        .iter()
+                        .filter(|&&w| w > 0.0)
+                        .count()
+                        .max(1),
+                };
+                let w: Vec<f64> = o
+                    .chunks(n)
+                    .enumerate()
+                    .map(|(r, d)| match self.measure.kind {
+                        MisfitKind::L2 => self.weights[c],
+                        kind => {
+                            let w = self.weights[first + r];
+                            let energy: f64 = if kind == MisfitKind::Traveltime {
+                                d.windows(3)
+                                    .map(|x| (0.5 * (x[2] as f64 - x[0] as f64)).powi(2))
+                                    .sum()
+                            } else {
+                                d.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() * active as f64
+                            };
+                            if w > 0.0 && energy > 0.0 {
+                                w / energy
+                            } else {
+                                0.0
+                            }
+                        }
+                    })
+                    .collect();
+                if self.measure.kind != MisfitKind::L2 {
+                    first += traces;
+                }
+                w
+            })
+            .collect()
     }
 
     /// Bytes it holds besides the observed traces it shares with the caller: the filtered
@@ -1277,6 +1321,53 @@ mod tests {
                 .zip(&long)
                 .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
             assert!(err < 1e-6 * peak, "{corner} Hz: {err} of {peak}");
+        }
+    }
+
+    /// The receivers' side weighs traces as the misfits' adjoint sources do: L2 by its
+    /// weights, the time shifts and phases by each trace's observed slope or energy, so a
+    /// pressure trace (a million times a velocity trace) weighs about 10⁻¹² of it, and a quiet
+    /// trace nothing.
+    #[test]
+    fn receiver_weights_follow_the_adjoint_sources() {
+        let dt = 2e-3;
+        let n = 250;
+        let trace = |a: f64| {
+            ricker(12.0, 0.2, dt, n)
+                .iter()
+                .map(|v| a * v)
+                .collect::<Vec<_>>()
+        };
+        let obs = Arc::new(vec![
+            to_f32(&[trace(1e-3), trace(1e-9)].concat()),
+            to_f32(&[trace(1e3), trace(2e3)].concat()),
+        ]);
+        let components = [Component::Vx, Component::P];
+        for kind in [MisfitKind::L2, MisfitKind::Traveltime, MisfitKind::Phase] {
+            let measure = Measure {
+                kind,
+                max_frequency: None,
+                filter_order: 4,
+                max_shift: None,
+                balance: true,
+                dominant_frequency: Some(12.0),
+            };
+            let w = Misfit::new(measure, &obs, &components, n, dt)
+                .unwrap()
+                .receiver_weights();
+            match kind {
+                MisfitKind::L2 => {
+                    assert_eq!(w[0], vec![w[0][0]; 2]);
+                    assert_eq!(w[1], vec![w[1][0]; 2]);
+                }
+                _ => {
+                    // The quiet vx trace weighs nothing; twice the pressure, a quarter.
+                    assert_eq!(w[0][1], 0.0);
+                    assert!((w[1][1] / w[1][0] - 0.25).abs() < 1e-6, "{kind:?} {w:?}");
+                }
+            }
+            let ratio = w[1][0] / w[0][0];
+            assert!(ratio > 1e-13 && ratio < 1e-11, "{kind:?}: {ratio}");
         }
     }
 

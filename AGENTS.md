@@ -126,9 +126,12 @@ Decisions and lessons, newest first. Add to them when you learn something the co
 doesn't show.
 
 - **The receivers' side of the illumination** (`receiver_runs`, `Inversion::receiver_energy`).
-  The runs inject through `Solver::adjoint_op`, exactly as the adjoint injects residuals, so
-  velocity and pressure receivers weigh as they do in the gradient, and a run needs no
-  sources in the configuration; it steps the solver itself. With a Hadamard matrix's signs
+  The runs inject through `Solver::adjoint_op`, exactly as the adjoint injects residuals, and
+  each trace by `Misfit::receiver_weights`, so velocity and pressure receivers weigh as they
+  do in the gradient: exactly for L2, by each observed trace's energy (or slope's) for the
+  time shifts and phases, which scale every trace by its own amplitude. Weighing those by
+  component, as at first, let pressure (10⁶ times velocity) take over the estimate. A run
+  needs no sources in the configuration; it steps the solver itself. With a Hadamard matrix's signs
   the cross terms cancel exactly (a unit test); with random ones only on average, which is
   enough for a preconditioner. Off by default: with the top fixed it changed little; with
   nothing fixed it helped (the log). The estimate is made at each stage's start and held

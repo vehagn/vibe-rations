@@ -403,6 +403,14 @@ impl Inversion {
             cfg.sources.len()
         );
         ensure!(!settings.parameters.is_empty(), "nothing to invert for");
+        for &p in &settings.parameters {
+            let w = settings.scale.of(p);
+            ensure!(
+                w.is_finite() && w > 0.0,
+                "[inversion.scale] {} must be positive, not {w}",
+                p.name()
+            );
+        }
         for (i, p) in settings.parameters.iter().enumerate() {
             ensure!(
                 !settings.parameters[..i].contains(p),
@@ -822,8 +830,10 @@ impl Inversion {
     ///
     /// L-BFGS with an initial matrix γ D² P is L-BFGS with γ P on the unknowns scaled by D⁻¹,
     /// D = diag(√w): the pairs (s, y) and the products sᵀy, the Armijo test and the step
-    /// limits are unchanged, so a factor is a change of variables for its parameter, and the
-    /// factors can differ between stages without forgetting the pairs.
+    /// limits are unchanged, so a factor is a change of variables for its parameter (the
+    /// pairs would stay valid if the factors changed; they are fixed for the inversion). Only
+    /// their ratios matter: γ and the first step's scaling to `initial_step` absorb a common
+    /// factor.
     fn preconditioner_for(&self, illumination: &[f64]) -> Option<Vec<f64>> {
         let unit = self.scale.iter().all(|&w| w == 1.0);
         let scaled = |f: &dyn Fn(usize) -> f64| -> Vec<f64> {
@@ -869,10 +879,12 @@ impl Inversion {
 
     /// Σₜ |v|² at every interior node of waves sent out from every receiver of the first shot
     /// at once, averaged over `runs` runs, and the most memory held meanwhile. Each receiver
-    /// component sends the first source's wavelet times √(its weight in the misfit, relative to
-    /// the largest, averaged over the shots), times `sign(run, receiver, component)`,
-    /// injected as the adjoint run injects residuals (`Solver::adjoint_op`), so velocity and
-    /// pressure receivers count as they do in the gradient.
+    /// component sends the first source's wavelet times √(its weight,
+    /// [`Misfit::receiver_weights`], relative to the shot's largest, averaged over the
+    /// shots), times `sign(run, receiver, component)`, injected as the adjoint run injects
+    /// residuals (`Solver::adjoint_op`), so velocity and pressure receivers count about as
+    /// they do in the gradient: exactly for the L2 misfit, by each trace's observed energy
+    /// for the trace-by-trace ones.
     ///
     /// With independent random signs its expectation is Σₐ wₐ Σₜ |Gₐ|², Gₐ the waves from
     /// receiver component a alone: the receivers' side of the Gauss–Newton Hessian's diagonal,
@@ -890,12 +902,17 @@ impl Inversion {
         use crate::receiver::Component;
         let shot = &self.shots[0];
         let wavelet = shot.config.sources[0].wavelet.wavelet()?;
-        let mut weights = vec![0.0; shot.components.len()];
+        let mut weights: Vec<Vec<f64>> = Vec::new();
         for s in &self.shots {
-            let w = s.misfit.component_weights();
-            let max = w.iter().fold(0.0f64, |m, &v| m.max(v));
+            let w = s.misfit.receiver_weights();
+            let max = w.iter().flatten().fold(0.0f64, |m, &v| m.max(v));
+            if weights.is_empty() {
+                weights = w.iter().map(|c| vec![0.0; c.len()]).collect();
+            }
             if max > 0.0 {
-                weights.iter_mut().zip(&w).for_each(|(a, b)| *a += b / max);
+                for (a, b) in weights.iter_mut().flatten().zip(w.iter().flatten()) {
+                    *a += b / max;
+                }
             }
         }
         let n = model.grid.interior_len();
@@ -907,11 +924,11 @@ impl Inversion {
             peak = peak.max(held + sim.memory_bytes());
             let mut forces = Vec::new();
             let mut stresses = Vec::new();
-            for (c, (&component, &w)) in shot.components.iter().zip(&weights).enumerate() {
-                if w <= 0.0 {
-                    continue;
-                }
-                for (r, &node) in sim.receivers.nodes.iter().enumerate() {
+            for (c, (&component, w)) in shot.components.iter().zip(&weights).enumerate() {
+                for (r, (&node, &w)) in sim.receivers.nodes.iter().zip(w).enumerate() {
+                    if w <= 0.0 {
+                        continue;
+                    }
                     let op = sim.solver.adjoint_op(component, node);
                     let amplitude = sign(run, r, c) * (w / self.shots.len() as f64).sqrt();
                     match component {
@@ -1677,6 +1694,16 @@ mod tests {
         assert!(r[..half].iter().all(|&v| v == 1.0) && r[half..].iter().all(|&v| v == 0.25));
         let none = setup(&survey(SOLID, "precondition = false")).unwrap();
         assert!(none.preconditioner.is_none());
+        // Factors must be positive where they act; elsewhere they are ignored.
+        for bad in ["0.0", "-0.5", "nan"] {
+            let cfg = survey(
+                SOLID,
+                &format!("parameters = [\"vs\"]\n[inversion.scale]\nvs = {bad}"),
+            );
+            assert!(setup(&cfg).is_err(), "{bad}");
+        }
+        let cfg = survey(SOLID, "parameters = [\"vs\"]\n[inversion.scale]\nvp = -1.0");
+        assert!(setup(&cfg).is_ok());
     }
 
     /// Sending from every receiver component at once with the signs of a Hadamard matrix's

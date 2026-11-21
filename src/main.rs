@@ -364,6 +364,9 @@ fn run() -> Result<()> {
             for (s, stage) in stages.iter().enumerate() {
                 if s > 0 {
                     inversion.begin_stage(s)?;
+                    // So that inversion.json lists every stage begun, even one that takes no
+                    // step.
+                    save(&out, &inversion, &settings, first)?;
                 }
                 let start = inversion.misfit();
                 if stages.len() > 1 {

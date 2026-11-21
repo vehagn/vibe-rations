@@ -341,7 +341,11 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         shots: cfg.sources.len(),
         unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
         memory: settings.memory,
-        precondition: settings.precondition || !settings.scale.is_unit(),
+        precondition: settings.precondition
+            || settings
+                .parameters
+                .iter()
+                .any(|&p| settings.scale.of(p) != 1.0),
         misfit_bytes,
         receiver_side: settings.precondition && settings.receiver_runs > 0,
     };
