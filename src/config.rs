@@ -239,6 +239,24 @@ pub struct ModelConfig {
     pub files: Option<ModelFiles>,
     #[serde(default, rename = "sphere")]
     pub spheres: Vec<SphereConfig>,
+    /// How the layers' interfaces meet the nodes.
+    #[serde(default)]
+    pub interfaces: Interfaces,
+}
+
+/// How the interfaces between `[[model.layer]]`s are put onto the nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Interfaces {
+    /// Each node takes the layer it lies in, a node on an interface the layer below. An
+    /// interface then acts midway between the nodes either side of it, wherever it lies: up
+    /// to half a node off.
+    #[default]
+    Nodes,
+    /// Band-limited to the grid: each interface's step is smoothed by a sinc tapered over four
+    /// nodes either side, applied to density and to the compliances 1/(ρvp²) and 1/(ρvs²), so
+    /// an interface acts where it lies, between nodes too (`crate::model::band_limited_step`).
+    BandLimited,
 }
 
 /// A layer from depth `top` down to the next layer's top. Speeds in m/s, density in kg/m³.

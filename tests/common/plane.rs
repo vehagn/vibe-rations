@@ -14,7 +14,7 @@
 //! y, which act only on those derivatives, do nothing. The grid needs only to be as wide as
 //! its layers allow.
 
-use vibe_rations::config::Config;
+use vibe_rations::config::{Config, Interfaces};
 use vibe_rations::grid::Grid;
 use vibe_rations::model::Model;
 use vibe_rations::receiver::Component;
@@ -48,6 +48,8 @@ pub struct PlaneWave {
     pub spacing: f64,
     pub f0: f64,
     pub order: usize,
+    /// How the layers meet the nodes when [`PlaneWave::run`] builds them.
+    pub interfaces: Interfaces,
     pub upper: [f64; 3],
     pub lower: [f64; 3],
     pub source: f64,
@@ -111,6 +113,7 @@ impl PlaneWave {
             spacing,
             f0,
             order: 8,
+            interfaces: Interfaces::Nodes,
             upper,
             lower,
             source: k_source * spacing,
@@ -167,8 +170,9 @@ impl PlaneWave {
         last + 2.4 / self.f0 + 0.02
     }
 
-    /// Runs it with the two media as layers, the lower one's top at the interface, or with
-    /// `medium` giving [vp, vs, ρ] at each depth of nodes instead.
+    /// Runs it with the two media as layers, the lower one's top at the interface, meeting the
+    /// nodes as `interfaces` says, or with `medium` giving [vp, vs, ρ] at each depth of nodes
+    /// instead.
     pub fn run(&self, medium: Option<&dyn Fn(f64) -> [f64; 3]>) -> Traces {
         let h = self.spacing;
         let across = 2 * PML + 5;
@@ -196,6 +200,8 @@ impl PlaneWave {
             [boundary]
             pml_width = {PML}
             free_surface = false
+            [model]
+            interfaces = "{interfaces}"
             {upper}
             {lower}
             [[source]]
@@ -211,6 +217,10 @@ impl PlaneWave {
             "#,
             duration = self.duration(),
             order = self.order,
+            interfaces = match self.interfaces {
+                Interfaces::Nodes => "nodes",
+                Interfaces::BandLimited => "band-limited",
+            },
             upper = layer(0.0, self.upper),
             lower = layer(self.interface, self.lower),
             zs = self.source,

@@ -27,6 +27,7 @@ the traces):
 | `a_point_force_matches_stokes_solution_without_the_transform` | 0.03–0.09% | the same, with the time error kept (opt-out path, $C = 0.3$) |
 | `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.52% (about 2.2% is the reference's) | free-surface condition, mirroring, surface sampling |
 | `a_planar_interface_reflects_and_transmits_plane_waves` | P direct 0.010%, reflected 0.72%, transmitted 0.078%; S 0.026%, 7.5%, 0.44%; a layer's top on a node reflects $h/v$ early | material averaging (ρ at the velocities, μ harmonically), how layers meet the nodes |
+| `band_limited_interfaces_act_where_they_lie` | P reflected 1.19%, transmitted 0.125%; S 12.8%, 0.76%; shifts under 0.01 $h/v$ | `model::layer_profile`'s band-limited layers, `band_limited_step` |
 | `absorbing_layers_reflect_little` (± free surface) | $1.7 \times 10^{-4}$ / $1.9 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
 | `swapping_source_and_receiver_gives_the_same_trace` | $\le 8 \times 10^{-7}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
 | `the_adjoint_run_is_the_transpose_of_the_forward_run` | $\le 8.3 \times 10^{-8}$ | the adjoint's step pairing or `Solver::adjoint_op`, or anything that breaks reciprocity; a receiver whose interpolation reaches into a layer (the helper refuses one) |

@@ -130,6 +130,7 @@ a free surface $z = 0$ is the surface.
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
+| `[model]` | `interfaces`: how the layers meet the nodes. `"nodes"` (default): each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off; `"band-limited"`: smoothed to the grid so it acts where it lies (see "Accuracy") |
 | `[model.files]` | Or `.npy` arrays for `vp`, `vs`, `rho`, relative to the configuration: shape (nz, ny, nx), or (nz, nx) for a section the same at every $y$; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
 | `[[model.sphere]]` | Spheres painted over the model |
 | `[[source]]` | `position`, `wavelet` (Ricker or Gaussian), and one of `explosion`, `moment`, `double_couple` (strike, dip, rake, m0) or `force` |
@@ -594,7 +595,7 @@ What higher orders don't fix, from the literature and our measurements:
   error is second order (0.72% and 7.5%) and the same at orders 4 to 16, so longer stencils
   gain nothing there. Band-limiting the model to the grid (Mittet 2017), density and the
   compliances, makes the reflection independent of where the interface falls (1.2% and
-  12.6%, second order); layers aren't band-limited yet.
+  12.6%, second order): `[model] interfaces = "band-limited"`, off by default.
 - **The free surface.** Stress imaging is second order, so surface waves need finer grids
   (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils. Our
   free-surface test's 2.5% is mostly its reference, which doubles the P wave as if it were

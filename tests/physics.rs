@@ -247,6 +247,45 @@ fn a_planar_interface_reflects_and_transmits_plane_waves() {
     }
 }
 
+/// The same with `interfaces = "band-limited"`: the interface on a node and a quarter of the
+/// way to the next act where they lie, with the same errors. Measured: P reflected 1.19% and
+/// 1.17%, transmitted 0.125%; S 12.6% and 12.8%, 0.75%; shifts under 0.01 h/v. Node-sampled,
+/// the same interfaces reflect 35% and 18% (P), 57% and 30% (S) off, h/v early and h/(2v)
+/// late.
+#[test]
+fn band_limited_interfaces_act_where_they_lie() {
+    use common::plane::{PlaneWave, Wave};
+    use vibe_rations::config::Interfaces;
+    for (wave, limits) in [
+        (Wave::P, [1.2e-4, 1.25e-2, 1.35e-3]),
+        (Wave::S, [3e-4, 0.13, 8e-3]),
+    ] {
+        for delta in [0.0, 0.25] {
+            let mut p = PlaneWave::interface(wave, 1, delta);
+            p.interfaces = Interfaces::BandLimited;
+            let fits = p.fits(&p.run(None));
+            for ((name, fit), limit) in ["direct", "reflected", "transmitted"]
+                .iter()
+                .zip(fits)
+                .zip(limits)
+            {
+                println!(
+                    "band-limited interface {delta} node below one, {wave:?} {name}: misfit \
+                     {:.3}%, amplitude {:.4}, shift {:.3} h/v",
+                    100.0 * fit.misfit,
+                    fit.ratio,
+                    fit.shift / p.node_time()
+                );
+                assert!(fit.misfit < limit, "{wave:?} {name}: misfit {}", fit.misfit);
+                assert!(
+                    fit.shift.abs() < 0.02 * p.node_time(),
+                    "{wave:?} {name}: {fit:?}"
+                );
+            }
+        }
+    }
+}
+
 /// The same receivers, the same distance from the source, in a domain small enough that the
 /// absorbing layers are close and in one large enough that they are out of reach. With a free
 /// surface, the source stays at the same depth and only the sides and bottom move away.

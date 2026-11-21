@@ -148,12 +148,25 @@ doesn't show.
   sampling, not the stencil, sets the error. Band-limiting density and the compliances
   $1/\rho v_p^2$, $1/\rho v_s^2$ (a sinc tapered over ±4 nodes) makes the reflection
   independent of the interface's position (P 1.2%, S 12.6%, second order); band-limiting
-  the moduli themselves leaves a position error, as arithmetic moduli would. Not adopted
-  yet: it changes every layered model and the baselines built on them, and a fluid needs
-  its own rule (a compliance band-limited into water would make $\mu$ zero four nodes
-  out). The test grid stays exactly 1D only because the values outside its sides copy the
-  nearest node's every half step (`extend_sideways`): with ordinary edges, waves from the
-  sides spoilt the transmitted P wave by 5% at 10 nodes from them, and by 1% at 30.
+  the moduli themselves, or their logarithms, leaves a position error, and clamping the
+  step's 7.3% overshoot costs most of the gain. It is opt-in, `[model] interfaces =
+  "band-limited"` (`model::layer_profile`): a node is fluid if the layer it lies in is; a
+  solid node takes the solids' S compliance alone, capped at half its P modulus near a
+  fluid (λ ≥ 0); and an interface whose contrast would let the overshoot stiffen a modulus
+  by more than 1.25 (`MAX_STIFFENING`, a compliance ratio above 3.7, as for water on rock)
+  is cell-averaged instead, which never overshoots and also keeps it in place: at a
+  contrast of 48 cell averages beat a clamped sinc (S 2.4–9.1% against 6.1–11.9%), at 2.8
+  the sinc beats them. The overshoot makes some interface nodes faster than any layer
+  (3022 m/s next to a 3000 m/s layer; 2179 m/s in 2000 m/s rock under water), so
+  $\Delta t$ shrinks and `pml_vp_max` grows with it. Not the default yet: under it the gradient
+  checks fail (their mask spares only nodes at the fastest speed, so a 3000 m/s layer just
+  below a 3022 m/s plane is perturbed past it and changes $\Delta t$), the inversion's
+  set-up test expects `pml_vp_max` to be a layer's, and the walls-and-water wavefield
+  rebuilt backwards drifts $1.8 \times 10^{-6}$ instead of $9.6 \times 10^{-7}$; the
+  rest of `just physics` is unchanged. Spheres are still node-sampled. The test grid stays
+  exactly 1D only because the values outside its sides copy the nearest node's every half
+  step (`extend_sideways`): with ordinary edges, waves from the sides spoilt the
+  transmitted P wave by 5% at 10 nodes from them, and by 1% at 30.
 
 - **The misfits meet the web page** (merged 2026-11-21). `InversionConfig.iterations` is now
   an `Option` (stages give their own), so ask `InversionConfig::stages()` how many iterations
@@ -417,7 +430,8 @@ doesn't show.
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
   free-surface P doubling 2.52% (mostly the reference, above); a planar interface midway
   between nodes, plane P and S waves, direct 0.010% and 0.026%, reflected 0.72% and 7.5%,
-  transmitted 0.078% and 0.44%; CPML reflection
+  transmitted 0.078% and 0.44%; band-limited, on a node and a quarter of one off, reflected
+  1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
   reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
   $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
