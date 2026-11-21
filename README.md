@@ -438,9 +438,26 @@ faster on the same grid, but at 4 points per wavelength it is outside its range;
 accuracy it would take about four times as long. A gradient holds 26 times the forward run's
 memory, so one of the whole section (15 GiB) doesn't fit the container, and the gradient runs
 use the central part. Five iterations of `invert` from the smoothed start (40 minutes, 4.4 GiB)
-bring the misfit to 58% of the start's, but not the model nearer the truth: the slow waves
-along the seafloor seem to dominate the misfit. The research log ("Marmousi2") has the
-details.
+bring the misfit to 58% of the start's, but not the model nearer the truth. The slow waves
+along the seafloor (about 300 m/s, mispredicted by a cycle or more) are why: four fifths of the
+misfit is within 1 km of the sources and more than half arrives after a 400 m/s line, and below
+750 m that part of the gradient turns $v_s$ away from the truth. `just marmousi2-study <name>`
+(`tests/marmousi2_study.rs`) measures that split and compares the tools on main from the same
+start, five iterations each:
+
+| | L2 left | $v_p$, 500–750 / 750–1000 / 1000–1500 m | $v_s$, the same |
+|---|---|---|---|
+| L2 | 57.9% | 0.900 / 0.994 / 1.020 | 0.973 / 1.095 / 1.070 |
+| stages: 0.6 Hz, 1 Hz, all | 93.2% | 0.976 / 1.001 / 1.020 | 0.946 / 0.987 / 1.044 |
+| time shifts, then L2 | 83.5% | 0.958 / 0.996 / 1.005 | 0.990 / 1.018 / 1.016 |
+| phase, then L2 | 80.0% | 0.908 / 0.951 / 1.005 | 0.992 / 1.026 / 1.022 |
+| stages with the receivers' side | 93.9% | 0.984 / 1.005 / 1.027 | 0.979 / 0.996 / 1.076 |
+
+Each cell is $\lVert m - m_\text{true} \rVert / \lVert m_0 - m_\text{true} \rVert$ over the
+depth band (below 1, nearer the truth). The stages keep $v_s$ right down to 1 km and the phase
+misfit does best for $v_p$, but nothing recovers the model below 1 km: the slow waves have to
+be muted or down-weighted first. The research log ("Marmousi2" and the entries after it) has
+the details.
 
 ## Numerics
 

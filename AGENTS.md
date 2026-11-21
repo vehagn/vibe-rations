@@ -249,7 +249,14 @@ doesn't show.
   moduli, a node fluid by majority, so the seafloor stays within half a node). The soft
   sediments under the seafloor ($v_s$ from 303 m/s at 25 m) set the grid and hold most of the
   late energy and the gradient. The whole section's gradient needs 15 GiB, so gradients use
-  the central 6 km (4.3 GiB). Without the files, `tests/examples.rs` only parses the
+  the central 6 km (4.3 GiB). **Inverting it** (`tests/marmousi2_study.rs`, `just
+  marmousi2-study <name>`; the log's Marmousi2 entries of 2026-11-21): from the start smoothed
+  over 250 m, the slow seafloor waves carry most of the misfit and turn $v_s$'s gradient the
+  wrong way below 750 m, and no tool on main gets round them in five iterations (stages best
+  for $v_s$, the phase misfit for $v_p$, the receivers' side worse). Judge a variant by the
+  error ratio and the cosine with the true update by depth band, not by the misfit: L2 fits
+  the most data and recovers the least. Each variant is 45–65 minutes and 4.4 GiB, so run
+  them one at a time. Without the files, `tests/examples.rs` only parses the
   configurations and `web/build.sh` leaves them out; the web image's `marmousi2` stage fetches
   and converts them itself, so the hosted page has them.
 - **Model files in the browser** (`model::Files`). A browser has no files: the worker asks

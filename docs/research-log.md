@@ -1987,6 +1987,50 @@ alone for $v_p$, once the slow waves are muted; that waits for `feat/mutes`.
 
 **Reproduce:** `just in marmousi2-study phase_then_l2` (51 minutes on four cores).
 
+## 2026-11-21 — Marmousi2: the stages with the receivers' side
+
+**Question.** The frequency stages were the best of the four variants for $v_s$ (previous
+entry). The receivers' side of the illumination (2026-11-21, "The receivers' side of the
+illumination") divides the gradient by the energy that waves sent from the receivers leave at
+each node too, which should even out how the 201 ocean-bottom nodes and the five sources weigh
+the model. Does it help here?
+
+**Method** (`tests/marmousi2_study.rs`, `stages_with_receivers_side`). The stages of the
+"frequency stages" entry with `receiver_runs = 8`: at each stage's start, eight runs with every
+receiver firing at once with random signs estimate the receivers' side, which multiplies the
+source side in the preconditioner.
+
+**Results.** Error ratio and cosine by depth band:
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| 0.6 Hz (2) | 98.6% | $v_p$ | 0.997, +0.28 | 0.999, +0.06 | 1.013, −0.20 | 1.000, −0.00 | 1.000, −0.00 |
+| | | $v_s$ | 0.991, +0.19 | 0.992, +0.13 | 1.030, −0.14 | 1.003, −0.07 | 1.000, +0.07 |
+| then 1.0 Hz (2) | 96.5% | $v_p$ | 0.986, +0.35 | 1.004, −0.05 | 1.025, −0.20 | 1.000, −0.00 | 1.000, −0.03 |
+| | | $v_s$ | 0.981, +0.20 | 0.991, +0.16 | 1.072, −0.15 | 1.006, −0.07 | 1.000, +0.10 |
+| then all (1) | 93.9% | $v_p$ | 0.984, +0.38 | 1.005, −0.05 | 1.027, −0.21 | 1.000, +0.00 | 1.000, −0.04 |
+| | | $v_s$ | 0.979, +0.22 | 0.996, +0.14 | 1.076, −0.16 | 1.006, −0.07 | 1.000, +0.11 |
+
+Against the stages alone after five iterations (93.2% of the L2 misfit; $v_p$ 0.976, 1.001,
+1.020 and $v_s$ 0.946, 0.987, 1.044 in the top three bands), every band that moves is a little
+worse. The receivers' side cost 142 s more to set up and 3,930 s in all, against 3,467.
+
+- *It shifts the update downwards*, as it should: the top band, where the receivers sit and
+  the source side alone is largest, moves less ($v_s$ 0.979 against 0.946), and 1000–1500 m
+  more. But that band's gradient points away from the truth (2026-11-21, "Where Marmousi2's
+  misfit lies"), so moving it more makes it worse ($v_s$ 1.076 against 1.044).
+- The cosines are nearly the same with and without it (+0.22 against +0.43 at the top is the
+  exception); a preconditioner rescales the update but can't turn a gradient that points the
+  wrong way.
+
+**Decision.** Not with this misfit: the receivers' side helps where the gradient is right
+and the top would otherwise take every update; here the deeper gradient is wrong, because of
+the slow waves. Retry it once they are muted (`feat/mutes`). Of the tools on main, the stages
+remain the best for $v_s$ and the phase misfit for $v_p$, and neither recovers the model below
+1 km in five iterations.
+
+**Reproduce:** `just in marmousi2-study stages_with_receivers_side` (65 minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2002,12 +2046,15 @@ alone for $v_p$, once the slow waves are muted; that waits for `feat/mutes`.
 - **The phase misfit's scale** is the stage's corner frequency; a low-passed spectrum peaks
   at about 0.85 of it (a research agent's measurement), so $\sigma = 1/f_c$ may be 15% short.
   The receivers' side ignores a stage's filter too.
-- **Inverting Marmousi2's elastic data.** From a start smoothed over 250 m, L2 on all the
-  ocean-bottom data lowers the misfit to 58% in five iterations without bringing the model
-  nearer the truth (2026-11-20, "Marmousi2"). Measure how much of the misfit the slow
-  seafloor waves carry, then try muting them, starting at lower frequencies
-  [@fichtner2013], and misfits less prone to cycle skipping [@engquist2014; @yang2016], on
-  `examples/marmousi2/central.toml`.
+- **Inverting Marmousi2's elastic data.** From a start smoothed over 250 m, the slow waves
+  along the seafloor carry most of the misfit (four fifths within 1 km of the source, more
+  than half after a 400 m/s line) and the part of its gradient that turns $v_s$ away from the
+  truth below 750 m (2026-11-21, "Where Marmousi2's misfit lies"). Frequency stages, time
+  shifts, the phase misfit and the receivers' side don't get round them in five iterations
+  (2026-11-21, the four Marmousi2 entries after it): the stages keep $v_s$ right down to 1 km, the phase misfit $v_p$, and
+  nothing recovers either below 1 km. Still to try: muting or down-weighting the slow waves by
+  arrival time, alone and with the stages (`feat/mutes`), windowed time shifts, the phase
+  misfit before the stages, more iterations, and a better shallow start.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
