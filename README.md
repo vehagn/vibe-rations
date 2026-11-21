@@ -137,7 +137,7 @@ a free surface $z = 0$ is the surface.
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
-| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, bounds `vp_range`, `vs_range`, `rho_range` |
+| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, `reconstruct` (rebuild the forward wavefields, as `gradient --reconstruct`), bounds `vp_range`, `vs_range`, `rho_range` |
 | `[inversion.scale]` | Relative factors on the inverted parameters' steps: `vp`, `vs`, `rho` (1 by default; only their ratios matter) |
 | `[[inversion.stage]]` | Frequency continuation: `max_frequency` (low-pass corner, Hz), `iterations`, `misfit` |
 | `[[inversion.mute]]` | A mute or one side of a window, in every stage (`[[inversion.stage.mute]]`: one stage's): `keep` (`before` or `after` the line $t = x/$`velocity`$ + $`delay`, $x$ the horizontal offset), `taper` (s), `weight` on the other side (0 by default), `shape` (`cosine`, or `exponential` damping with `taper` its time constant) |
@@ -455,14 +455,18 @@ start, five iterations each:
 | stages with the receivers' side | 93.9% | 0.984 / 1.005 / 1.027 | 0.979 / 0.996 / 1.076 |
 | L2, the slow waves muted | 85.7% | 0.916 / 0.971 / 0.999 | 0.970 / 1.004 / 1.001 |
 | stages, the slow waves muted | 89.2% | 0.972 / 0.995 / 1.003 | 0.966 / 1.009 / 1.004 |
+| stages, the slow waves muted after 0.6 Hz | 91.3% | 0.973 / 0.995 / 1.017 | 0.947 / 0.991 / 1.031 |
 
 Each cell is $\lVert m - m_\text{true} \rVert / \lVert m_0 - m_\text{true} \rVert$ over the
 depth band (below 1, nearer the truth). Muting what arrives after a 600 m/s line
 (`[[inversion.mute]]`; down-weighting to 0.1 does the same) stops $v_s$ turning away below
 750 m and lets L2 improve $v_p$ down to 1 km, the only run nearer the truth over every free
 node; but it also removes the low-frequency slow waves that made the unmuted stages the best
-for $v_s$ above 1 km. A mute per stage, keeping them at 0.6 Hz, is the next thing to try. The
-research log ("Marmousi2" and the entries after it) has the details.
+for $v_s$ above 1 km. Keeping them at 0.6 Hz and muting them above (`[[inversion.stage.mute]]`)
+brings that back, at the cost of moving $v_s$ further away at 1–1.5 km: nothing tried recovers
+$v_s$ below 1 km. Every choice here (the mute line, the stages, which variant does best) was
+made on this part against its own true model, and the held-out western 6 km hasn't been run
+yet. The research log ("Marmousi2" and the entries after it) has the details.
 
 ## Numerics
 
@@ -734,7 +738,8 @@ Planned next, following Fichtner (2011), ch. 7–11:
    replayed from a checkpoint at its start, it halves a gradient's memory on
    `examples/layered.toml` (1.68 against 3.64 GiB) and cuts it by two thirds on a
    $1001 \times 1001 \times 401$ grid, for about 15% more time. It isn't bit-exact, so
-   checkpoints stay the default.
+   checkpoints stay the default; an inversion rebuilds with `[inversion] reconstruct = true`
+   (2.44 against 4.41 GiB for `examples/marmousi2/central.toml`).
 4. **Error propagation.** How numerical error in the forward field (dispersion, the
    interface, free-surface and boundary errors above) and in the reconstruction carries into
    the adjoint field, the gradient and the inversion. The reconstruction's part is measured

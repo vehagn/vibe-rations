@@ -186,7 +186,8 @@ enum Command {
 struct StrategyArgs {
     /// Rebuild the forward wavefield backwards from the band around the absorbing layers
     /// instead of replaying it from checkpoints: less memory, one more pass, and exact only up
-    /// to single-precision round-off.
+    /// to single-precision round-off. With `memory --invert`, as `[inversion] reconstruct =
+    /// true` does.
     #[arg(long)]
     reconstruct: bool,
     /// With --reconstruct: steps per segment, each but the last replayed from a checkpoint to
@@ -400,7 +401,19 @@ fn run() -> Result<()> {
             invert,
             strategy,
         } => {
-            let cfg = Config::load(&config)?;
+            let mut cfg = Config::load(&config)?;
+            if invert {
+                ensure!(
+                    strategy.segment.is_none(),
+                    "an inversion rebuilds in segments of the length that needs least memory; \
+                     --segment is for --gradient"
+                );
+                let inversion = cfg
+                    .inversion
+                    .as_mut()
+                    .context("the configuration has no [inversion] section")?;
+                inversion.reconstruct |= strategy.reconstruct;
+            }
             let kind = match (gradient, invert) {
                 (true, _) => Kind::Gradient(strategy.strategy()),
                 (_, true) => Kind::Invert,
@@ -408,6 +421,17 @@ fn run() -> Result<()> {
             };
             let m = plan(&cfg, &config, kind)?;
             println!("{}", m.table());
+            if let Some(inversion) = cfg.inversion.as_mut().filter(|_| invert) {
+                // The other way to get the forward fields back, for comparison.
+                inversion.reconstruct = !inversion.reconstruct;
+                let flag = if inversion.reconstruct {
+                    "with reconstruct = true"
+                } else {
+                    "with reconstruct = false"
+                };
+                let o = plan(&cfg, &config, Kind::Invert)?;
+                println!("  {:>10}  at most {flag}", memory::human(o.peak));
+            }
             if gradient {
                 // The other way to get the forward field back, for comparison.
                 let (other, flag) = if strategy.reconstruct {

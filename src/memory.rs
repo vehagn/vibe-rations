@@ -59,6 +59,9 @@ pub struct InversionSize {
     pub misfit_bytes: u64,
     /// Whether it estimates the receivers' side of the illumination, held between stages.
     pub receiver_side: bool,
+    /// Whether its gradient runs rebuild the forward wavefield backwards (`[inversion]
+    /// reconstruct`) instead of replaying it from checkpoints.
+    pub reconstruct: bool,
 }
 
 /// What decides a run's memory.
@@ -148,7 +151,9 @@ impl Plan {
     /// traces, and the inversion's own arrays, with L-BFGS's memory full. It peaks in a gradient
     /// run after a step: the model as it stands, the start and the model stepped to, the
     /// gradient and illumination summed over the shots, and per unknown the L-BFGS pairs, the
-    /// unknowns, their gradient, the step, the preconditioner and the node's index.
+    /// unknowns, their gradient, the step, the preconditioner and the node's index. The
+    /// gradient run replays checkpoints, or with `reconstruct` rebuilds the wavefield
+    /// ([`Plan::reconstruction_memory`]'s parts).
     pub fn inversion_memory(&self, inversion: &InversionSize) -> Memory {
         let interior = self.grid.interior_len() as u64;
         let n = inversion.unknowns as u64;
@@ -157,7 +162,11 @@ impl Plan {
             format!("observed traces of {shots} shot(s)"),
             shots as u64 * self.trace_bytes(),
         );
-        let mut parts = self.gradient_parts(None, observed);
+        let mut parts = if inversion.reconstruct {
+            self.reconstruction_parts(None, observed)
+        } else {
+            self.gradient_parts(None, observed)
+        };
         parts.extend([
             part(
                 "models: as it stands, the start, and the one stepped to",
@@ -237,6 +246,11 @@ impl Plan {
     /// replayed segment, a checkpoint at the start of every segment but the last, the band
     /// for one segment's steps, and the velocities after the step being taken back.
     pub fn reconstruction_memory(&self, segment: Option<usize>) -> Memory {
+        Memory::of(self.reconstruction_parts(segment, part("observed traces", self.trace_bytes())))
+    }
+
+    /// [`Plan::reconstruction_memory`]'s parts, with `observed` traces.
+    fn reconstruction_parts(&self, segment: Option<usize>, observed: Part) -> Vec<Part> {
         let padded = self.grid.padded_len() as u64;
         let band = self.band();
         let record = 4 * band.values as u64;
@@ -247,7 +261,7 @@ impl Plan {
             segment,
         );
         let checkpoints = self.steps.div_ceil(k).saturating_sub(1);
-        let mut parts = self.adjoint_parts(part("observed traces", self.trace_bytes()));
+        let mut parts = self.adjoint_parts(observed);
         parts.extend([
             part(
                 format!(
@@ -270,7 +284,7 @@ impl Plan {
             ),
         ]);
         parts.extend(self.correlation_parts());
-        Memory::of(parts)
+        parts
     }
 
     /// The memory of a gradient run that gets the forward wavefield back as `strategy` says.
@@ -447,6 +461,7 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
                 .any(|&p| settings.scale.of(p) != 1.0),
         misfit_bytes,
         receiver_side: settings.precondition && settings.receiver_runs > 0,
+        reconstruct: settings.reconstruct,
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
 }
@@ -815,14 +830,16 @@ mod tests {
             .collect();
         // As recorded; with a stage that filters (and so keeps filtered copies); with the
         // receivers' side of the illumination and a scale; with the phase misfit's kernels,
-        // largest in its unfiltered stage; and with a mute (a muted copy and the offsets).
+        // largest in its unfiltered stage; with a mute (a muted copy and the offsets); and
+        // with the forward wavefield rebuilt backwards instead of replayed.
         let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
         let receivers = "receiver_runs = 1\n[inversion.scale]\nvp = 0.5";
         let phase = "misfit = \"phase\"\n[[inversion.stage]]\niterations = 2\n\
                      [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1";
         let muted = "[[inversion.mute]]\nkeep = \"before\"\nvelocity = 1000.0\ndelay = 0.1\n\
                      taper = 0.02";
-        for stages in ["", filtering, receivers, phase, muted] {
+        let rebuilt = "reconstruct = true";
+        for stages in ["", filtering, receivers, phase, muted, rebuilt] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

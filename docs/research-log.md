@@ -2469,6 +2469,226 @@ above. Spheres are still node-sampled.
 default flipped, move `#[default]` in `config::Interfaces` to `BandLimited` and run
 `just physics` and `just unit`.
 
+## 2026-11-21 — Marmousi2: what the mute removes
+
+**Question.** Muting the slow seafloor waves stopped L2 from turning $v_s$ away below 750 m,
+but left it barely moving there (2026-11-21, "Marmousi2: L2 with the slow seafloor waves
+muted" and the two entries after it). How much of the start's misfit and of its gradient
+does the mute take away, and does what it leaves between 1 and 1.5 km point towards the
+truth? Is the wrong-way part the horizontal component's, which carries three quarters of the
+misfit?
+
+**Method** (`tests/marmousi2_study.rs`, `misfit_by_mute`). As "Where Marmousi2's misfit lies",
+but split by the mute's weights $M$ instead of a hard line: for the start against the true
+model's five shots, the part of the balanced L2 misfit a mute keeps,
+$\tfrac12 \sum_c w_c \sum (M r)^2$ with $r = d - d_\text{obs}$, and its gradient (adjoint
+source $w_c M^2 r$), each component alone. $w_c$ is the balance of the traces as recorded, so
+the shares add up with the earlier entry's; the inversion balances by the muted observed
+traces instead, and its gradient (a recombination of the two components') is reported too.
+The part removed is the whole less the part kept. By depth band: the norm of the relative
+gradient $m_0\, \partial\chi / \partial m$ and the cosine of $-\nabla$ with the true update,
+raw and divided by the source-side illumination as the inversion's preconditioner divides
+(water level $10^{-3}$). Six gradient runs a shot: the whole, the muted and the down-weighted
+mute's kept parts, each component alone.
+
+**Results.** The mute keeps 35.4% of the misfit ($v_x$ 29.3%, $v_z$ 6.1%), so it removes
+64.6%; down-weighting to 0.1 keeps 36.5%. Norm, and cosine raw / preconditioned:
+
+| | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m |
+|---|---|---|---|---|
+| $v_p$, all | $8.2 \times 10^{-3}$, +0.37 / +0.40 | $1.8 \times 10^{-3}$, +0.04 / +0.01 | $9.4 \times 10^{-4}$, −0.16 / −0.17 | $1.3 \times 10^{-4}$, +0.03 / −0.02 |
+| $v_p$, kept | $6.6 \times 10^{-3}$, +0.45 / +0.46 | $1.3 \times 10^{-3}$, +0.31 / +0.30 | $3.9 \times 10^{-4}$, +0.02 / +0.01 | $6.5 \times 10^{-5}$, +0.00 / −0.03 |
+| $v_p$, removed | $3.8 \times 10^{-3}$, +0.02 / +0.05 | $1.2 \times 10^{-3}$, −0.28 / −0.27 | $8.1 \times 10^{-4}$, −0.20 / −0.20 | $8.9 \times 10^{-5}$, +0.05 / −0.01 |
+| $v_s$, all | $3.0 \times 10^{-2}$, +0.10 / +0.07 | $9.5 \times 10^{-3}$, −0.10 / −0.12 | $5.7 \times 10^{-3}$, −0.19 / −0.19 | $5.5 \times 10^{-4}$, −0.03 / −0.01 |
+| $v_s$, kept | $1.5 \times 10^{-2}$, +0.20 / +0.17 | $1.5 \times 10^{-3}$, +0.08 / +0.04 | $5.4 \times 10^{-4}$, −0.10 / −0.07 | $6.6 \times 10^{-5}$, −0.01 / +0.01 |
+| $v_s$, removed | $2.0 \times 10^{-2}$, −0.01 / −0.02 | $9.1 \times 10^{-3}$, −0.12 / −0.13 | $5.6 \times 10^{-3}$, −0.18 / −0.19 | $5.3 \times 10^{-4}$, −0.03 / −0.01 |
+
+By component, raw cosines at 750–1000 m and 1000–1500 m:
+
+| | $v_p$, $v_x$ | $v_p$, $v_z$ | $v_s$, $v_x$ | $v_s$, $v_z$ |
+|---|---|---|---|---|
+| all | −0.04, −0.21 | +0.29, +0.10 | −0.11, −0.19 | +0.02, −0.12 |
+| kept | +0.24, −0.06 | +0.41, +0.19 | +0.08, −0.09 | +0.01, −0.15 |
+
+With the inversion's own balance the kept gradient's cosines are within 0.04 of these ($v_p$
++0.44, +0.34, +0.05; $v_s$ +0.18, +0.07, −0.11 in the top three bands); its misfit at the start
+is 0.338, which `muted_l2`'s first step took to 0.332. The down-weighted mute's numbers are
+within 0.02 of the muted ones throughout. 3,968 s, with the parent session's CI sharing the
+four cores for part of it (not a benchmark).
+
+- *The mute removes what pointed the wrong way.* Its removed part points away from the truth
+  in every band between 750 m and 1.5 km ($v_p$ −0.28 and −0.20, $v_s$ −0.12 and −0.18), as
+  the split by arrival time found with a hard 400 m/s line.
+- *It removes the slow waves' share of $v_s$, which is most of it below 750 m*: the kept
+  $v_s$ gradient is 16% as large as the whole at 750–1000 m and 9% at 1–1.5 km, where the
+  kept $v_p$ gradient is 73% and 41% as large. What is left of $v_s$ there is weakly right
+  above 1 km (+0.08) and weakly wrong below (−0.10): why muted L2's $v_s$ barely moves.
+- *Not only the horizontal component.* Unmuted, $v_x$ carried the wrong sign of $v_p$'s
+  gradient (−0.21 at 1–1.5 km, where $v_z$'s is +0.10), and both carried $v_s$'s. Muted, the
+  remaining wrong $v_s$ at 1–1.5 km is in both components ($v_x$ −0.09, $v_z$ −0.15), so it isn't
+  the horizontal component, nor (muted) the slow waves; it lies in what arrives before the
+  line, which this run doesn't split further (S waves and conversions faster than the line, or
+  a timing error of the early arrivals from the smoothed start: not measured).
+- *The preconditioner changes no cosine by more than 0.05*; it rescales, it doesn't turn.
+
+**Decision.** The mute does what it was for: it takes out the part of the gradient that
+pointed away, two thirds of the misfit with it, and leaves a gradient that points right for
+$v_p$ down to 1 km. For $v_s$ below 750 m these data, muted, have little to say, and below 1 km
+what they say is slightly wrong; the slow waves that carried $v_s$ there only help where they
+are within half a cycle (the stages' 0.6 Hz, previous entries), which the next variant keeps.
+*Tuned on this dataset:* the line (600 m/s from 0.87 s) was chosen on this part with its true
+model's 300 m/s in view; the held-out entry below works it out from the start alone.
+
+**Reproduce:** `just in marmousi2-study misfit_by_mute` (about 50 minutes on four cores
+alone).
+
+## 2026-11-21 — Marmousi2: the mute line without the truth, and a held-out part
+
+**Question.** The maintainer's caution: "Be wary of overfitting for one dataset". The slow
+waves' mute line, the stages' corners and the ranking of every variant were chosen on the
+central 6 km and judged against its own true model. Which of them can be worked out from the
+observed data, the start and the source instead, and what can serve as a held-out case?
+
+**Method.** (1) *Measuring the slow waves' speed in the gathers*, observed and the start's
+synthetic ones, within 1 km of each source (receivers 25 m apart; the 3.5 s records keep waves
+at 300–400 m/s only to 0.8–1 km): the energy (balanced, smoothed over half a period) stacked
+along lines $t = \tau + |\Delta x| / v$ for $v$ from 150 to 1000 m/s, slower than sound in
+water; the same counting only after the direct wave's peak plus $0.6/f_0$ (a time the water
+depth fixes); the f-k energy binned by speed $f/k$; and the loudest wavenumber of speeds
+under 1000 m/s at each frequency from 0.3 to 3 Hz under a Hann taper over offset, with and
+without the direct wave removed. (2) *A rule from the start and the source alone*
+(`slow_waves_mute`, `mute_lines`): the line passes through $t_0$, the earliest a wave can leave
+the seafloor below the source (the Ricker's peak $1.2/f_0$ less half a period, plus 425 m of
+water at 1500 m/s: 0.87 s), with a taper of half a period ($0.5/f_0$ = 0.42 s), and is as fast
+as needs be for the taper to end, from 500 m offset on, before waves at the start's slowest
+S speed at the receivers: $1/v_\text{line} = 1/v_s - 0.42\ \text{s} / 500\ \text{m}$. (3) *A
+held-out part*: the western 6 km, $x$ = 0–6 km (`convert.sh`'s `25m-west` and its start
+smoothed over 250 m, `Case::part("west", …)`), with the same survey, start and numerics. Its
+seafloor is the same (first solid node at 475 m, $v_s$ 345 m/s there in the truth); below it
+the model differs ($v_p$ from 1028 to 4560 m/s, within the pinned time step's limit).
+
+**Results.**
+
+- *The measurements failed.* The stack picked 1000 m/s, the edge of the search, on every shot,
+  observed and synthetic: between 300 m and 1 km the direct wave's hyperbola is close to a
+  1000 m/s line. Counting only after the direct wave, the start's gathers still gave 1000 m/s
+  and the observed ones 410–1000 m/s by shot; the f-k bins gave 955 m/s throughout and the
+  f-k peaks 980–1000 m/s at most frequencies (the direct wave's leakage, falling with
+  wavenumber, is largest at the first wavenumbers under 1000 m/s), and with the direct wave removed scattered from 320 to
+  1000 m/s by shot and frequency. The direct wave and the early arrivals hold most of the
+  recorded energy; the slow waves hold most of the *misfit* (they are mispredicted, the early
+  arrivals aren't), not of the energy. The measuring code isn't kept.
+- *The rule* gives 616 m/s on the central part (the start's slowest $v_s$ at the receivers,
+  407 m/s), next to the 600 its runs used, which were chosen with the true model's 300 m/s and
+  the start's 400 in view ("Where Marmousi2's misfit lies"); and 690 m/s on the western part
+  (438 m/s).
+- *The held-out runs were not done* before the branches were tied up: L2, muted L2 with the
+  rule's 690 m/s line, and the per-stage mute, on the western part (`west_l2`,
+  `west_muted_l2`, `west_stages_muted_after_the_first`). Open questions.
+
+*What was tuned on which dataset:*
+
+| Choice | From |
+|---|---|
+| the line's $t_0$ (0.87 s) and taper (0.42 s) | the source and the water's depth, not tuned |
+| its speed, 600 m/s | the central part, with its true model in view; the rule gives 616 |
+| full mute from 500 m offset, a half-cosine taper | by hand, on the central part |
+| the stages' corners, 0.6 and 1.0 Hz | the source's spectrum (half its amplitude by 0.6 Hz) |
+| which variant does best | the central part against its own true model, only |
+
+**Decision.** Work the mute out from the start and the source (`slow_waves_mute`), and say
+that the observed slow waves must also come after it, which these true models satisfy but
+these runs couldn't check from the data. Until the western runs are done, every ranking in
+the Marmousi2 entries holds for the central part only.
+
+**Reproduce:** `just in marmousi2` (now also the western part's files), `just in
+marmousi2-study mute_lines` (seconds).
+
+## 2026-11-21 — An inversion with its forward wavefields rebuilt
+
+**Question.** Rebuilding a gradient run's forward wavefield backwards from the band around
+the layers (2026-11-20, "Rebuilding the forward wavefield backwards") needs less memory than
+checkpoints. Can an inversion use it, keeping its memory plan exact?
+
+**Method.** `[inversion] reconstruct = true` makes every gradient run of `Inversion::evaluate`
+use `Strategy::Reconstruct` with the default segment, the length that needs least memory.
+`Plan::inversion_memory` then counts the reconstruction's parts instead of the checkpoints'
+(`counts_what_an_inversion_allocates`, now with the setting too), and `memory --invert`
+prints the other way's peak. `rebuilding_the_wavefield_inverts_alike` inverts a small survey
+both ways.
+
+**Results.**
+
+- The plan equals what the inversion holds with the setting, as without it.
+- `examples/marmousi2/central.toml`: 2.44 GiB against 4.41 with checkpoints. The whole
+  section's gradient still needs 8.19 GiB (15 with checkpoints), more than the dev
+  container's 7.9.
+- On the small survey the starting misfit is the same bit for bit (the forward runs are), the
+  gradient differs from the replay's by $2.6 \times 10^{-6}$ of its norm, the misfit after the
+  first step by $5.5 \times 10^{-6}$ of it, and $v_s$ by at most $9.4 \times 10^{-8}$.
+- *Not run:* the same comparison on Marmousi2's central part over five iterations
+  (`l2_rebuilt`, against `l2`'s model), where 425 m of water would drift five times more than
+  rock. Open questions.
+
+**Decision.** An option, off by default: checkpoints stay the default until an inversion of
+that size has been compared both ways.
+
+**Reproduce:** `just unit rebuilding_the_wavefield_inverts_alike`, `just unit
+counts_what_an_inversion_allocates`, `just memory examples/marmousi2/central.toml --invert
+--reconstruct`.
+
+## 2026-11-21 — Marmousi2: the slow waves kept at 0.6 Hz, muted above
+
+**Question.** Unmuted, the stages' 0.6 Hz iterations turned $v_s$ towards the truth at
+750–1000 m; muted, they didn't, so it was the slow waves at frequencies low enough to be
+within half a cycle that carried it (2026-11-21, "Marmousi2: the stages with the slow waves
+muted"). Keep them in the 0.6 Hz stage and mute them in the later ones?
+
+**Method** (`tests/marmousi2_study.rs`, `stages_muted_after_the_first`). The stages (below
+0.6 Hz for two iterations, below 1 Hz for two, then all for one) with the slow waves' mute
+(600 m/s from 0.87 s, taper 0.42 s) as a stage's own (`[[inversion.stage.mute]]`) in the
+second and third stages only. Chosen, like every variant here, on this part against its own
+truth (2026-11-21, "Marmousi2: the mute line without the truth, and a held-out part").
+
+**Results.** After each stage:
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| 0.6 Hz (2) | 97.9% | $v_p$ | 0.992, +0.28 | 0.998, +0.07 | 1.015, −0.21 | 0.999, +0.05 | 1.001, −0.07 |
+| | | $v_s$ | 0.970, +0.39 | 0.988, +0.16 | 1.029, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+| then 1.0 Hz, muted (2) | 92.2% | $v_p$ | 0.979, +0.38 | 0.997, +0.11 | 1.017, −0.23 | 0.999, +0.05 | 1.001, −0.08 |
+| | | $v_s$ | 0.949, +0.45 | 0.991, +0.14 | 1.031, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+| then all, muted (1) | 91.3% | $v_p$ | 0.973, +0.41 | 0.995, +0.14 | 1.017, −0.23 | 0.999, +0.05 | 1.001, −0.08 |
+| | | $v_s$ | 0.947, +0.45 | 0.991, +0.13 | 1.031, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+
+The 0.6 Hz stage is the unmuted stages' to the last digit, as it should be. 3,608 s.
+
+After five iterations ($v_p$ / $v_s$ error ratio):
+
+| | L2 left | 500–750 m | 750–1000 m | 1000–1500 m |
+|---|---|---|---|---|
+| L2, muted | 85.7% | 0.916 / 0.970 | **0.971** / 1.004 | **0.999** / **1.001** |
+| stages, unmuted | 93.2% | 0.976 / **0.946** | 1.001 / **0.987** | 1.020 / 1.044 |
+| stages, muted | 89.2% | 0.972 / 0.966 | 0.995 / 1.009 | 1.003 / 1.004 |
+| stages, muted after 0.6 Hz | 91.3% | 0.973 / 0.947 | 0.995 / 0.991 | 1.017 / 1.031 |
+
+- *It keeps what the low frequencies gave $v_s$ above 1 km* (0.947 and 0.991, the unmuted
+  stages' 0.946 and 0.987), which muting every stage lost (0.966 and 1.009).
+- *And what they cost below 1 km.* The 0.6 Hz stage already moves $v_s$ at 1–1.5 km away
+  (1.029, −0.12), the same slow waves that help above 1 km; the muted stages after it don't
+  undo that (1.031), only stop it growing, where the unmuted ones went on to 1.044.
+- $v_p$ follows the stages, not muted L2 (0.973, 0.995, 1.017 against 0.916, 0.971, 0.999):
+  four of the five iterations are at low frequencies again.
+
+**Decision.** No variant here recovers $v_s$ below 1 km, and each trades it against
+something: muted L2 is the safest (nothing gets worse, $v_p$ improves down to 1 km), the
+stages with the slow waves kept at 0.6 Hz the best for $v_s$ above 1 km at a cost of 3% below
+it. These rankings come from this part and its own truth, and are untested on the held-out
+part. The rest of the follow-ups were not run (open questions).
+
+**Reproduce:** `just in marmousi2-study stages_muted_after_the_first` (60 minutes on four
+cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2493,9 +2713,19 @@ default flipped, move `#[default]` in `config::Interfaces` to `BandLimited` and 
   nothing recovers either below 1 km. Muting them (2026-11-21, "Marmousi2: L2 with the slow
   seafloor waves muted" and the two entries after it) stops the damage: L2 then improves $v_p$
   down to 1 km and leaves $v_s$ alone, but the low-frequency slow waves that had helped $v_s$
-  go too. Still to try: a mute per stage that keeps them at 0.6 Hz and removes them above,
-  windowed time shifts, the phase misfit with the mute, more iterations, and a better shallow
-  start.
+  go too; kept at 0.6 Hz and muted above, they help $v_s$ above 1 km and hurt it below
+  (2026-11-21, "Marmousi2: the slow waves kept at 0.6 Hz, muted above"). What the mute leaves
+  of $v_s$'s gradient at 1–1.5 km points slightly away on both components, from arrivals before
+  the line, not split further ("Marmousi2: what the mute removes"). Every ranking so far is the
+  central part's against its own truth. Written but not run (`tests/marmousi2_study.rs`):
+  the held-out western part (`west_l2`, `west_muted_l2` with its own 690 m/s line,
+  `west_stages_muted_after_the_first`), muted L2 with the receivers' side
+  (`muted_l2_with_receivers_side`), time shifts in a window around the early arrivals, then L2
+  (`windowed_time_shifts_then_l2`), muted L2 for twenty iterations (`muted_l2_longer`), and
+  L2 with the wavefields rebuilt (`l2_rebuilt`). Not written: the phase misfit with the mute; a
+  first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
+  one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
+  which stacks and f-k spectra within 1 km couldn't do; and a better shallow start.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw

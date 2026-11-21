@@ -26,7 +26,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
-use crate::gradient::gradient;
+use crate::gradient::{Strategy, gradient_with};
 use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
@@ -840,7 +840,11 @@ impl Inversion {
         let mut memory_bytes = held;
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
-            let run = gradient(&mut sim, |r| shot.misfit.evaluate(&r.traces), None)?;
+            let run = gradient_with(
+                &mut sim,
+                |r| shot.misfit.evaluate(&r.traces),
+                self.strategy(),
+            )?;
             total += run.misfit;
             memory_bytes = memory_bytes.max(held + run.memory_bytes);
             illumination
@@ -867,6 +871,15 @@ impl Inversion {
             illumination,
             memory_bytes,
         })
+    }
+
+    /// How a gradient run gets each shot's forward wavefield back (`[inversion] reconstruct`).
+    pub fn strategy(&self) -> Strategy {
+        if self.settings.reconstruct {
+            Strategy::Reconstruct { segment: None }
+        } else {
+            Strategy::default()
+        }
     }
 
     /// Bytes the inversion's own arrays hold: the observed traces, the model as it stands and
@@ -1703,6 +1716,43 @@ mod tests {
             assert_eq!(g[n], inv.g[i] as f32);
         }
         assert!(inv.gradient_of(Parameter::Vp).is_none());
+    }
+
+    /// With `reconstruct` the gradient runs rebuild each forward wavefield backwards instead
+    /// of replaying it: the misfit is the same bit for bit (the forward runs are), and the
+    /// gradient and the step it leads to are the replay's up to single-precision round-off
+    /// (here 2.6 × 10⁻⁶ of the gradient's norm, 5.5 × 10⁻⁶ of the misfit after the step, and
+    /// at most 9.4 × 10⁻⁸ of a value of vs).
+    #[test]
+    fn rebuilding_the_wavefield_inverts_alike() {
+        let truth = survey(&SOLID.replace("1300.0", "1350.0"), "");
+        let run = |extra: &str| {
+            let cfg = survey(SOLID, extra);
+            let settings = cfg.inversion.clone().unwrap();
+            let mut inv =
+                Inversion::new(&cfg, start(&cfg), vec![recorded(&truth)], &settings).unwrap();
+            let (misfit, g) = (inv.misfit(), inv.g.clone());
+            let it = inv.iterate().unwrap().expect("a step");
+            (inv.strategy(), misfit, g, it.misfit, inv.model.vs.clone())
+        };
+        let (replayed, misfit, g, stepped, vs) = run("");
+        let (rebuilt, misfit_r, g_r, stepped_r, vs_r) = run("reconstruct = true");
+        assert_eq!(replayed, Strategy::Checkpoints { every: None });
+        assert_eq!(rebuilt, Strategy::Reconstruct { segment: None });
+        assert_eq!(misfit, misfit_r);
+        let norm = |v: &mut dyn Iterator<Item = f64>| v.map(|x| x * x).sum::<f64>().sqrt();
+        let off = norm(&mut g.iter().zip(&g_r).map(|(a, b)| a - b)) / norm(&mut g.iter().copied());
+        assert!(off > 0.0 && off < 1e-5, "the gradients differ by {off:e}");
+        assert!(
+            ((stepped_r - stepped) / stepped).abs() < 2e-5,
+            "{stepped} against {stepped_r}"
+        );
+        let largest = vs
+            .iter()
+            .zip(&vs_r)
+            .map(|(a, b)| ((a - b) / a).abs())
+            .fold(0.0f32, f32::max);
+        assert!(largest < 1e-5, "vs differs by up to {largest:e}");
     }
 
     /// A start and a true model share the operator the faster and the slower of them need,
