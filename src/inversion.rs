@@ -342,8 +342,10 @@ pub struct Inversion {
     /// The misfit at the start of each stage begun, as that stage measures it.
     pub stage_misfits: Vec<f64>,
     settings: InversionConfig,
-    /// The water level of the preconditioner, if there is one.
+    /// The water level of the illumination, if the inversion divides by it.
     water_level: Option<f64>,
+    /// Each free parameter's factor on the preconditioner (`[inversion] scale`).
+    scale: Vec<f64>,
     preconditioner: Option<Vec<f64>>,
     lbfgs: Lbfgs,
     x: Vec<f64>,
@@ -584,6 +586,11 @@ impl Inversion {
             stage_misfits: Vec::new(),
             settings: settings.clone(),
             water_level: settings.precondition.then_some(settings.water_level),
+            scale: settings
+                .parameters
+                .iter()
+                .map(|&p| settings.scale.of(p))
+                .collect(),
             preconditioner: None,
             lbfgs: Lbfgs::new(settings.memory),
             x: vec![0.0; n],
@@ -598,7 +605,7 @@ impl Inversion {
             "the water level must be positive"
         );
         let e = inversion.evaluate(&inversion.model)?;
-        inversion.memory_bytes = e.memory_bytes;
+        inversion.memory_bytes = inversion.memory_bytes.max(e.memory_bytes);
         inversion.misfit = e.misfit;
         inversion.g = e.gradient;
         inversion.preconditioner = inversion.preconditioner_for(&e.illumination);
@@ -805,24 +812,33 @@ impl Inversion {
             + self.lbfgs.memory_bytes()
     }
 
-    /// 1 / (I / I_max + water level) for each unknown, I the energy at its node, if the
-    /// inversion preconditions.
+    /// For each unknown, its parameter's factor w divided by (I / I_max + water level), I the
+    /// energy at its node, if the inversion divides by it; w alone if not, and none if every w
+    /// is 1 too.
+    ///
+    /// L-BFGS with an initial matrix γ D² P is L-BFGS with γ P on the unknowns scaled by D⁻¹,
+    /// D = diag(√w): the pairs (s, y) and the products sᵀy, the Armijo test and the step
+    /// limits are unchanged, so a factor is a change of variables for its parameter, and the
+    /// factors can differ between stages without forgetting the pairs.
     fn preconditioner_for(&self, illumination: &[f64]) -> Option<Vec<f64>> {
-        let level = self.water_level?;
+        let unit = self.scale.iter().all(|&w| w == 1.0);
+        let scaled = |f: &dyn Fn(usize) -> f64| -> Vec<f64> {
+            self.free
+                .iter()
+                .zip(&self.scale)
+                .flat_map(|((_, nodes), &w)| nodes.iter().map(move |&n| w * f(n)))
+                .collect()
+        };
         let max = self
             .free
             .iter()
             .flat_map(|(_, nodes)| nodes.iter().map(|&n| illumination[n]))
             .fold(0.0, f64::max);
-        if max <= 0.0 {
-            return None;
+        match self.water_level {
+            Some(level) if max > 0.0 => Some(scaled(&|n| 1.0 / (illumination[n] / max + level))),
+            _ if !unit => Some(scaled(&|_| 1.0)),
+            _ => None,
         }
-        Some(
-            self.free
-                .iter()
-                .flat_map(|(_, nodes)| nodes.iter().map(|&n| 1.0 / (illumination[n] / max + level)))
-                .collect(),
-        )
     }
 
     /// One iteration, or None if no step along the L-BFGS direction (or, after a restart,
@@ -1192,6 +1208,36 @@ mod tests {
         );
     }
 
+    /// A factor w on the preconditioner is a change of variables x = D z, D = diag(√w): the
+    /// direction with γ D² P and pairs (s, y) is D times the direction for z, with pairs
+    /// (D⁻¹ s, D y), gradient D g and γ P.
+    #[test]
+    fn preconditioner_factors_change_variables() {
+        let pairs = [
+            (vec![0.3, -0.2, 0.5], vec![1.1, -0.4, 0.9]),
+            (vec![-0.1, 0.4, 0.2], vec![0.2, 1.3, 0.1]),
+        ];
+        let g = [0.7, -1.1, 0.4];
+        let p = [0.5, 4.0, 1.5];
+        let w = [1.0, 0.09, 2.5];
+        let d: Vec<f64> = w.iter().map(|w: &f64| w.sqrt()).collect();
+        let (mut x, mut z) = (Lbfgs::new(5), Lbfgs::new(5));
+        for (s, y) in &pairs {
+            x.update(s.clone(), y.clone());
+            z.update(
+                s.iter().zip(&d).map(|(s, d)| s / d).collect(),
+                y.iter().zip(&d).map(|(y, d)| y * d).collect(),
+            );
+        }
+        let wp: Vec<f64> = w.iter().zip(&p).map(|(w, p)| w * p).collect();
+        let dg: Vec<f64> = g.iter().zip(&d).map(|(g, d)| g * d).collect();
+        let direct = x.direction(&g, Some(&wp));
+        let changed = z.direction(&dg, Some(&p));
+        for ((a, b), d) in direct.iter().zip(&changed).zip(&d) {
+            assert!((a - b * d).abs() < 1e-14, "{direct:?} {changed:?}");
+        }
+    }
+
     /// Trials that can't be computed count as too long; only if every one fails is that an
     /// error.
     #[test]
@@ -1471,6 +1517,39 @@ mod tests {
         );
         let e = setup(&high).err().expect("refused").to_string();
         assert!(e.contains("Nyquist"), "{e}");
+    }
+
+    /// `[inversion.scale]` multiplies each parameter's part of the preconditioner, and alone
+    /// makes one; with every factor 1 nothing changes.
+    #[test]
+    fn scale_multiplies_each_parameters_preconditioner() {
+        let plain = setup(&survey(SOLID, r#"parameters = ["vs", "rho"]"#)).unwrap();
+        let scaled = setup(&survey(
+            SOLID,
+            "parameters = [\"vs\", \"rho\"]\n[inversion.scale]\nrho = 0.25\nvp = 7.0",
+        ))
+        .unwrap();
+        let (p, q) = (
+            plain.preconditioner.as_ref().unwrap(),
+            scaled.preconditioner.as_ref().unwrap(),
+        );
+        let half = plain.unknowns() / 2;
+        assert_eq!(p[..half], q[..half]);
+        assert!(
+            p[half..]
+                .iter()
+                .zip(&q[half..])
+                .all(|(a, b)| *b == 0.25 * a)
+        );
+        let alone = setup(&survey(
+            SOLID,
+            "parameters = [\"vs\", \"rho\"]\nprecondition = false\n[inversion.scale]\nrho = 0.25",
+        ))
+        .unwrap();
+        let r = alone.preconditioner.as_ref().unwrap();
+        assert!(r[..half].iter().all(|&v| v == 1.0) && r[half..].iter().all(|&v| v == 0.25));
+        let none = setup(&survey(SOLID, "precondition = false")).unwrap();
+        assert!(none.preconditioner.is_none());
     }
 
     /// λ ≥ 0 survives projection in every case: vp inverted alone (vp held above √2 vs), and

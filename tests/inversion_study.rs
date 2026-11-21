@@ -209,6 +209,47 @@ fn sphere() {
     );
 }
 
+/// The sphere inverted for vs, ρ and vp with density's share of the steps scaled down
+/// (`[inversion.scale]`): once with a denser core, and once with none, where any change of ρ
+/// is cross-talk.
+#[test]
+#[ignore]
+fn sphere_with_density() {
+    let variants: [Variant; 3] = [
+        (
+            "rho x 1",
+            "parameters = [\"vs\", \"rho\", \"vp\"]\niterations = 5",
+        ),
+        (
+            "rho x 0.3",
+            "parameters = [\"vs\", \"rho\", \"vp\"]\niterations = 5\n[inversion.scale]\nrho = 0.3",
+        ),
+        (
+            "rho x 0.1",
+            "parameters = [\"vs\", \"rho\", \"vp\"]\niterations = 5\n[inversion.scale]\nrho = 0.1",
+        ),
+    ];
+    for (label, rho) in [("denser core", 2300.0), ("no density anomaly", 2100.0)] {
+        let anomaly = format!(
+            "[[model.sphere]]\ncenter = [175.0, 155.0, 115.0]\nradius = 40.0\n\
+             vp = 2700.0\nvs = 1500.0\nrho = {rho}"
+        );
+        let (observed, truth) = record(&Config::from_toml(&sphere_survey(&anomaly, "")).unwrap());
+        study(
+            &format!("sphere, {label}"),
+            &|settings| sphere_survey("", settings),
+            &observed,
+            &truth,
+            &|start| {
+                (0..truth.vs.len())
+                    .filter(|&n| truth.vs[n] != start.vs[n])
+                    .collect()
+            },
+            &variants,
+        );
+    }
+}
+
 fn slow_survey(vs: f64, vp: f64, inversion: &str) -> String {
     format!(
         r#"

@@ -1133,6 +1133,72 @@ model (fixing the near-surface, or the receivers' side of the illumination; next
 
 **Reproduce:** `just study sphere`; `just study slow_start` (about 6 and 15 minutes).
 
+## 2026-11-21 — Scaling each parameter's steps
+
+**Question.** Roadmap step 6 asks for parameter scaling for $\rho$. In multiparameter FWI the
+classes' gradients differ in size and in how well the data constrain them, and an inversion
+"is very sensitive to the parameter scaling" even with an approximate Hessian
+[@lavoue2014]; density is the least resolved of the elastic parameters [@kohn2012;
+@operto2013]. What should the scaling be here, where the unknowns are already relative
+changes $x = m/m_0 - 1$?
+
+**Literature** (read by a research agent on the publishers' pages; equations as images
+were not read). Prieux et al. normalise each class by its mean in the starting model, so that
+the classes share an order of magnitude, and start L-BFGS from a Gauss–Newton diagonal
+[@prieux2013]; that is what relative unknowns already do. Kamei & Pratt scale the second
+class's gradient by a factor $\xi$ chosen from trade-off curves (0.025–0.075 for
+attenuation), although the gradients were "similar in magnitudes" [@kamei2013]. Köhn et al.
+"normalize the material parameters and the gradients" without saying how in the readable
+text [@kohn2012].
+
+**Method** (`[inversion.scale]`, `Inversion::preconditioner_for`). A factor $w_c$ per
+parameter multiplies the preconditioner: $P' = D^2 P$, $D = \mathrm{diag}(\sqrt{w_c})$. L-BFGS
+with initial matrix $\gamma P'$ and pairs $(s, y)$ gives exactly $D$ times the direction of
+L-BFGS on $z = D^{-1} x$ with pairs $(D^{-1}s, D y)$, gradient $D g$ and $\gamma P$
+[@nocedal2006]: $s^T y$ and $\gamma$ are unchanged, and so are the Armijo test (which uses
+$g^T s$) and the bounds, which act on $x$. So a factor is a change of variables for its
+class, and the pairs stay valid if the factors change (L-BFGS converges for any bounded,
+positive-definite initial matrix [@liu1989]). Without the illumination, the factors alone
+make the preconditioner. The first step's largest change in class $c$ becomes
+`initial_step` times $w_c \max_c |P g| / \max_{c'} (w_{c'} \max_{c'} |P g|)$. A unit test
+checks the change of variables to $10^{-14}$; factors of 1 leave every result bit for bit.
+
+**Experiment.** The sphere survey inverted for $v_s$, $\rho$ and $v_p$, the top 60 m fixed,
+5 iterations, with $\rho$'s factor 1, 0.3 and 0.1: once with a denser core too ($\rho$ 2300
+against 2100 kg/m³), and once with none, where any change of $\rho$ is cross-talk. Errors
+over the sphere, relative to the start's; for the second, the rms relative change of $\rho$
+there:
+
+| $\rho$'s factor | L2 left | $v_s$ error | $v_p$ error | $\rho$ error (denser core) |
+|---|---|---|---|---|
+| 1 | 6.6% | 85.0% | 100.4% | 79.6% |
+| 0.3 | 6.1% | 84.1% | 100.0% | 92.3% |
+| 0.1 | 6.6% | 83.2% | 99.8% | 97.1% |
+
+| $\rho$'s factor | L2 left | $v_s$ error | $v_p$ error | $\rho$ changed (no anomaly) |
+|---|---|---|---|---|
+| 1 | 6.2% | 86.0% | 101.1% | 1.78% |
+| 0.3 | 7.4% | 82.5% | 101.1% | 0.74% |
+| 0.1 | 6.3% | 83.4% | 101.0% | 0.26% |
+
+Where density has no anomaly, a smaller factor cuts its cross-talk sevenfold and the $v_s$
+anomaly is recovered a little better; where it has one, the same factor leaves it mostly
+unrecovered (97% at 0.1). The factor is a trade-off between the two, as Kamei & Pratt found
+for attenuation [@kamei2013], and nothing in the data alone says which case holds.
+
+A research agent also measured, in a copy of this code, that the relative unknowns already
+balance the classes: at the start, the largest preconditioned gradient of $\rho$ was 0.70–0.78
+of $v_s$'s, and $v_p$'s 1/37 of it (its wavelength is twice the sphere's). Equalising the
+classes' largest (or rms) preconditioned gradients automatically made it worse: $v_p$, barely
+constrained, was amplified 37-fold into cross-talk ($v_p$ error 109–115%, misfit no better).
+
+**Decision.** Fixed factors, 1 by default, set per inversion (`[inversion.scale] rho = 0.3`,
+say) where density takes up what the velocities should explain; no automatic equalisation.
+Choosing them is the trade-off-curve exercise of Kamei & Pratt.
+
+**Reproduce:** `just study sphere_with_density` (about 5 minutes); the unit tests
+`preconditioner_factors_change_variables` and `scale_multiplies_each_parameters_preconditioner`.
+
 ## Open questions
 
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching

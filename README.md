@@ -105,6 +105,7 @@ a free surface $z = 0$ is the surface.
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
 | `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, bounds `vp_range`, `vs_range`, `rho_range` |
+| `[inversion.scale]` | A factor on each parameter's steps: `vp`, `vs`, `rho` (1 by default) |
 | `[[inversion.stage]]` | Frequency continuation: `max_frequency` (low-pass corner, Hz), `iterations`, `misfit` |
 
 The wavelet is the moment rate of a moment-tensor source and the force of a force source. A
@@ -578,8 +579,9 @@ Planned next, following Fichtner (2011), ch. 7–11:
    Preconditioned L-BFGS (Nocedal 1980; Liu & Nocedal 1989) on relative model changes, with
    bounds and an Armijo line search; each source a shot; the illumination (Shin et al. 2001)
    as preconditioner. Frequency continuation (Bunks et al. 1995) in stages, each low-pass filtering observed and synthetic traces with a zero-phase
-   Butterworth filter, which is its own transpose. Still to come: receiver-side
-   preconditioning and parameter scaling for $\rho$.
+   Butterworth filter, which is its own transpose. A factor per parameter on the
+   preconditioner (`[inversion.scale]`), which is a change of variables, to curb density's
+   cross-talk. Still to come: receiver-side preconditioning.
 7. Later: Born modelling and Hessian-vector products for truncated-Newton FWI (Métivier et
    al. 2013), source estimation, viscoelasticity.
 

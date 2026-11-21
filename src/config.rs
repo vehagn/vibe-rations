@@ -566,6 +566,11 @@ pub struct InversionConfig {
     /// The fraction of the largest energy added to every node's before dividing by it.
     #[serde(default = "default_water_level")]
     pub water_level: f64,
+    /// Factors on the preconditioner for each inverted parameter: a change of variables that
+    /// scales that parameter's steps, e.g. `rho = 0.3` where density takes up what the
+    /// velocities should explain. 1 by default.
+    #[serde(default)]
+    pub scale: ParameterScale,
     /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice
     /// the largest of the starting model's, and for vp no faster than the time step allows.
     /// λ ≥ 0 too: vs stays below vp/√2, or vp above √2 vs where vs isn't inverted. The
@@ -573,6 +578,47 @@ pub struct InversionConfig {
     pub vp_range: Option<[f64; 2]>,
     pub vs_range: Option<[f64; 2]>,
     pub rho_range: Option<[f64; 2]>,
+}
+
+/// A factor for each parameter an inversion can update.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterScale {
+    #[serde(default = "one")]
+    pub vp: f64,
+    #[serde(default = "one")]
+    pub vs: f64,
+    #[serde(default = "one")]
+    pub rho: f64,
+}
+
+impl Default for ParameterScale {
+    fn default() -> Self {
+        Self {
+            vp: 1.0,
+            vs: 1.0,
+            rho: 1.0,
+        }
+    }
+}
+
+impl ParameterScale {
+    pub fn of(&self, p: Parameter) -> f64 {
+        match p {
+            Parameter::Vp => self.vp,
+            Parameter::Vs => self.vs,
+            Parameter::Rho => self.rho,
+        }
+    }
+
+    /// Whether every factor is 1.
+    pub fn is_unit(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 impl InversionConfig {

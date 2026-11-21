@@ -307,7 +307,7 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         shots: cfg.sources.len(),
         unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
         memory: settings.memory,
-        precondition: settings.precondition,
+        precondition: settings.precondition || !settings.scale.is_unit(),
         filtered: settings.stages()?.iter().any(|s| s.max_frequency.is_some()),
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
@@ -595,7 +595,8 @@ mod tests {
             .collect();
         // As recorded, and with a stage that filters (and so keeps filtered copies).
         let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
-        for stages in ["", filtering] {
+        let scaled = "[inversion.scale]\nvp = 0.5";
+        for stages in ["", filtering, scaled] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

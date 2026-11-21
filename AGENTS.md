@@ -125,6 +125,13 @@ examples/        annotated configurations
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Scaling the parameters** (`[inversion.scale]`). A factor $w$ per parameter on the
+  preconditioner is exactly a change of variables ($x = Dz$, $D^2 = w$), so it leaves the
+  L-BFGS pairs, the Armijo test and the bounds valid; 1 keeps every result bit for bit. Don't
+  equalise the classes automatically: relative unknowns already balance $v_s$ and $\rho$, and
+  in a research agent's trial equalising amplified $v_p$, which these data barely constrain,
+  into cross-talk ($v_p$ error 109–115% after 5 iterations). A
+  smaller $\rho$ factor trades density's recovery for less cross-talk.
 - **Misfits and frequency continuation** (`src/misfit.rs`, `[inversion] misfit`,
   `[[inversion.stage]]`). Every misfit is a function of the samples with its *exact*
   derivative, so the inversion's finite-difference check covers it
