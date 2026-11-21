@@ -1831,6 +1831,67 @@ near offsets break, so they are expected to do least.
 **Reproduce:** `just in marmousi2`, then `just in marmousi2-study misfit_by_arrival` (15
 minutes on four cores: 78 s for the observed traces, 706 s for the gradients).
 
+## 2026-11-21 — Marmousi2: frequency stages against L2
+
+**Question.** The slow seafloor waves carry most of the start's misfit, and the part of its
+gradient that points away from the truth between 750 m and 1.5 km (previous entry). Does
+inverting the low frequencies first, whose longer periods come nearer those waves' delay
+[@bunks1995; @fichtner2013], keep the inversion from following them?
+
+**Method** (`tests/marmousi2_study.rs`; `l2`, `frequency_stages`). From the start smoothed over
+250 m, five iterations each, $v_p$ and $v_s$, the water and the first solid row fixed,
+illumination preconditioning and balanced components (`central.toml`'s settings):
+
+- *L2*: the baseline, rerun in the study, which measures after each stage the balanced L2
+  misfit of all the data (the same scale for every variant) and, by depth band, the error
+  ratio $\lVert m - m_\text{true} \rVert / \lVert m_0 - m_\text{true} \rVert$ and the cosine of
+  $m - m_0$ with $m_\text{true} - m_0$.
+- *Stages*: L2 below 0.6 Hz (two iterations), below 1.0 Hz (two), then all (one); the source is
+  a 1.2 Hz Ricker, whose spectrum peaks at 1.2 Hz and falls to half by about 0.6 and 2 Hz. The
+  0.6 Hz corner's period, 1.7 s, is half the record; each stage starts afresh (L-BFGS forgets
+  its pairs, its first step is capped at 2% again) at the cost of a gradient run per shot.
+
+**Results.** Error ratio and cosine by depth band after five iterations:
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| L2 | 57.9% | $v_p$ | 0.900, +0.44 | 0.994, +0.12 | 1.020, −0.15 | 1.001, −0.02 | 1.003, −0.24 |
+| | | $v_s$ | 0.973, +0.25 | 1.095, −0.15 | 1.070, −0.17 | 0.999, +0.04 | 0.999, +0.15 |
+| 0.6 Hz (2) | 97.9% | $v_p$ | 0.992, +0.28 | 0.998, +0.07 | 1.015, −0.21 | 0.999, +0.05 | 1.001, −0.07 |
+| | | $v_s$ | 0.970, +0.39 | 0.988, +0.16 | 1.029, −0.12 | 1.009, −0.07 | 1.000, +0.06 |
+| then 1.0 Hz (2) | 94.9% | $v_p$ | 0.979, +0.35 | 1.000, +0.01 | 1.019, −0.21 | 0.999, +0.05 | 1.001, −0.09 |
+| | | $v_s$ | 0.947, +0.43 | 0.985, +0.17 | 1.043, −0.13 | 1.010, −0.06 | 1.000, +0.06 |
+| then all (1) | 93.2% | $v_p$ | 0.976, +0.39 | 1.001, +0.01 | 1.020, −0.22 | 0.999, +0.05 | 1.001, −0.09 |
+| | | $v_s$ | 0.946, +0.43 | 0.987, +0.16 | 1.044, −0.14 | 1.010, −0.06 | 1.000, +0.07 |
+
+Over every free node both end at 1.001 for $v_p$; $v_s$ at 1.004 (L2) and 1.007 (stages). The L2
+rerun reproduces the baseline's misfits (97.2, 83.7, 73.3, 64.0, 57.9%) and its table to the
+last digit (the deepest band now reaches 3125 m, the last free node, where it stopped at
+3100). The stages took 3,467 s against L2's 2,634: two more stage starts.
+
+- *Stages keep $v_s$ from turning away at 750–1000 m* (cosine +0.16 against −0.15, error ratio
+  0.987 against 1.095) and improve it more in the top 250 m (0.946 against 0.973), but not
+  below 1 km: 1000–1500 m still moves away, if less (1.044 against 1.070). Its cosine is the
+  same from the first stage on, so the low frequencies already see it the wrong way.
+- *They fit much less of the data* (93.2% of the L2 misfit against 57.9%) and do less for $v_p$
+  at the top (0.976 against 0.900): of five iterations, four run on 0.6 and 1 Hz, where a 1.2
+  Hz Ricker has little energy (below 0.6 Hz the stage's own misfit is 2.8 times the full
+  band's, because the balance weights each stage's filtered data by its own small energy),
+  and each stage's first step is held to 2%.
+- Where the slow waves are more than about a period off (the first entry's 2 s at 0.8 s), even
+  0.6 Hz isn't low enough: half a period at 0.6 Hz is 0.8 s, and the data have nothing much
+  lower.
+
+**Decision.** Frequency continuation helps where the slow waves are within reach of its lowest
+band, and nowhere deeper; it costs fit and time. Five iterations aren't enough to tell where
+it would end, but the cosine at 1000–1500 m stays negative through every stage, so more of
+them would follow the wrong direction there too. The remedy has to take the slow waves out of
+the misfit (`feat/mutes`), or start nearer them; the next entries try the time shifts and the
+phase misfit, which this survey's overlapping arrivals at near offsets don't suit.
+
+**Reproduce:** `just in marmousi2-study l2`, `just in marmousi2-study frequency_stages` (44
+and 58 minutes on four cores); each stage's model in `out/marmousi2/study/<variant>/`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
