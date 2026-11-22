@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod lamb;
 pub mod plane;
 pub mod stokes;
 

@@ -18,7 +18,7 @@ opens a shell there instead.
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
-| `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just accuracy [name]` | The stencil order and time step study, and Lamb's problem on finer grids (prints tables) | ~4 min |
 | `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
@@ -99,7 +99,8 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 .github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
-  accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  accuracy.rs    the stencil-order study and Lamb's problem on finer grids (ignored; `just
+                 accuracy`)
   interfaces.rs  plane waves at a planar interface, by position, sampling and order (ignored;
                  `just interfaces`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
@@ -109,7 +110,8 @@ tests/
   common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
                  force's field with its gradient for any time function, and the exact kernels;
                  plane.rs: plane waves at normal incidence on an interface, kept exactly 1D,
-                 and their exact answer
+                 and their exact answer; lamb.rs: Pekeris's closed form for a vertical force
+                 on the surface of a Poisson solid, and the survey that tests it
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -440,11 +442,18 @@ doesn't show.
   (`Simulation::trace_warp(c)` → `Warp::apply_transpose`) before they are injected. Koene et
   al. criticise Wang & Xu for using that adjoint as the forward transform; here it is used
   only for adjoint sources, where it is the exact transpose of the data operator.
-- **The free-surface test's 2.5% is mostly its reference.** Doubling the P wave is exact
-  only for a plane wave; on finer grids (`free_surface_on_finer_grids`) the misfit tends to
-  about 2.2%, so stress imaging's own error is about 0.36% at 8 points per P wavelength
-  (0.23% with the time error kept, which partly cancels it). A higher-order free surface is
-  therefore less urgent than it looked; measure it on Lamb's problem with an exact solution.
+- **The free surface is the largest error for surface waves** (`tests/common/lamb.rs`,
+  `a_force_on_the_free_surface_matches_lambs_problem`, `lambs_problem_on_finer_grids`; the
+  log's "The free surface against Lamb's problem"). Against Pekeris's closed form for a
+  vertical force on a Poisson solid, the surface's $v_z$ misfits by 15–28% at the default's
+  4.6 points per shortest S wavelength (10.6 per Rayleigh wavelength at $f_0$), and 3.3–3.8%
+  only at 42: the Rayleigh wave runs about 1% fast (second order) and its swing is 3–6% too
+  large (first order at the fine end; the evenly mirrored $v_z$'s kink, which interpolation
+  reads at $0.342\,h$ per unit slope, accounts for part, not tested further). The order and
+  the time error change nothing. The P-doubling test's 2.5% is mostly its own reference
+  (doubling is exact only for a plane wave; on finer grids it tends to about 2.2%), so it
+  can't show this. Pekeris's formulas came from the article's scanned pages (PMC528118); his
+  eq. 66 gives the horizontal component, not implemented.
 - **A research brief** (another agent's literature review and von Neumann analysis,
   2026-11-20) was checked: its numbers reproduce (`docs/analysis/time_dispersion.py`), the
   transform and the stencil-matched interpolation came from it, and the log's entry lists
@@ -488,7 +497,8 @@ doesn't show.
 - **Physics test baselines at the default, order 8 with optimised coefficients at
   $C = 0.85$, the time error removed** (fail if they get worse; update this list if they get
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
-  free-surface P doubling 2.52% (mostly the reference, above); a planar interface midway
+  free-surface P doubling 2.52% (mostly the reference, above); Lamb's problem at 10 m,
+  15.5%, 21.4%, 28.2% at 150, 240, 330 m and 22.5% on the diagonal; a planar interface midway
   between nodes, plane P and S waves, direct 0.010% and 0.026%, reflected 0.72% and 7.5%,
   transmitted 0.078% and 0.44%; band-limited, on a node and a quarter of one off, reflected
   1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection

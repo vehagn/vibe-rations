@@ -297,6 +297,41 @@ fn free_surface_on_finer_grids() {
     }
 }
 
+/// Lamb's problem (`common::lamb::survey`) on finer grids: how the free surface's error in
+/// the Rayleigh wave falls with the spacing (order 8, 10 m to 2.5 m), and whether the
+/// stencil's order or the time-dispersion transform matter to it (at 10 and 5 m). About two
+/// and a half minutes, most of it the 2.5 m grid's 11 million nodes.
+#[test]
+#[ignore = "a study, not a check: run with `just accuracy`"]
+fn lambs_problem_on_finer_grids() {
+    use common::lamb::survey;
+    println!(
+        "\nLamb's problem, vz on the surface against Pekeris: misfit (%), amplitude ⟨v, w⟩/⟨w, w⟩, \
+         the largest swing's lateness (samples) and size"
+    );
+    println!("    h  scheme                    r (m)  misfit  amplitude  shift   peak  Mcell/s");
+    for h in [10.0, 7.5, 5.0, 3.75, 2.5] {
+        let mut variants = vec![("order 8", "", "")];
+        if h == 10.0 || h == 5.0 {
+            variants.push(("order 16", "order = 16", ""));
+            variants.push((
+                "order 8, time error kept",
+                "remove_time_dispersion = false",
+                "courant = 0.3",
+            ));
+        }
+        for (label, scheme, time) in variants {
+            let (sim, speed) = simulate_timed(&survey::config(h, scheme, time));
+            for [r, e, amplitude, shift, peak] in survey::compare(&sim) {
+                println!(
+                    "{h:5}  {label:24} {r:6.1}  {:6.2}  {amplitude:9.4}  {shift:5.2}  {peak:.4}  {speed:7.0}",
+                    100.0 * e
+                );
+            }
+        }
+    }
+}
+
 /// Optimised coefficients (`coefficients = "optimised"`) against Taylor's, both with the time
 /// error removed at C = 0.85, down to three points per shortest wavelength. The spacings divide
 /// the distances, so the receivers sit on nodes.

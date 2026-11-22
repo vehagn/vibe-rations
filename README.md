@@ -679,10 +679,15 @@ What higher orders don't fix, from the literature and our measurements:
   samples the layers at the nodes). Its overshoot makes a few nodes beside an interface
   faster than either layer, so $\Delta t$ is up to about 8% shorter.
 - **The free surface.** Stress imaging is second order, so surface waves need finer grids
-  (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils. Our
-  free-surface test's 2.5% is mostly its reference, which doubles the P wave as if it were
-  plane: on finer grids the misfit tends to about 2.2%, which leaves about 0.4% to the
-  scheme at 8 points per P wavelength.
+  (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils.
+  Measured against Lamb's problem, Pekeris's (1955) closed form for a vertical force on a
+  Poisson solid (`just accuracy lambs_problem_on_finer_grids`; the research log's "The free
+  surface against Lamb's problem"), the surface's vertical velocity misfits by 15–28% at the
+  default's 4.6 points per shortest S wavelength, 10.6 per Rayleigh wavelength at $f_0$: the
+  Rayleigh wave runs about 1% fast and its swing is about 5% too large. It takes some 40
+  points per Rayleigh wavelength to get within 4%, and the stencil's order doesn't help: the
+  free surface, not the stencil, is the error for surface waves. (The P-doubling test's 2.5%
+  is mostly its reference, which doubles the P wave as if it were plane.)
 - **Absorbing layers.** Longer stencils reach further across the layers' inner edge:
   with the time error kept, reflection rises from $1.5 \times 10^{-4}$ of the peak at
   order 4 to $3.9 \times 10^{-4}$ (about $-68$ dB) at order 8. At the default it is
@@ -707,6 +712,7 @@ removed) unless stated:
 | Point force against Stokes' solution: along, across and diagonal to the force | 0.001–0.005% (Taylor 0.001–0.008%) |
 | The same with the time error kept, at Courant 0.3 | 0.03–0.09% |
 | A P wave doubling at the free surface above a buried explosion | 2.5%, mostly the reference's (see "Accuracy") |
+| Lamb's problem: a vertical force on the surface of a Poisson solid, the surface's vertical velocity against Pekeris (1955) at 150–330 m | 15–28%: the Rayleigh wave about 1% fast and 5% large (see "Accuracy") |
 | Plane P and S waves at normal incidence on a planar interface midway between nodes, against the exact reflection and transmission | reflected 0.72% (P) and 7.5% (S), transmitted 0.08% and 0.44%; a layer's top on a node reflects $h/v$ early (see "Accuracy") |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 8 \times 10^{-7}$ of peak |

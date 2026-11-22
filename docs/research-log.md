@@ -2770,6 +2770,82 @@ candidate (the gradient's notes on $\mu \ll \lambda$), untested.
 back to `Nodes`. The step sweeps need a loop over $h$ in `gradient_check` and
 `inversion_gradient_check` (not committed).
 
+## 2026-11-22 — The free surface against Lamb's problem
+
+**Question.** The P-doubling test's 2.5% is mostly its reference (2026-11-20, "The free
+surface on finer grids"), which leaves the free surface's own accuracy unmeasured. How
+accurate is it for the wave it exists for, the Rayleigh wave, and is the error the free
+surface's or the stencil's?
+
+**Method.** Lamb's problem for a Poisson solid: Pekeris's closed form for the vertical
+displacement of the surface under a vertical step force on it [@pekeris1955], his eqs.
+45–48 (read from the article's scanned pages; `tests/common/lamb.rs`). With
+$\tau = \beta t/r$ and $\gamma^2 = (3 + \sqrt3)/4$, the Rayleigh pole, a downward force $F$
+moves the surface down by $w = 0$ for $\tau < 1/\sqrt3$;
+$$
+w = \frac{F}{32\pi\mu r}\left[6 - \frac{\sqrt3}{\sqrt{\tau^2 - \frac14}}
+  - \frac{\sqrt{3\sqrt3 + 5}}{\sqrt{\gamma^2 - \tau^2}}
+  + \frac{\sqrt{3\sqrt3 - 5}}{\sqrt{\tau^2 - \frac{3 - \sqrt3}{4}}}\right]
+$$
+for $1/\sqrt3 < \tau < 1$; $w = \frac{F}{16\pi\mu r}\left[6 - \sqrt{3\sqrt3 + 5}/\sqrt{\gamma^2 -
+\tau^2}\right]$ for $1 < \tau < \gamma$; and Boussinesq's $3F/(8\pi\mu r)$ after. The
+bracket vanishes exactly at the P arrival, both sides at $\tau = 1$ are $(1 - \sqrt3)/8$, the
+forms agree with his integrals (eqs. 33–44), and the static value is Boussinesq's for
+$\nu = \frac14$: a wrong coefficient breaks one of these. For the solver's Ricker force the
+velocity is $w * s''$: Simpson's rule after $t' = t_P + u^2$ and $t' = t_R - u^2$, which
+removes the Rayleigh singularity, plus the static part's exact term; 2000 and 4000 intervals
+agree to $7 \times 10^{-12}$ of the peak (`lambs_reference_is_consistent`). The survey: $v_p$
+3000 m/s, $v_s = v_p/\sqrt3$, $\rho$ 2500 kg/m³; a downward force at 15 Hz on the surface;
+$v_z$ on the surface at 150, 240 and 330 m along $x$ and 254.6 m on the diagonal; the
+Rayleigh wave ($0.9194\,v_s$) 106 m long at $f_0$, 10.6 points at $h = 10$ m, where the
+shortest S wavelength has the default's 4.6. Spacings 10 to 2.5 m at order 8; order 16 and
+the time error kept ($C = 0.3$) at 10 and 5 m. Per receiver: the L2 misfit, the amplitude
+$\langle v, w\rangle/\langle w, w\rangle$, the largest swing's lateness and its size.
+
+**Results** (order 8; the four receivers' range, or 150 / 240 / 330 m):
+
+| $h$ (m) | misfit | swing's size | lateness (samples) | Rayleigh speed |
+|---|---|---|---|---|
+| 10 | 15.5 / 21.4 / 28.2% (diagonal 22.5%) | +4.8–5.0% | −1.00 / −1.44 / −1.90 | +0.99% |
+| 7.5 | 10.5 / 13.9 / 18.1% | +5.6–5.8% | −0.81 / −1.18 / −1.56 | +0.62% |
+| 5 | 6.4 / 7.8 / 9.5% | +5.2–5.4% | −0.57 / −0.83 / −1.11 | +0.30% |
+| 3.75 | 4.8 / 5.4 / 6.3% | +4.4–4.5% | −0.42 / −0.62 / −0.84 | +0.17% |
+| 2.5 | 3.3 / 3.5 / 3.8% | +3.3% | −0.27 / −0.40 / −0.55 | +0.077% |
+
+The speed comes from the lateness's growth with distance and the sample interval (1.2465 ms
+at 10 m, in proportion to $h$). Order 16 is within 1 point of order 8 (15.1 / 20.7 / 27.2% at
+10 m, 6.3 / 7.6 / 9.3% at 5 m), and with the time error kept the misfits are within 0.6 point
+and the lateness, in time, the same.
+
+- *The free surface, not the stencil, sets the error.* The stencil's order and the time
+  error change nothing; at the default's 4.6 points per shortest S wavelength, where the
+  interior's S-wave error is about 1% after ten wavelengths, the Rayleigh wave misfits by
+  15–28% within three of its own.
+- *Two errors.* The Rayleigh wave runs fast, 0.99% at 10 m, falling as $h^{1.8}$ over the
+  range: second order, the misfit's part that grows with distance. And its largest swing is
+  3–6% too large at every distance, falling only to 3.3% at 2.5 m: first order at the fine
+  end (4.4% at 3.75 m, 3.3% at 2.5 m), and at the coarse end below that trend, where the
+  phase error also lowers the peak.
+- *A candidate for the second, not tested:* the free surface mirrors $v_z$ evenly, so $v_z$
+  continued above the surface has a kink, and interpolating across it reads $v_z(0) + c\,h\,
+  \partial_z v_z$ with $c = 0.342$ at order 8 (0.375 at 4, 0.329 at 16: hardly the order's,
+  as measured). A Rayleigh wave's $\partial_z w / w$ at the surface is $0.227k$ for
+  $\nu = \frac14$, so a receiver over-reads by $0.078\,kh$ and the surface force, its
+  transpose, over-excites by as much: 2.3% at 5 m and 1.2% at 2.5 m together at $f_0$,
+  against 5.2% and 3.3% measured. It accounts for part of it, falling at the same rate.
+
+**Decision.** The free surface is the solver's largest error for surface waves, by far: a
+Rayleigh wave needs about 40 points per wavelength at $f_0$ for a few per cent, where body
+waves need 4.5 at the shortest. `a_force_on_the_free_surface_matches_lambs_problem` pins
+the 10 m numbers (limits just above them). A higher-order free surface [@mittet2002;
+@kristek2002] or summation-by-parts closures [@oreilly2017] would address the speed; the
+swing's size may be the surface's sampling of $v_z$ (the candidate above), which a free
+surface with $v_z$ on the surface plane would also answer. Surface data, Marmousi2's
+included, carry this error into the misfit.
+
+**Reproduce:** `just physics lamb`; `just accuracy lambs_problem_on_finer_grids` (about two
+and a half minutes).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2809,9 +2885,12 @@ back to `Nodes`. The step sweeps need a loop over $h$ in `gradient_check` and
   which stacks and f-k spectra within 1 km couldn't do; and a better shallow start.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
-  [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
-  for P (the free-surface test's floor), so measure it first on Lamb's problem with an
-  exact solution.
+  [@oreilly2017], which keep the exact discrete adjoint. Measured on Lamb's problem
+  (2026-11-22, "The free surface against Lamb's problem"): the Rayleigh wave misfits by
+  15–28% at the default's sampling, about 1% fast (second order) and 3–6% too large (first
+  order at the fine end, partly the evenly mirrored $v_z$'s kink, not tested further). The
+  horizontal component (Pekeris's eq. 66, elliptic integrals) and a buried source are not
+  measured.
 - **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
   node-sampled layers put an interface midway between nodes (first-order error),
   band-limiting density and compliances [@mittet2017] makes it second order wherever it

@@ -199,6 +199,71 @@ fn the_free_surface_doubles_a_vertically_incident_p_wave() {
     assert!(e < 0.026, "misfit {e}");
 }
 
+/// Pekeris's closed form for Lamb's problem (`common::lamb`) is what it should be: zero at
+/// the P arrival, where the surface starts upward; continuous at the S arrival; Boussinesq's
+/// static displacement, F(1 - ν)/(2πμr), after the Rayleigh wave; and its velocity
+/// converged in the number of intervals.
+#[test]
+fn lambs_reference_is_consistent() {
+    use common::lamb::{gamma, survey};
+    let lamb = survey::lamb();
+    let (r, vs) = (240.0, survey::vs());
+    let at = |tau: f64| lamb.step(r, tau * r / vs);
+    let w = lamb.static_displacement(r);
+    let mu = survey::RHO * vs * vs;
+    assert!((w / (0.75 * 1e9 / (2.0 * std::f64::consts::PI * mu * r)) - 1.0).abs() < 1e-12);
+    assert!(
+        at(1.0 / 3f64.sqrt() + 1e-12).abs() < 1e-5 * w,
+        "{}",
+        at(0.5774)
+    );
+    assert!(at(0.6) < 0.0, "the surface starts upward");
+    assert!((at(1.0 - 1e-12) - at(1.0 + 1e-12)).abs() < 1e-6 * w);
+    assert_eq!(at(gamma() + 1e-12), w);
+    let times: Vec<f64> = (0..420).map(|k| k as f64 * 1e-3).collect();
+    let [coarse, fine] = [2000, 4000].map(|n| {
+        times
+            .iter()
+            .map(|&t| lamb.velocity_with(r, t, n))
+            .collect::<Vec<_>>()
+    });
+    let peak = fine.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let worst = coarse
+        .iter()
+        .zip(&fine)
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    println!(
+        "lamb reference: 2000 against 4000 intervals, {:.1e} of the peak",
+        worst / peak
+    );
+    assert!(worst < 1e-9 * peak, "{}", worst / peak);
+}
+
+/// Lamb's problem: a vertical force on the free surface of a Poisson solid, and the vertical
+/// velocity on the surface against Pekeris's closed form (`common::lamb::survey`) at 150,
+/// 240 and 330 m along x and 254.6 m along the diagonal. The Rayleigh wave dominates it: this
+/// is the free surface's own accuracy, which the P-doubling test can't separate from its
+/// reference.
+///
+/// Measured at the default, h = 10 m (10.6 points per Rayleigh wavelength at f0, 4.6 per
+/// shortest S wavelength): 15.5%, 21.4%, 28.2% and 22.5%, growing with distance. The Rayleigh
+/// wave runs about 1% fast (its peak 1.0 to 1.9 samples early), and its largest swing is 5%
+/// too large. Order 16 gives the same, so the free surface, not the stencil, sets it; it falls
+/// to 3.3–3.8% at 2.5 m (`lambs_problem_on_finer_grids` in `just accuracy`). The limits sit
+/// just above the measurements, so a free surface that gets worse fails.
+#[test]
+fn a_force_on_the_free_surface_matches_lambs_problem() {
+    use common::lamb::survey;
+    let sim = simulate(&survey::config(10.0, "", ""));
+    for ((r, e), limit) in survey::misfits(&sim)
+        .into_iter()
+        .zip([0.16, 0.22, 0.29, 0.23])
+    {
+        println!("lamb, vz at {r:.1} m: misfit {:.2}%", 100.0 * e);
+        assert!(e < limit, "{r} m: {e}");
+    }
+}
+
 /// Plane P and S waves at normal incidence on a planar interface between two layers, against
 /// the exact reflection and transmission (`common::plane`; R = -0.304 for P, -0.238 for S).
 /// This checks the material averaging where a layer meets another: density at the
