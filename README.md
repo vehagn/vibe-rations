@@ -43,6 +43,7 @@ Then, in the container:
 | `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
 | `just invert <config>` | Inverts observed traces for the model with L-BFGS, as `[inversion]` says |
 | `just web` | Builds the web app into `web/dist` |
+| `just mac` | Builds the command line for macOS on Apple silicon into `out/mac/vibe-rations` |
 
 ```bash
 just run examples/explosion.toml
@@ -50,6 +51,20 @@ just run examples/explosion.toml
 
 From the host, `just in <recipe>` runs any of these in the container without opening a
 shell (`just in ci`). `just dev down` stops the container and keeps its volumes.
+
+**Natively on a Mac.** The container is a Linux VM with the CPUs and memory its engine gives
+it (Colima's default is 2 CPUs and 2 GiB; ours has 4 and 8). For long runs and inversions,
+`just in mac` cross-compiles the command line for macOS on Apple silicon (zig links it, so
+nothing is installed on the host), and the host runs it with all its cores and memory:
+
+```bash
+just in mac
+out/mac/vibe-rations invert examples/marmousi2/central.toml
+```
+
+It is ad-hoc signed by the linker and needs macOS 11 or later. On macOS, `run` and `invert`
+check a run against the memory `vm_stat` reports free or reclaimable, as they check
+`MemAvailable` on Linux.
 
 Working on the code with an agent: [AGENTS.md](AGENTS.md) has the conventions and the
 notes behind the numerics, and `.claude/skills/` has task guides.

@@ -44,7 +44,11 @@ host and you can read the PNGs there.
 ## Toolchain
 
 Rust is pinned twice and both must agree: the `FROM` line of `.devcontainer/Containerfile`
-(`rust:1.99.1-trixie`) and `rust-toolchain.toml`. The web app adds three more pins, each in
+(`rust:1.99.1-trixie`) and `rust-toolchain.toml`, which also lists the targets
+(`wasm32-unknown-unknown`, `aarch64-apple-darwin`). zig (`ZIG_VERSION`, with its Linux
+wheels' `ZIG_WHEEL_SHA256`) and `CARGO_ZIGBUILD_VERSION` are pinned in
+`.devcontainer/Containerfile` for `just mac`; bump the hashes with the version (PyPI's
+`ziglang` JSON lists them). The web app adds three more pins, each in
 `.devcontainer/Containerfile` and `web/Containerfile` alike: `WASM_BINDGEN_VERSION` (equal to
 the `wasm-bindgen` version in `web/Cargo.toml`), `WASM_THREADS_TOOLCHAIN` (also the default in
 `web/build.sh`), and the `rust` base image. To upgrade any, bump every copy and rebuild:
@@ -67,5 +71,8 @@ docker compose -f .devcontainer/compose.yaml up --detach --build --wait
   `docker compose -f .devcontainer/compose.yaml down --volumes` clears them too.
 - Git runs on the host (it has the maintainer's identity); the container is for building.
 - Compile in the container; running what it builds on the host is fine and often better,
-  since the host has more cores. The web app is the main case: `just in web`, then
-  `just serve` on the host and open http://localhost:8088.
+  since the host has more cores. The web app is one case: `just in web`, then `just serve` on
+  the host and open http://localhost:8088. The command line is the other: `just in mac`
+  cross-compiles it for macOS on Apple silicon into `out/mac/vibe-rations`, which the host
+  runs natively, e.g. `out/mac/vibe-rations invert <config>` (all cores and memory, not the
+  VM's 4 and 8 GiB). A Linux binary from the container won't run on macOS.
