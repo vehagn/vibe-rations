@@ -504,9 +504,51 @@ fn free_nodes(cfg: &Config, grid: &Grid, fixed_above: Option<f64>) -> usize {
     nx.saturating_sub(2 * w) * ny.saturating_sub(2 * w) * depths
 }
 
-/// Memory the system can still give this process (Linux): /proc/meminfo's MemAvailable, or
-/// less if a cgroup (a container's memory limit) allows less.
+/// Memory the system can still give this process. On Linux /proc/meminfo's MemAvailable, or
+/// less if a cgroup (a container's memory limit) allows less; on macOS what `vm_stat` counts
+/// as free or reclaimable ([`vm_stat_available`]).
 pub fn available() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/usr/bin/vm_stat")
+            .output()
+            .ok()?;
+        vm_stat_available(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(target_os = "macos"))]
+    linux_available()
+}
+
+/// macOS's counterpart of MemAvailable from `vm_stat`'s output: the pages free, inactive,
+/// speculative and purgeable, which the system hands over without swapping, times its page
+/// size (16 KiB on Apple silicon, given in its first line).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn vm_stat_available(text: &str) -> Option<u64> {
+    let page: u64 = text
+        .lines()
+        .next()?
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let pages = |name: &str| -> Option<u64> {
+        let line = text.lines().find(|l| l.starts_with(name))?;
+        line.split(':')
+            .nth(1)?
+            .trim()
+            .trim_end_matches('.')
+            .parse()
+            .ok()
+    };
+    let reclaimable =
+        pages("Pages speculative").unwrap_or(0) + pages("Pages purgeable").unwrap_or(0);
+    Some(page * (pages("Pages free")? + pages("Pages inactive")? + reclaimable))
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn linux_available() -> Option<u64> {
     let system = (|| {
         let text = std::fs::read_to_string("/proc/meminfo").ok()?;
         let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
@@ -582,6 +624,21 @@ impl Memory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_what_macos_can_hand_over_from_vm_stat() {
+        // An Apple-silicon Mac's `vm_stat`, shortened.
+        let text = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+                    Pages free:                               10000.\n\
+                    Pages active:                            500000.\n\
+                    Pages inactive:                          200000.\n\
+                    Pages speculative:                         3000.\n\
+                    Pages throttled:                              0.\n\
+                    Pages wired down:                        150000.\n\
+                    Pages purgeable:                           7000.\n";
+        assert_eq!(super::vm_stat_available(text), Some(16384 * 220_000));
+        assert_eq!(super::vm_stat_available("no page size here"), None);
+    }
+
     use super::*;
     use crate::simulation::Simulation;
 
