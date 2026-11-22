@@ -26,13 +26,15 @@ the traces):
 | `a_point_force_matches_stokes_solution_with_taylor_coefficients` | 0.001–0.008% | the same with Taylor coefficients |
 | `a_point_force_matches_stokes_solution_without_the_transform` | 0.03–0.09% | the same, with the time error kept (opt-out path, $C = 0.3$) |
 | `the_free_surface_doubles_a_vertically_incident_p_wave` | 2.52% (about 2.2% is the reference's) | free-surface condition, mirroring, surface sampling |
+| `a_force_on_the_free_surface_matches_lambs_problem` | 15.5%, 21.4%, 28.2% (150, 240, 330 m), 22.5% (diagonal) | the free surface's Rayleigh wave: its condition, mirroring, sources and receivers on the surface |
 | `a_planar_interface_reflects_and_transmits_plane_waves` | P direct 0.010%, reflected 0.72%, transmitted 0.078%; S 0.026%, 7.5%, 0.44%; a layer's top on a node reflects $h/v$ early | material averaging (ρ at the velocities, μ harmonically), how layers meet the nodes |
 | `band_limited_interfaces_act_where_they_lie` | P reflected 1.19%, transmitted 0.125%; S 12.8%, 0.76%; shifts under 0.01 $h/v$ | `model::layer_profile`'s band-limited layers, `band_limited_step` |
 | `absorbing_layers_reflect_little` (± free surface) | $1.7 \times 10^{-4}$ / $1.9 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
-| `swapping_source_and_receiver_gives_the_same_trace` | $\le 8 \times 10^{-7}$ | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
-| `the_adjoint_run_is_the_transpose_of_the_forward_run` | $\le 8.3 \times 10^{-8}$ | the adjoint's step pairing or `Solver::adjoint_op`, or anything that breaks reciprocity; a receiver whose interpolation reaches into a layer (the helper refuses one) |
-| `the_inversion_gradient_matches_finite_differences` | $\le 3 \times 10^{-5}$ (measured $4.0 \times 10^{-6}$ at $h = 10^{-2}$) | the inversion's parametrisation, its sum over shots, the pinned operator, or anything the gradient checks catch; a receiver reading the layers (the test refuses one) |
-| `the_gradient_matches_finite_differences` (and `…_with_walls_and_water`) | $\le 2.8 \times 10^{-4}$ ($\le 1.6 \times 10^{-4}$) extrapolated; order 8 $\le 1.6 \times 10^{-5}$ | the material averaging, the free surface's moduli, the update's strain rates, sources or receivers that change how the material enters, the transform's transpose (`Simulation::recorded_residuals`) |
+| `a_point_force_between_nodes_matches_stokes_solution` | 0.001–0.007% | interpolation between nodes (`Solver::axis_weights`, `Stencil::interpolation_at`) |
+| `swapping_source_and_receiver_gives_the_same_trace` | $\le 8 \times 10^{-7}$, between nodes too | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |
+| `the_adjoint_run_is_the_transpose_of_the_forward_run` (`…_between_nodes`) | $\le 8.3 \times 10^{-8}$ ($5.9 \times 10^{-8}$) | the adjoint's step pairing or `Solver::adjoint_op`, or anything that breaks reciprocity; a receiver whose interpolation reaches into a layer (the helper refuses one) |
+| `the_inversion_gradient_matches_finite_differences` | $\le 3 \times 10^{-5}$ (measured $4.9 \times 10^{-6}$ at $h = 10^{-2}$; round-off scatters it by $10^{-5}$) | the inversion's parametrisation, its sum over shots, the pinned operator, or anything the gradient checks catch; a receiver reading the layers (the test refuses one) |
+| `the_gradient_matches_finite_differences` (and `…_with_walls_and_water`) | $\le 7.4 \times 10^{-5}$ ($\le 9.1 \times 10^{-6}$) extrapolated, down the gradient with $\Delta t$ and the layers held; $v_p$ and $\rho$ $\le 1.2 \times 10^{-5}$ | the material averaging, the free surface's moduli, the update's strain rates, sources or receivers that change how the material enters, the transform's transpose (`Simulation::recorded_residuals`) |
 | `a_long_run_stays_stable_and_drains` | $\le 3 \times 10^{-6}$ | instabilities (see `debug-instability`) |
 
 A number that got worse is a regression even if the test passes. Find out why before
@@ -81,6 +83,10 @@ sources in a grid whose sides copy the nearest node's values, so the field stays
 and the exact answer is $R = (Z_1 - Z_2)/(Z_1 + Z_2)$, $T = 1 + R$. `just interfaces` sweeps
 the interface's position between nodes, how layers are sampled and the order.
 
-Good next references: Lamb's problem (a force on the free surface; Pekeris 1955 for a
-Poisson solid), a fluid–solid interface (Scholte waves), and reflection at oblique incidence,
+Lamb's problem (`common::lamb`): Pekeris's (1955) closed form for the surface's vertical
+displacement under a vertical step force on a Poisson solid, convolved with the wavelet's
+second derivative; `lambs_reference_is_consistent` checks the reference itself.
+
+Good next references: Lamb's horizontal component (Pekeris's eq. 66, elliptic integrals) and a
+buried source, a fluid–solid interface (Scholte waves), and reflection at oblique incidence,
 where P and S convert.

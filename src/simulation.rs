@@ -20,7 +20,7 @@ use crate::model::{Files, Model};
 use crate::npy;
 use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
-use crate::solver::{Band, Solver};
+use crate::solver::{Band, Field, Solver};
 use crate::source::{Mechanism, Source, Wavelet};
 use crate::tdt::Warp;
 
@@ -110,7 +110,7 @@ pub struct RunInfo {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SourceInfo {
-    /// Where the source acts, after snapping to a node.
+    /// Where the source acts, in metres.
     pub position: [f64; 3],
     pub mechanism: String,
     pub dominant_frequency: f64,
@@ -309,19 +309,21 @@ impl Simulation {
             sponge: b.pml_sponge,
         };
         let solver = Solver::new(model, dt, w, b.free_surface, &pml).with_stencil(stencil);
-        let in_pml = |node: [usize; 3]| {
-            node.iter()
+        // Whether the node nearest a point is in an absorbing layer.
+        let in_pml = |point: [f64; 3]| {
+            point
+                .iter()
                 .zip(&solver.cpml)
-                .any(|(&n, c)| c.slab(n).is_some())
+                .any(|(&x, c)| c.slab(x.round() as usize).is_some())
         };
 
         let mut sources = Vec::new();
         let mut source_info = Vec::new();
         for (s, wavelet) in cfg.sources.iter().zip(wavelets) {
-            let node = grid
-                .nearest_node(s.position)
+            let point = grid
+                .coordinates(s.position)
                 .with_context(|| format!("source at {:?} is off the grid", s.position))?;
-            if in_pml(node) {
+            if in_pml(point) {
                 warnings.push(format!(
                     "source at {:?} is inside an absorbing layer",
                     s.position
@@ -329,14 +331,14 @@ impl Simulation {
             }
             let mechanism = s.mechanism()?;
             source_info.push(SourceInfo {
-                position: grid.position(node),
+                position: std::array::from_fn(|a| point[a] * grid.h[a]),
                 mechanism: match mechanism {
                     Mechanism::Moment(m) => format!("moment tensor {m:?}"),
                     Mechanism::Force(f) => format!("force {f:?}"),
                 },
                 dominant_frequency: wavelet.dominant_frequency(),
             });
-            let mut source = Source::new(&solver, node, mechanism, wavelet);
+            let mut source = Source::new(&solver, point, mechanism, wavelet);
             if cfg.scheme.remove_time_dispersion {
                 source.remove_time_dispersion(dt, steps, TRANSFORM_BAND * f_max);
             }
@@ -346,21 +348,21 @@ impl Simulation {
         let record_every = cfg.output.record_every;
         ensure!(record_every >= 1, "record_every must be at least 1");
         let samples = steps.div_ceil(record_every);
-        let mut nodes = Vec::new();
+        let mut points = Vec::new();
         for p in cfg.receivers.positions()? {
-            let node = grid
-                .nearest_node(p)
+            let point = grid
+                .coordinates(p)
                 .with_context(|| format!("receiver at {p:?} is off the grid"))?;
-            nodes.push(node);
+            points.push(point);
         }
-        let in_layers = nodes.iter().filter(|&&n| in_pml(n)).count();
+        let in_layers = points.iter().filter(|&&p| in_pml(p)).count();
         if in_layers > 0 {
             warnings.push(format!(
                 "{in_layers} receiver(s) inside the absorbing layers will record damped waves"
             ));
         }
         ensure!(
-            !cfg.receivers.components.is_empty() || nodes.is_empty(),
+            !cfg.receivers.components.is_empty() || points.is_empty(),
             "receivers need at least one component"
         );
         // A second copy records nothing new, and the adjoint would back-propagate both.
@@ -371,7 +373,7 @@ impl Simulation {
                 c.name()
             );
         }
-        let receivers = Receivers::new(&solver, nodes, cfg.receivers.components.clone(), samples);
+        let receivers = Receivers::new(&solver, points, cfg.receivers.components.clone(), samples);
 
         let mut snapshots = Vec::new();
         for s in &cfg.snapshots {
@@ -433,7 +435,7 @@ impl Simulation {
             memory_bytes: memory.peak as usize,
             memory,
             sources: source_info,
-            receivers: receivers.nodes.len(),
+            receivers: receivers.points.len(),
             components: receivers
                 .components
                 .iter()
@@ -464,28 +466,41 @@ impl Simulation {
     /// and gradients are no longer exact: a node further in, they are.
     pub fn receivers_next_to_layers(&self) -> usize {
         let s = &self.solver;
-        let in_layers =
-            |node: &[usize; 3]| node.iter().zip(&s.cpml).any(|(&n, c)| c.slab(n).is_some());
-        let damped = |axis: usize, m: usize| {
+        let in_layers = |p: &[f64; 3]| {
+            p.iter()
+                .zip(&s.cpml)
+                .any(|(&x, c)| c.slab(x.round() as usize).is_some())
+        };
+        let damped = |axis: usize, m: usize, shift: f64| {
             let c = &s.cpml[axis];
-            c.slab(m)
-                .is_some_and(|i| c.profile(Stagger::Half).d[i] > 0.0)
+            let stagger = if shift == 0.0 {
+                Stagger::Node
+            } else {
+                Stagger::Half
+            };
+            c.slab(m).is_some_and(|i| c.profile(stagger).d[i] > 0.0)
         };
         let r = &self.receivers;
-        r.nodes
+        r.points
             .iter()
-            .filter(|node| !in_layers(node))
-            .filter(|node| {
+            .filter(|p| !in_layers(p))
+            .filter(|p| {
                 r.components.iter().any(|c| {
-                    let axis = match c {
-                        Component::Vx => 0,
-                        Component::Vy => 1,
-                        Component::Vz => 2,
-                        Component::P => return false,
+                    let fields: &[Field] = match c {
+                        Component::Vx => &[Field::Vx],
+                        Component::Vy => &[Field::Vy],
+                        Component::Vz => &[Field::Vz],
+                        Component::P => &[Field::Sxx, Field::Syy, Field::Szz],
                     };
-                    s.stagger_weights(axis, node[axis], 1.0)
-                        .iter()
-                        .any(|&(m, _)| damped(axis, m))
+                    fields.iter().any(|&f| {
+                        let (shift, parity) = f.lattice();
+                        (0..3).any(|a| {
+                            let parity = if a == 2 { parity } else { 1.0 };
+                            s.axis_weights(a, p[a], shift[a], parity)
+                                .iter()
+                                .any(|&(m, _)| damped(a, m, shift[a]))
+                        })
+                    })
                 })
             })
             .count()
@@ -731,17 +746,17 @@ impl Simulation {
     pub fn write_outputs(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let r = &self.receivers;
-        if !r.nodes.is_empty() {
+        if !r.points.is_empty() {
             for (c, data) in r.components.iter().zip(&r.traces) {
                 npy::write(
                     &dir.join(format!("{}.npy", c.name())),
-                    &[r.nodes.len(), r.samples],
+                    &[r.points.len(), r.samples],
                     data,
                 )?;
-                if r.nodes.len() >= 2 {
+                if r.points.len() >= 2 {
                     image::write_gather(
                         &dir.join(format!("{}_gather.png", c.name())),
-                        r.nodes.len(),
+                        r.points.len(),
                         r.samples,
                         data,
                     )?;
@@ -750,8 +765,9 @@ impl Simulation {
             let times: Vec<f32> = self.sample_times().iter().map(|&t| t as f32).collect();
             npy::write(&dir.join("time.npy"), &[times.len()], &times)?;
             let mut csv = String::from("receiver,x,y,z\n");
-            for (n, &node) in r.nodes.iter().enumerate() {
-                let [x, y, z] = self.solver.grid.position(node);
+            let h = self.solver.grid.h;
+            for (n, p) in r.points.iter().enumerate() {
+                let [x, y, z] = [p[0] * h[0], p[1] * h[1], p[2] * h[2]];
                 writeln!(csv, "{n},{x},{y},{z}")?;
             }
             fs::write(dir.join("receivers.csv"), csv)?;

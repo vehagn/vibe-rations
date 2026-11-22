@@ -102,8 +102,8 @@ pub fn mute_weight(mute: &MuteConfig, t: f64, offset: f64) -> f64 {
     mute.weight + (1.0 - mute.weight) * kept
 }
 
-/// Each receiver's horizontal distance from `cfg`'s source, both snapped to the nodes as a run
-/// snaps them: the offsets the mutes go by. Horizontal, not slant: slow waves along the
+/// Each receiver's horizontal distance from `cfg`'s source, both where a run puts them
+/// (exactly, between nodes too): the offsets the mutes go by. Horizontal, not slant: slow waves along the
 /// seafloor travel at the same offset whatever the source's depth. One source only (a shot).
 pub fn offsets(cfg: &Config) -> Result<Vec<f64>> {
     ensure!(
@@ -113,10 +113,10 @@ pub fn offsets(cfg: &Config) -> Result<Vec<f64>> {
     );
     let grid = Simulation::grid(cfg)?;
     let at = |p: [f64; 3]| -> Result<[f64; 2]> {
-        let n = grid
-            .nearest_node(p)
+        let c = grid
+            .coordinates(p)
             .with_context(|| format!("{p:?} is off the grid"))?;
-        Ok([n[0] as f64 * grid.h[0], n[1] as f64 * grid.h[1]])
+        Ok([c[0] * grid.h[0], c[1] * grid.h[1]])
     };
     let source = at(cfg
         .sources
@@ -1942,9 +1942,9 @@ mod tests {
         );
     }
 
-    /// Offsets are horizontal, between the nodes source and receivers snap to.
+    /// Offsets are horizontal, between where a run puts the source and receivers.
     #[test]
-    fn offsets_are_horizontal_between_nodes() {
+    fn offsets_are_horizontal_between_where_a_run_puts_them() {
         let cfg = Config::from_toml(
             r#"
             [grid]
@@ -1972,11 +1972,12 @@ mod tests {
             "#,
         )
         .unwrap();
+        // Where a run puts them, between nodes too: the source at x = 52 m, not 50.
         let x = offsets(&cfg).unwrap();
         assert_eq!(x.len(), 3);
-        assert_eq!(x[0], 0.0);
-        assert!((x[1] - 80.0).abs() < 1e-12, "{}", x[1]);
-        assert!((x[2] - 50.0).abs() < 1e-12, "{}", x[2]);
+        assert!((x[0] - 2.0).abs() < 1e-12, "{}", x[0]);
+        assert!((x[1] - 79.0).abs() < 1e-12, "{}", x[1]);
+        assert!((x[2] - 2384f64.sqrt()).abs() < 1e-12, "{}", x[2]);
     }
 
     /// What a misfit holds is what [`Misfit::held_bytes`] works out beforehand.

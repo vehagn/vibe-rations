@@ -37,7 +37,7 @@ use rayon::prelude::*;
 
 use crate::cpml::{CpmlAxis, PmlSettings, Stagger};
 use crate::fd::Stencil;
-use crate::grid::Grid;
+use crate::grid::{AsPoint, Grid};
 use crate::model::Model;
 
 /// The nine wavefield arrays, padded.
@@ -66,6 +66,24 @@ pub enum Field {
     Sxy,
     Sxz,
     Syz,
+}
+
+impl Field {
+    /// Where the field sits along each axis, in nodes past each node (0 or ½), and its sign
+    /// mirrored across the free surface: even for the velocities and σxx, σyy and σxy, odd for
+    /// σzz, σxz and σyz.
+    pub fn lattice(self) -> ([f64; 3], f32) {
+        match self {
+            Field::Vx => ([0.5, 0.0, 0.0], 1.0),
+            Field::Vy => ([0.0, 0.5, 0.0], 1.0),
+            Field::Vz => ([0.0, 0.0, 0.5], 1.0),
+            Field::Sxx | Field::Syy => ([0.0; 3], 1.0),
+            Field::Szz => ([0.0; 3], -1.0),
+            Field::Sxy => ([0.5, 0.5, 0.0], 1.0),
+            Field::Sxz => ([0.5, 0.0, 0.5], -1.0),
+            Field::Syz => ([0.0, 0.5, 0.5], -1.0),
+        }
+    }
 }
 
 impl Fields {
@@ -817,33 +835,97 @@ impl Solver {
         out
     }
 
-    /// The linear functional that reads component `c` at `node`.
-    pub fn receiver_op(&self, c: crate::receiver::Component, node: [usize; 3]) -> PointOp {
-        use crate::receiver::Component;
+    /// Weights on the interior indices along `axis` that interpolate a quantity stored at
+    /// m + `shift` (0 or ½) for index m onto grid coordinate `x`: the value itself where `x`
+    /// is one of its positions, [`Solver::stagger_weights`] onto a node, and otherwise the
+    /// stencil's interpolation from the 2L values around `x` ([`Stencil::interpolation_at`]):
+    /// Lagrange's from 2L values moved inwards near an end, and along z with a free surface
+    /// the mirror images above it, with sign `parity`.
+    pub fn axis_weights(&self, axis: usize, x: f64, shift: f64, parity: f32) -> Vec<(usize, f32)> {
+        let n = self.grid.n[axis] as isize;
+        let u = x - shift;
+        if u >= 0.0 && u.fract() == 0.0 {
+            return vec![(u as usize, 1.0)];
+        }
+        if shift == 0.5 && x.fract() == 0.0 {
+            return self.stagger_weights(axis, x as usize, parity);
+        }
+        let mirror = axis == 2 && self.free_surface;
+        let l = self.stencil.half_length() as isize;
+        let m0 = u.floor() as isize;
+        let (mut lo, mut hi) = (m0 - l + 1, m0 + l);
+        let weights: Vec<f64> = if (mirror || lo >= 0) && hi < n {
+            self.stencil.interpolation_at(u - m0 as f64)
+        } else {
+            if hi >= n {
+                hi = n - 1;
+                lo = hi - 2 * l + 1;
+            }
+            if lo < 0 && !mirror {
+                lo = 0;
+                hi = (2 * l - 1).min(n - 1);
+            }
+            let points: Vec<f64> = (lo..=hi).map(|m| m as f64 + shift - x).collect();
+            crate::fd::lagrange_at_zero(&points)
+        };
+        let mut out: Vec<(usize, f32)> = Vec::with_capacity(weights.len());
+        for (m, w) in (lo..=hi).zip(weights) {
+            // Above the surface, a node's index -m mirrors m; a value half a node down, at
+            // index m (position m + ½), mirrors index -1 - m.
+            let (m, w) = if m < 0 {
+                (if shift == 0.0 { -m } else { -1 - m }, parity * w as f32)
+            } else {
+                (m, w as f32)
+            };
+            match out.iter_mut().find(|(i, _)| *i == m as usize) {
+                Some((_, sum)) => *sum += w,
+                None => out.push((m as usize, w)),
+            }
+        }
+        out.retain(|&(_, w)| w != 0.0);
+        out
+    }
+
+    /// Padded indices and weights that interpolate `field` onto `point`: the product of
+    /// [`Solver::axis_weights`] along the three axes, x outermost.
+    pub fn field_weights(&self, field: Field, point: impl AsPoint) -> Vec<(usize, f32)> {
+        let p = point.point();
+        let (shift, parity) = field.lattice();
+        let [ax, ay, az]: [Vec<(usize, f32)>; 3] = std::array::from_fn(|a| {
+            self.axis_weights(a, p[a], shift[a], if a == 2 { parity } else { 1.0 })
+        });
         let g = self.grid;
-        let staggered = |axis: usize, field: Field| PointOp {
-            terms: self
-                .stagger_weights(axis, node[axis], 1.0)
-                .into_iter()
-                .map(|(m, w)| {
-                    let mut n = node;
-                    n[axis] = m;
-                    (field, g.idx(n[0], n[1], n[2]), w)
+        let mut out = Vec::with_capacity(ax.len() * ay.len() * az.len());
+        for &(i, wx) in &ax {
+            for &(j, wy) in &ay {
+                for &(k, wz) in &az {
+                    out.push((g.idx(i, j, k), wx * wy * wz));
+                }
+            }
+        }
+        out
+    }
+
+    /// The linear functional that reads component `c` at `point` (a node, or any point in grid
+    /// coordinates).
+    pub fn receiver_op(&self, c: crate::receiver::Component, point: impl AsPoint) -> PointOp {
+        use crate::receiver::Component;
+        let p = point.point();
+        let reads = |fields: &[Field], scale: f32| PointOp {
+            terms: fields
+                .iter()
+                .flat_map(|&f| {
+                    self.field_weights(f, p)
+                        .into_iter()
+                        .map(move |(i, w)| (f, i, w * scale))
                 })
                 .collect(),
         };
         match c {
-            Component::Vx => staggered(0, Field::Vx),
-            Component::Vy => staggered(1, Field::Vy),
-            Component::Vz => staggered(2, Field::Vz),
-            Component::P => {
-                let p = g.idx(node[0], node[1], node[2]);
-                PointOp {
-                    terms: [Field::Sxx, Field::Syy, Field::Szz]
-                        .map(|f| (f, p, -1.0 / 3.0))
-                        .to_vec(),
-                }
-            }
+            Component::Vx => reads(&[Field::Vx], 1.0),
+            Component::Vy => reads(&[Field::Vy], 1.0),
+            Component::Vz => reads(&[Field::Vz], 1.0),
+            Component::P => reads(&[Field::Sxx, Field::Syy, Field::Szz], -1.0 / 3.0),
         }
     }
 
@@ -855,13 +937,14 @@ impl Solver {
     /// A pressure residual is an isotropic stress source dt·K/V per unit, K = λ + 2μ/3; on the
     /// free surface, where σzz = 0, it loads σxx and σyy with the plane-stress modulus instead.
     /// See the `adjoint` module for why.
-    pub fn adjoint_op(&self, c: crate::receiver::Component, node: [usize; 3]) -> PointOp {
+    pub fn adjoint_op(&self, c: crate::receiver::Component, point: impl AsPoint) -> PointOp {
         use crate::receiver::Component;
         let g = self.grid;
         let volume = g.cell_volume() as f32;
         let plane = g.plane_len();
         let m = &self.material;
-        let mut op = self.receiver_op(c, node);
+        let point = point.point();
+        let mut op = self.receiver_op(c, point);
         match c {
             Component::Vx | Component::Vy | Component::Vz => {
                 let b = m.buoyancy(match c {
@@ -874,33 +957,65 @@ impl Solver {
                 }
             }
             Component::P => {
-                let p = g.idx(node[0], node[1], node[2]);
-                let (l, l2) = (m.lam[p], m.l2m[p]);
-                // The row sums of the update's stiffness: what the stress update does with an
-                // isotropic strain, as in update_stress.
-                let (horizontal, vertical) = if self.free_surface && node[2] == 0 {
-                    let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
-                    ((l2 - q) + (l - q), 0.0)
-                } else {
-                    (l2 + 2.0 * l, l2 + 2.0 * l)
-                };
-                let scale = 1.0 / (3.0 * volume * self.cell_share(Field::Sxx, node[2]));
-                op.terms = [
-                    (Field::Sxx, p, horizontal * scale),
-                    (Field::Syy, p, horizontal * scale),
-                    (Field::Szz, p, vertical * scale),
-                ]
-                .into_iter()
-                .filter(|t| t.2 != 0.0)
-                .collect();
+                // The weights the receiver reads σxx, σyy and σzz with at each node: the same
+                // but where σzz's odd mirror image folds in near the free surface.
+                let mut nodes: Vec<(usize, [f32; 3])> = Vec::new();
+                for (c, field) in [Field::Sxx, Field::Syy, Field::Szz].into_iter().enumerate() {
+                    for (p, w) in self.field_weights(field, point) {
+                        match nodes.iter_mut().find(|(q, _)| *q == p) {
+                            Some((_, ws)) => ws[c] = w,
+                            None => {
+                                let mut ws = [0.0; 3];
+                                ws[c] = w;
+                                nodes.push((p, ws));
+                            }
+                        }
+                    }
+                }
+                op.terms.clear();
+                for (p, w) in nodes {
+                    let k = p / plane - g.halo;
+                    let (l, l2) = (m.lam[p], m.l2m[p]);
+                    let surface = self.free_surface && k == 0;
+                    // The update's stiffness applied to the weights, as in update_stress: on
+                    // the free surface plane stress (σzz stays zero). Equal weights (on a node,
+                    // or away from the surface) take the row sums.
+                    let q = if surface && l2 > 0.0 { l * l / l2 } else { 0.0 };
+                    let loads: [f32; 3] = if w[0] == w[1] && w[1] == w[2] {
+                        let (horizontal, vertical) = if surface {
+                            ((l2 - q) + (l - q), 0.0)
+                        } else {
+                            (l2 + 2.0 * l, l2 + 2.0 * l)
+                        };
+                        [w[0] * horizontal, w[0] * horizontal, w[0] * vertical]
+                    } else if surface {
+                        [
+                            (l2 - q) * w[0] + (l - q) * w[1],
+                            (l - q) * w[0] + (l2 - q) * w[1],
+                            0.0,
+                        ]
+                    } else {
+                        [
+                            l2 * w[0] + l * w[1] + l * w[2],
+                            l * w[0] + l2 * w[1] + l * w[2],
+                            l * w[0] + l * w[1] + l2 * w[2],
+                        ]
+                    };
+                    let scale = 1.0 / (3.0 * volume * self.cell_share(Field::Sxx, k));
+                    for (field, v) in [Field::Sxx, Field::Syy, Field::Szz].into_iter().zip(loads) {
+                        if v != 0.0 {
+                            op.terms.push((field, p, v * scale));
+                        }
+                    }
+                }
             }
         }
         op
     }
 
-    /// A component's value at a node now.
-    pub fn sample(&self, c: crate::receiver::Component, node: [usize; 3]) -> f32 {
-        self.receiver_op(c, node).sample(&self.fields)
+    /// A component's value at a point (a node, or grid coordinates) now.
+    pub fn sample(&self, c: crate::receiver::Component, point: impl AsPoint) -> f32 {
+        self.receiver_op(c, point).sample(&self.fields)
     }
 
     /// The largest particle-velocity component anywhere, or infinity if any is not finite.

@@ -161,6 +161,44 @@ impl Stencil {
         &self.interpolation
     }
 
+    /// Weights for the 2L values at offsets j - δ (j = 1 - L, ..., L, in nodes) from a point
+    /// that lies δ ∈ (0, 1) past the nearest value below it: how a point between two values of
+    /// a lattice is read from the 2L values around it. Lagrange's for Taylor coefficients; for
+    /// optimised ones chosen as their interpolation onto a node is, minimising the largest
+    /// complex error |Σ wⱼ e^{i x (j - δ)} - 1| (its real and imaginary parts) for k·h up to
+    /// the band, weighted the same way, and exact for constants and linear functions. At δ = ½
+    /// they are [`Stencil::interpolation`]'s. Designs are remembered.
+    pub fn interpolation_at(&self, delta: f64) -> Vec<f64> {
+        let l = self.half_length();
+        let points: Vec<f64> = (0..2 * l)
+            .map(|k| k as f64 - (l - 1) as f64 - delta)
+            .collect();
+        if delta == 0.5 {
+            // p = ±(n - ½): weight wₙ.
+            return points
+                .iter()
+                .map(|p| self.interpolation[(p.abs() - 0.5).round() as usize])
+                .collect();
+        }
+        let Some(band) = self.band else {
+            return lagrange_at_zero(&points);
+        };
+        type Designs = Vec<((usize, u64, u64), Vec<f64>)>;
+        static DESIGNS: Mutex<Designs> = Mutex::new(Vec::new());
+        const REMEMBERED: usize = 256;
+        let key = (l, band.to_bits(), delta.to_bits());
+        if let Some((_, w)) = DESIGNS.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return w.clone();
+        }
+        let w = interpolation_design(&points, band);
+        let mut designs = DESIGNS.lock().unwrap();
+        if designs.len() == REMEMBERED {
+            designs.remove(0);
+        }
+        designs.push((key, w.clone()));
+        w
+    }
+
     /// The largest phase error per node, | |K| - |k|h |, over every direction (sampled densely)
     /// and every |k|·h up to `band`, computed exactly rather than linearised.
     pub fn phase_error(&self, band: f64) -> f64 {
@@ -248,6 +286,62 @@ impl Stencil {
             accumulate(out, a, hi, lo, k == 0);
         }
     }
+}
+
+/// Lagrange's weights at 0 for values at `points`: exact for polynomials of degree below
+/// their number.
+pub fn lagrange_at_zero(points: &[f64]) -> Vec<f64> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| {
+            points
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, &y)| -y / (x - y))
+                .product::<f64>()
+        })
+        .collect()
+}
+
+/// Interpolation weights at 0 for values at `points` (2L of them, the two nearest 0 at
+/// indices L - 1 and L) minimising the weighted largest complex error over the band, exact for
+/// constants and linear functions: Lagrange's weights plus a combination of vectors that
+/// change neither Σ w nor Σ w p, each moving weight from the two nearest points to one other.
+fn interpolation_design(points: &[f64], band: f64) -> Vec<f64> {
+    let base = lagrange_at_zero(points);
+    let (a, b) = (points.len() / 2 - 1, points.len() / 2);
+    let basis: Vec<Vec<f64>> = (0..points.len())
+        .filter(|&k| k != a && k != b)
+        .map(|k| {
+            let mut v = vec![0.0; points.len()];
+            v[k] = 1.0;
+            v[b] = (points[a] - points[k]) / (points[b] - points[a]);
+            v[a] = -1.0 - v[b];
+            v
+        })
+        .collect();
+    let mut rows = Vec::with_capacity(400);
+    for s in 1..=200 {
+        let x = band * s as f64 / 200.0;
+        let sum = |w: &[f64], f: fn(f64) -> f64| {
+            w.iter().zip(points).map(|(w, p)| w * f(x * p)).sum::<f64>()
+        };
+        // Real part: Σ wⱼ cos(x pⱼ) - 1; imaginary: Σ wⱼ sin(x pⱼ).
+        for (f, target) in [(f64::cos as fn(f64) -> f64, 1.0), (f64::sin, 0.0)] {
+            let row = basis.iter().map(|v| sum(v, f)).collect();
+            rows.push(weighted(row, target - sum(&base, f), x / band));
+        }
+    }
+    let (z, _) = minimax_complex(&rows);
+    let mut w = base;
+    for (v, z) in basis.iter().zip(&z) {
+        for (w, v) in w.iter_mut().zip(v) {
+            *w += z * v;
+        }
+    }
+    w
 }
 
 /// Lagrange weights at 0 for values at ±½, ±3/2, ..., ±(m - ½): the value at k - ½ (and its
@@ -349,6 +443,37 @@ fn minimax(rows: &[Row]) -> (Vec<f64>, f64) {
         let errors: Vec<f64> = rows
             .iter()
             .map(|(a, b)| (a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>() - b).abs())
+            .collect();
+        let worst = errors.iter().copied().fold(0.0, f64::max);
+        if worst < best.0 {
+            best = (worst, x);
+        }
+        let total: f64 = weights.iter().zip(&errors).map(|(w, e)| w * e).sum();
+        if total == 0.0 {
+            break;
+        }
+        for (w, e) in weights.iter_mut().zip(&errors) {
+            *w *= e / total;
+        }
+    }
+    (best.1, best.0)
+}
+
+/// [`minimax`] for a complex error: the rows come in pairs, its real and imaginary parts at
+/// one point, and the largest modulus √(re² + im²) is minimised; each pair shares a weight.
+/// Taken part by part, the minimax isn't unique (any imaginary part below the largest real
+/// one would do), and the design could pick weights with a needless phase error.
+fn minimax_complex(rows: &[Row]) -> (Vec<f64>, f64) {
+    let pairs = rows.len() / 2;
+    let mut weights = vec![1.0 / pairs as f64; pairs];
+    let mut best = (f64::INFINITY, Vec::new());
+    for _ in 0..400 {
+        let row_weights: Vec<f64> = weights.iter().flat_map(|&w| [w, w]).collect();
+        let x = weighted_least_squares(rows, &row_weights);
+        let error = |(a, b): &Row| a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>() - b;
+        let errors: Vec<f64> = rows
+            .chunks(2)
+            .map(|pair| error(&pair[0]).hypot(error(&pair[1])))
             .collect();
         let worst = errors.iter().copied().fold(0.0, f64::max);
         if worst < best.0 {
@@ -585,6 +710,75 @@ mod tests {
             Stencil::optimised(2, 1.0, 1.0).unwrap(),
             Stencil::taylor(2).unwrap()
         );
+    }
+
+    /// Interpolating from any offset: Lagrange's for Taylor coefficients; for optimised ones
+    /// exact for constants and linear functions and better than Lagrange's over the band, and
+    /// at δ = ½ what the design for a node gives.
+    #[test]
+    fn interpolates_from_any_offset() {
+        let error = |w: &[f64], delta: f64, band: f64| {
+            let l = w.len() / 2;
+            (1..=400)
+                .map(|s| {
+                    let x = band * s as f64 / 400.0;
+                    let (re, im) = w.iter().enumerate().fold((0.0, 0.0), |(re, im), (j, w)| {
+                        let p = x * (j as f64 - (l - 1) as f64 - delta);
+                        (re + w * p.cos(), im + w * p.sin())
+                    });
+                    ((re - 1.0f64).powi(2) + im * im).sqrt()
+                })
+                .fold(0.0, f64::max)
+        };
+        for order in [4, 8, 16] {
+            let t = Stencil::taylor(order).unwrap();
+            let l = order / 2;
+            for delta in [0.1, 0.37, 0.5, 0.81] {
+                let points: Vec<f64> = (0..2 * l)
+                    .map(|k| k as f64 - (l - 1) as f64 - delta)
+                    .collect();
+                // At ½ the stencil's own weights, which agree to round-off.
+                let gap = t
+                    .interpolation_at(delta)
+                    .iter()
+                    .zip(lagrange_at_zero(&points))
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f64::max);
+                assert!(gap < 1e-15, "order {order}, δ {delta}: {gap}");
+            }
+        }
+        for (order, band) in [(4, 1.5), (8, 1.8), (16, 2.4)] {
+            let o = Stencil::optimised(order, band, 1.0).unwrap();
+            let t = Stencil::taylor(order).unwrap();
+            let l = order / 2;
+            for delta in [0.1, 0.37, 0.81] {
+                let w = o.interpolation_at(delta);
+                let p: Vec<f64> = (0..2 * l)
+                    .map(|k| k as f64 - (l - 1) as f64 - delta)
+                    .collect();
+                assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+                assert!(w.iter().zip(&p).map(|(w, p)| w * p).sum::<f64>().abs() < 1e-12);
+                let (eo, et) = (
+                    error(&w, delta, band),
+                    error(&t.interpolation_at(delta), delta, band),
+                );
+                eprintln!("order {order}, δ {delta}: largest error {et:.2e} -> {eo:.2e}");
+                assert!(eo < et, "order {order}, δ {delta}: {eo} vs {et}");
+            }
+            // The general design at δ = ½ comes to the node's.
+            let p: Vec<f64> = (0..2 * l)
+                .map(|k| k as f64 - (l - 1) as f64 - 0.5)
+                .collect();
+            let general = interpolation_design(&p, band);
+            let node = o.interpolation_at(0.5);
+            let gap = general
+                .iter()
+                .zip(&node)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            eprintln!("order {order}: the general design at ½ is off the node's by {gap:.1e}");
+            assert!(gap < 1e-4, "{gap}");
+        }
     }
 
     /// A band the stencil can't have within the tolerance shrinks to one it can.

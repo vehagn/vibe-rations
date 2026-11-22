@@ -2689,6 +2689,230 @@ part. The rest of the follow-ups were not run (open questions).
 **Reproduce:** `just in marmousi2-study stages_muted_after_the_first` (60 minutes on four
 cores).
 
+## 2026-11-22 — Band-limited layers by default
+
+**Question.** Band-limited layers put an interface where it lies (2026-11-21, "Band-limited
+layers, opt in"), but flipping the default failed three gradient checks and the inversion's
+set-up test. What do the checks need, and what does the flip change elsewhere?
+
+**Method.** `config::Interfaces::BandLimited` made the default. The gradient checks
+(`gradient_check` in `tests/physics.rs`) perturbed random signs at every node outside the
+layers, but $v_p$ only below the model's fastest speed, which sets $\Delta t$ through the
+Courant fraction and the layers' damping. Band-limited, the fastest is an overshoot plane
+(3022 m/s) above a 3000 m/s layer, which a perturbation pushes past it. The checks now hold
+$\Delta t$ and `pml_vp_max` at the base model's for the observed, base and perturbed runs, as
+`Inversion::new` does, and perturb $v_p$ everywhere. The step was swept over
+$h = 3.2 \times 10^{-2}$ to $2 \times 10^{-3}$ for $v_p$, with random signs and down the
+gradient (random amounts with the gradient's signs, as the inversion's check does), under
+both samplings. Then the whole of `just physics` under both samplings with the new checks;
+for the misfits' checks (`inversion_gradient_check`), steps from $2 \times 10^{-2}$ to
+$2.5 \times 10^{-3}$.
+
+**Results.**
+
+- *Random signs with $\Delta t$ held* fail: $v_p$'s extrapolated error scatters without a
+  trend as $h$ shrinks, $2.5 \times 10^{-5}$ to $4.2 \times 10^{-4}$ at order 4 and
+  $9.7 \times 10^{-5}$ to $7.3 \times 10^{-4}$ at order 8, and node sampling fails at
+  $3.0 \times 10^{-4}$. Perturbing the fast lower layer too, which the old mask had kept
+  fixed, leaves the predicted change cancelling between nodes ($4.0 \times 10^{-4}$ per unit
+  $h$ against $v_s$'s $6.3 \times 10^{-3}$), and the finite differences' round-off, about
+  $10^{-7}$ of a unit of misfit (the same as $v_s$'s), swamps it.
+- *Down the gradient* the change can't cancel ($-4.9 \times 10^{-2}$ for $v_p$), and $v_p$'s
+  extrapolated error falls as $h^4$, from $1.0 \times 10^{-4}$ at $3.2 \times 10^{-2}$ to a
+  floor of about $3 \times 10^{-6}$ from $8 \times 10^{-3}$ down. At $h = 1.6 \times 10^{-2}$,
+  band-limited (node-sampled):
+
+  | | order 4 | order 8 | walls and water |
+  |---|---|---|---|
+  | $v_p$ | $8.5 \times 10^{-6}$ ($1.0 \times 10^{-5}$) | $2.3 \times 10^{-6}$ ($6.3 \times 10^{-6}$) | $5.4 \times 10^{-6}$ |
+  | $v_s$ | $6.9 \times 10^{-5}$ ($7.1 \times 10^{-5}$) | $7.4 \times 10^{-5}$ ($7.2 \times 10^{-5}$) | $9.1 \times 10^{-6}$ |
+  | $\rho$ | $2.5 \times 10^{-6}$ ($4.8 \times 10^{-6}$) | $1.2 \times 10^{-5}$ ($1.3 \times 10^{-6}$) | $5.1 \times 10^{-6}$ |
+
+  Before, along random signs with $v_p$'s lower layer fixed (node-sampled): $v_p$
+  $2.8 \times 10^{-4}$ / $3.9 \times 10^{-6}$, $v_s$ $2.1 \times 10^{-5}$ / $1.0 \times 10^{-5}$,
+  $\rho$ $4.4 \times 10^{-5}$ / $1.6 \times 10^{-5}$; walls and water $6.4 \times 10^{-5}$,
+  $1.2 \times 10^{-5}$, $1.6 \times 10^{-4}$. $v_s$ is now the largest, the same at both
+  orders and samplings: the extrapolation's $h^4$ error along a direction that changes the
+  misfit more nonlinearly, not round-off. The rebuilt wavefield's checks give the same
+  numbers to $4 \times 10^{-7}$ of the predicted change.
+- *Elsewhere in `just physics`*, node-sampled → band-limited: the long run drains to
+  $2.7 \times 10^{-6}$ → $2.5 \times 10^{-6}$ (order 4) and $1.1 \times 10^{-6}$ →
+  $9.6 \times 10^{-7}$ (order 8); the wavefield rebuilt backwards drifts $7.5$, $6.3$, $6.2$,
+  $12 \times 10^{-7}$ → $8.0$, $9.0$, $8.0$, $10 \times 10^{-7}$ (orders 4 and 8, with a
+  free surface and with layers all round) and $9.6 \times 10^{-7}$ → $1.8 \times 10^{-6}$ with
+  walls and water; its gradient differs from the replay's by at most $7.1 \times 10^{-7}$ →
+  $6.2 \times 10^{-7}$. The inversion's checks, down the gradient at one step: inversion
+  gradient $4.0 \times 10^{-6}$ → $4.9 \times 10^{-6}$, filtered L2 $4.4 \times 10^{-7}$ →
+  $2.4 \times 10^{-6}$, phase $4.2 \times 10^{-6}$ → $6.3 \times 10^{-7}$, filtered time
+  shifts $1.3 \times 10^{-4}$ → $1.2 \times 10^{-4}$, muted filtered L2 $8.7 \times 10^{-7}$
+  → $1.9 \times 10^{-5}$, windowed time shifts $2.6 \times 10^{-5}$ → $9.1 \times 10^{-5}$.
+  Swept, band-limited, the muted L2 check gives $1.3 \times 10^{-4}$, $1.9 \times 10^{-5}$,
+  $2.5 \times 10^{-5}$ and $5.3 \times 10^{-5}$ at $h = 2 \times 10^{-2}$, $10^{-2}$,
+  $5 \times 10^{-3}$ and $2.5 \times 10^{-3}$: the extrapolation's $h^4$ error above,
+  round-off growing as $1/h$ below, about equal at $10^{-2}$. Filtered L2 ($1.9 \times
+  10^{-4}$, $2.4 \times 10^{-6}$, $2.3 \times 10^{-5}$, $6.2 \times 10^{-5}$) and the
+  inversion gradient ($7.5 \times 10^{-5}$, $4.9 \times 10^{-6}$, $5.7 \times 10^{-7}$,
+  $1.4 \times 10^{-5}$) behave the same. A wrong gradient would leave the same error at every
+  step, so these moved within the checks' noise; node sampling's $8.7 \times 10^{-7}$ was a
+  lucky cancellation in it. Every other test is unchanged (its configuration sets the
+  sampling, or has no interface between layers).
+- The inversion's set-up test expected `pml_vp_max` to be the rock's 2000 m/s; the start's
+  fastest node is now the overshoot beside the water, which it now takes.
+
+**Decision.** Band-limited layers are the default; `interfaces = "nodes"` keeps node
+sampling. The gradient checks hold $\Delta t$ and the layers' damping and go down the
+gradient, and their tolerance is tightened from $3 \times 10^{-4}$ to $1.5 \times 10^{-4}$,
+twice the largest error. The doubled drift of the wavefield rebuilt beside water is recorded,
+not traced: band-limiting puts solid nodes with small shear moduli beside the water, a
+candidate (the gradient's notes on $\mu \ll \lambda$), untested.
+
+**Reproduce:** `just physics`; for node sampling, move `#[default]` in `config::Interfaces`
+back to `Nodes`. The step sweeps need a loop over $h$ in `gradient_check` and
+`inversion_gradient_check` (not committed).
+
+## 2026-11-22 — The free surface against Lamb's problem
+
+**Question.** The P-doubling test's 2.5% is mostly its reference (2026-11-20, "The free
+surface on finer grids"), which leaves the free surface's own accuracy unmeasured. How
+accurate is it for the wave it exists for, the Rayleigh wave, and is the error the free
+surface's or the stencil's?
+
+**Method.** Lamb's problem for a Poisson solid: Pekeris's closed form for the vertical
+displacement of the surface under a vertical step force on it [@pekeris1955], his eqs.
+45–48 (read from the article's scanned pages; `tests/common/lamb.rs`). With
+$\tau = \beta t/r$ and $\gamma^2 = (3 + \sqrt3)/4$, the Rayleigh pole, a downward force $F$
+moves the surface down by $w = 0$ for $\tau < 1/\sqrt3$;
+$$
+w = \frac{F}{32\pi\mu r}\left[6 - \frac{\sqrt3}{\sqrt{\tau^2 - \frac14}}
+  - \frac{\sqrt{3\sqrt3 + 5}}{\sqrt{\gamma^2 - \tau^2}}
+  + \frac{\sqrt{3\sqrt3 - 5}}{\sqrt{\tau^2 - \frac{3 - \sqrt3}{4}}}\right]
+$$
+for $1/\sqrt3 < \tau < 1$; $w = \frac{F}{16\pi\mu r}\left[6 - \sqrt{3\sqrt3 + 5}/\sqrt{\gamma^2 -
+\tau^2}\right]$ for $1 < \tau < \gamma$; and Boussinesq's $3F/(8\pi\mu r)$ after. The
+bracket vanishes exactly at the P arrival, both sides at $\tau = 1$ are $(1 - \sqrt3)/8$, the
+forms agree with his integrals (eqs. 33–44), and the static value is Boussinesq's for
+$\nu = \frac14$: a wrong coefficient breaks one of these. For the solver's Ricker force the
+velocity is $w * s''$: Simpson's rule after $t' = t_P + u^2$ and $t' = t_R - u^2$, which
+removes the Rayleigh singularity, plus the static part's exact term; 2000 and 4000 intervals
+agree to $7 \times 10^{-12}$ of the peak (`lambs_reference_is_consistent`). The survey: $v_p$
+3000 m/s, $v_s = v_p/\sqrt3$, $\rho$ 2500 kg/m³; a downward force at 15 Hz on the surface;
+$v_z$ on the surface at 150, 240 and 330 m along $x$ and 254.6 m on the diagonal; the
+Rayleigh wave ($0.9194\,v_s$) 106 m long at $f_0$, 10.6 points at $h = 10$ m, where the
+shortest S wavelength has the default's 4.6. Spacings 10 to 2.5 m at order 8; order 16 and
+the time error kept ($C = 0.3$) at 10 and 5 m. Per receiver: the L2 misfit, the amplitude
+$\langle v, w\rangle/\langle w, w\rangle$, the largest swing's lateness and its size.
+
+**Results** (order 8; the four receivers' range, or 150 / 240 / 330 m):
+
+| $h$ (m) | misfit | swing's size | lateness (samples) | Rayleigh speed |
+|---|---|---|---|---|
+| 10 | 15.5 / 21.4 / 28.2% (diagonal 22.5%) | +4.8–5.0% | −1.00 / −1.44 / −1.90 | +0.99% |
+| 7.5 | 10.5 / 13.9 / 18.1% | +5.6–5.8% | −0.81 / −1.18 / −1.56 | +0.62% |
+| 5 | 6.4 / 7.8 / 9.5% | +5.2–5.4% | −0.57 / −0.83 / −1.11 | +0.30% |
+| 3.75 | 4.8 / 5.4 / 6.3% | +4.4–4.5% | −0.42 / −0.62 / −0.84 | +0.17% |
+| 2.5 | 3.3 / 3.5 / 3.8% | +3.3% | −0.27 / −0.40 / −0.55 | +0.077% |
+
+The speed comes from the lateness's growth with distance and the sample interval (1.2465 ms
+at 10 m, in proportion to $h$). Order 16 is within 1 point of order 8 (15.1 / 20.7 / 27.2% at
+10 m, 6.3 / 7.6 / 9.3% at 5 m), and with the time error kept the misfits are within 0.6 point
+and the lateness, in time, the same.
+
+- *The free surface, not the stencil, sets the error.* The stencil's order and the time
+  error change nothing; at the default's 4.6 points per shortest S wavelength, where the
+  interior's S-wave error is about 1% after ten wavelengths, the Rayleigh wave misfits by
+  15–28% within three of its own.
+- *Two errors.* The Rayleigh wave runs fast, 0.99% at 10 m, falling as $h^{1.8}$ over the
+  range: second order, the misfit's part that grows with distance. And its largest swing is
+  3–6% too large at every distance, falling only to 3.3% at 2.5 m: first order at the fine
+  end (4.4% at 3.75 m, 3.3% at 2.5 m), and at the coarse end below that trend, where the
+  phase error also lowers the peak.
+- *A candidate for the second, not tested:* the free surface mirrors $v_z$ evenly, so $v_z$
+  continued above the surface has a kink, and interpolating across it reads $v_z(0) + c\,h\,
+  \partial_z v_z$ with $c = 0.342$ at order 8 (0.375 at 4, 0.329 at 16: hardly the order's,
+  as measured). A Rayleigh wave's $\partial_z w / w$ at the surface is $0.227k$ for
+  $\nu = \frac14$, so a receiver over-reads by $0.078\,kh$ and the surface force, its
+  transpose, over-excites by as much: 2.3% at 5 m and 1.2% at 2.5 m together at $f_0$,
+  against 5.2% and 3.3% measured. It accounts for part of it, falling at the same rate.
+
+**Decision.** The free surface is the solver's largest error for surface waves, by far: a
+Rayleigh wave needs about 40 points per wavelength at $f_0$ for a few per cent, where body
+waves need 4.5 at the shortest. `a_force_on_the_free_surface_matches_lambs_problem` pins
+the 10 m numbers (limits just above them). A higher-order free surface [@mittet2002;
+@kristek2002] or summation-by-parts closures [@oreilly2017] would address the speed; the
+swing's size may be the surface's sampling of $v_z$ (the candidate above), which a free
+surface with $v_z$ on the surface plane would also answer. Surface data, Marmousi2's
+included, carry this error into the misfit.
+
+**Reproduce:** `just physics lamb`; `just accuracy lambs_problem_on_finer_grids` (about two
+and a half minutes).
+
+## 2026-11-22 — Sources and receivers between nodes
+
+**Question.** Sources and receivers snapped to the nearest node, and a receiver 0.4 of a node
+off its position cost 26% misfit at 3.9 points per wavelength (2026-11-20, removing time
+dispersion). Can they sit where they are, with the scheme's accuracy and the adjoint's
+exactness intact?
+
+**Method.** A position becomes grid coordinates, position over spacing, whole numbers on a
+node (within $10^{-9}$, so a configuration on nodes reads exactly as before). Each component
+lives on a lattice, nodes or half nodes along each axis (`Field::lattice`), and is read at a
+point from the $2L$ values of its lattice around it along every axis the point lies off: on
+its own lattice point, the value; a staggered value onto a node, the stencil's interpolation as
+before; otherwise weights for an offset $\delta \in (0, 1)$ past the value below
+(`Stencil::interpolation_at`). With Taylor's coefficients those are Lagrange's; with optimised
+ones they minimise the largest complex error $|\sum_j w_j e^{i x (j - \delta)} - 1|$ for
+$kh$ up to the stencil's band, weighted by $(k/k_\text{band})^{-2}$ as the node's are, exact
+for constants and linear functions (Lagrange's weights plus a null-space combination, Lawson's
+algorithm on the modulus). The three axes multiply (`Solver::field_weights`); along $z$, values
+above a free surface fold onto their mirror images with the field's parity, odd for $\sigma_{zz}$,
+$\sigma_{xz}$ and $\sigma_{yz}$. A source spreads with the same weights, so it stays the
+receiver's transpose; Hicks (2002) does the same with Kaiser-windowed sincs [@hicks2002].
+Pressure's adjoint
+source applies the node's stiffness (plane stress on the surface) to the three normal weights,
+and the gradient's pressure residuals go to the adjoint strain with them. Checked against
+Stokes's solution, reciprocity, the dot-product test and a gradient check, each with the
+source and receivers between nodes, some between the free surface and the first node.
+
+**Results.**
+
+- *Weights.* The design at $\delta = \frac12$ reproduces the node's to $10^{-13}$ (order 4 to
+  16). Largest error over the band, Lagrange → optimised: order 4 (band 1.5) $3.3 \times
+  10^{-2}$ → $2.0 \times 10^{-2}$ at $\delta = 0.1$, $9.1 \times 10^{-2}$ → $5.7 \times 10^{-2}$ at
+  0.37; order 8 (1.8) $1.8 \times 10^{-2}$ → $1.6 \times 10^{-3}$, $5.1 \times 10^{-2}$ →
+  $4.7 \times 10^{-3}$; order 16 (2.4) $4.4 \times 10^{-2}$ → $7.2 \times 10^{-4}$,
+  $1.3 \times 10^{-1}$ → $2.1 \times 10^{-3}$. Minimising the real and imaginary parts
+  separately came out $7 \times 10^{-2}$ away from the node's design at $\delta = \frac12$: part by
+  part the optimum isn't unique, and the design picked a needless phase error.
+- *Accuracy.* A force at (40.37, 39.62, 40.89) nodes and receivers the same offsets from it
+  (6.9 points per S wavelength): 0.001–0.007% against Stokes's solution, as on the nodes
+  (0.001–0.005%). With the force on a node and receivers 0.37–0.41 of a node off, snapped:
+  10.0%, 17.7%, 7.7% ($v_x$) and 0.14% ($v_y$); exact: 0.003%, 0.005%, 0.007% and 0.001%.
+- *Transposes.* Reciprocity, one end on the surface between nodes or 4.1 m below it (between
+  the surface and the first node): $\le 6.8 \times 10^{-7}$ at orders 4 and 8, as on the nodes
+  ($\le 7.9 \times 10^{-7}$). The dot-product test with every receiver and the source moved by
+  (3.7, −2.4, 4.1) m, all four components: $3.8 \times 10^{-10}$ (rigid walls) and
+  $5.9 \times 10^{-8}$ (absorbing layers). The first version gave pressure's adjoint the row
+  sums of the stiffness, right only where the three normal weights are equal; moved along $z$
+  only, pressure broke the test ($2.7 \times 10^{-3}$, $2.1 \times 10^{-2}$), moved sideways it
+  didn't ($1.8 \times 10^{-8}$). The gradient check with the gradient model moved by
+  (−3.7, −2.4, 4.1) m, pressure recorded 4.1 m below the surface: $v_p$ $2.4 \times 10^{-7}$,
+  $v_s$ $7.3 \times 10^{-5}$, $\rho$ $1.1 \times 10^{-5}$, as on the nodes.
+- *The existing tests.* Lines whose receivers fell between nodes (and three sources) moved
+  them: the sphere inversion left 18.2% of its misfit instead of 17.9%, and the misfits'
+  check failed for the time shifts ($6.2 \times 10^{-3}$, $3.9$–$5.4 \times 10^{-3}$ for $h$
+  from $2 \times 10^{-3}$ to $1.25 \times 10^{-4}$). One-sided differences show why: forward
+  and backward slopes differ by about 1% as $h \to 0$, so one trace's correlation peak changes
+  lag at the start itself, where the shift has a kink; filtered L2's errors stay symmetric
+  ($\pm 1.8 \times 10^{-2}$ at $1.25 \times 10^{-4}$). The tests now list the positions they
+  used to snap to, and every number is as before.
+
+**Decision.** Sources and receivers sit where they are; there is no option to snap. On nodes
+nothing changes. A point between nodes reads $(2L)^3$ values (512 at order 8), which costs
+nothing next to a step.
+
+**Reproduce:** `just unit fd::tests::interpolates_from_any_offset`; `just physics between`
+(the force, reciprocity, dot-product and gradient checks between nodes).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2728,22 +2952,26 @@ cores).
   which stacks and f-k spectra within 1 km couldn't do; and a better shallow start.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
-  [@oreilly2017], which keep the exact discrete adjoint. Its error is about 0.4% at 8 ppw
-  for P (the free-surface test's floor), so measure it first on Lamb's problem with an
-  exact solution.
+  [@oreilly2017], which keep the exact discrete adjoint. Measured on Lamb's problem
+  (2026-11-22, "The free surface against Lamb's problem"): the Rayleigh wave misfits by
+  15–28% at the default's sampling, about 1% fast (second order) and 3–6% too large (first
+  order at the fine end, partly the evenly mirrored $v_z$'s kink, not tested further). The
+  horizontal component (Pekeris's eq. 66, elliptic integrals) and a buried source are not
+  measured.
 - **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
   node-sampled layers put an interface midway between nodes (first-order error),
   band-limiting density and compliances [@mittet2017] makes it second order wherever it
-  lies, and the stencil's order doesn't matter. Band-limited layers are opt-in
-  (2026-11-21, "Band-limited layers, opt in"). Still open: whether they should be the
-  default (the gradient checks' mask first), spheres, and how accurate the water rule is
+  lies, and the stencil's order doesn't matter. Band-limited layers are the default
+  (2026-11-21, "Band-limited layers, opt in"; 2026-11-22, "Band-limited layers by default").
+  Still open: spheres, and how accurate the water rule is
   against a fluid–solid reference (Scholte waves); oblique incidence
   with converted waves, which needs point sources and an exact reference, or plane waves
   at an angle in a grid whose sides wrap around; and the S reflection's second-order error
   at the point densities FWI runs at.
-- **Source and receiver positions** off the nodes [@hicks2002; @petersson2016]: snapping
-  a receiver 0.4 h off its position cost 26% misfit at 3.9 ppw (2026-11-20, removing time
-  dispersion).
+- **Source and receiver positions.** Between nodes they now interpolate with the stencil's
+  own weights (2026-11-22, "Sources and receivers between nodes"). Still open: sources and
+  receivers at a fluid–solid interface or near a sharp contrast, where interpolating across
+  it smooths what they see [@petersson2016].
 - **Optimised coefficients, further.** Weight the error by the wavelets' spectrum and the
   model's range of speeds instead of $(\xi/\beta)^{-2}$; measure the observed order under grid
   refinement (the band shrinks with $h$, so the operator tends to Taylor's); and choose the
@@ -2766,7 +2994,8 @@ cores).
   rebuilding it backwards from the band (2026-11-20: single-precision round-off,
   $10^{-7}$–$10^{-6}$ of the gradient, set by the field's loudest stretch in a segment; the
   layers and the free surface add nothing). Still open there: why a water layer drifts five
-  times more, and whether that drift moves an inversion. Dispersion in a homogeneous full space
+  times more (and with band-limited layers twice that again, 2026-11-22), and whether that
+  drift moves an inversion. Dispersion in a homogeneous full space
   is settled too, against the exact kernels (2026-11-21, "The gradient against the exact
   kernels"): at the defaults the wavefields put 0.26% into the gradient at 3.5 points per
   shortest S wavelength and $\le 0.05\%$ from 4.6, less than into the traces; with the time

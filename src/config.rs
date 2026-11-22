@@ -250,12 +250,14 @@ pub struct ModelConfig {
 pub enum Interfaces {
     /// Each node takes the layer it lies in, a node on an interface the layer below. An
     /// interface then acts midway between the nodes either side of it, wherever it lies: up
-    /// to half a node off.
-    #[default]
+    /// to half a node off: a first-order error in the reflection's timing.
     Nodes,
-    /// Band-limited to the grid: each interface's step is smoothed by a sinc tapered over four
-    /// nodes either side, applied to density and to the compliances 1/(ρvp²) and 1/(ρvs²), so
-    /// an interface acts where it lies, between nodes too (`crate::model::band_limited_step`).
+    /// Band-limited to the grid (the default): each interface's step is smoothed by a sinc
+    /// tapered over four nodes either side, applied to density and to the compliances
+    /// 1/(ρvp²) and 1/(ρvs²), so an interface acts where it lies, between nodes too
+    /// (`crate::model::band_limited_step`). Its overshoot makes a few nodes beside an
+    /// interface faster than either layer, which shortens Δt by up to about 8%.
+    #[default]
     BandLimited,
 }
 
@@ -296,7 +298,8 @@ pub struct SphereConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
-    /// Position in metres; snapped to the nearest node.
+    /// Position in metres, anywhere on the grid: between nodes the source spreads onto the
+    /// values around it with the receivers' interpolation weights.
     pub position: [f64; 3],
     pub wavelet: WaveletConfig,
     /// An isotropic moment tensor with this amplitude on the diagonal.

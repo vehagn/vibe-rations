@@ -18,7 +18,7 @@ opens a shell there instead.
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
-| `just accuracy` | The stencil order and time step study (prints a table) | ~2 min |
+| `just accuracy [name]` | The stencil order and time step study, and Lamb's problem on finer grids (prints tables) | ~4 min |
 | `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
@@ -100,7 +100,8 @@ deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 .github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
-  accuracy.rs    the stencil-order study (ignored; `just accuracy`)
+  accuracy.rs    the stencil-order study and Lamb's problem on finer grids (ignored; `just
+                 accuracy`)
   interfaces.rs  plane waves at a planar interface, by position, sampling and order (ignored;
                  `just interfaces`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
@@ -110,7 +111,8 @@ tests/
   common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
                  force's field with its gradient for any time function, and the exact kernels;
                  plane.rs: plane waves at normal incidence on an interface, kept exactly 1D,
-                 and their exact answer
+                 and their exact answer; lamb.rs: Pekeris's closed form for a vertical force
+                 on the surface of a Poisson solid, and the survey that tests it
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -136,7 +138,7 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
   runs a whole simulation goes in `tests/physics.rs`. New behaviour gets a test. Don't
   loosen a physics tolerance to make a change pass. When a deliberate change trades one
   baseline for another, record both numbers in the test's doc comment, here and in the log.
-- **Sources are the transpose of receivers** (`Solver::stagger_weights`, `PointOp`).
+- **Sources are the transpose of receivers** (`Solver::field_weights`, `PointOp`).
   Adjoint FWI depends on it; the reciprocity and dot-product tests check it.
 - SI units; $z$ points down; arrays are $x$-fastest, padded by `grid.halo` nodes.
 - Comments say why, not what. Doc comments on public items.
@@ -146,6 +148,22 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Sources and receivers sit where they are** (`Grid::coordinates`, `Solver::axis_weights`,
+  `Solver::field_weights`, `Stencil::interpolation_at`; the log's "Sources and receivers
+  between nodes"). Positions are grid coordinates, whole numbers on a node (within 1e-9, so
+  configurations on nodes read exactly as before, bit for bit). Between nodes a component
+  interpolates along every axis it lies off, from the 2L values of its lattice (nodes or
+  half nodes) around the point: Lagrange's weights for Taylor coefficients, and for
+  optimised ones a minimax over the stencil's band of the *complex* error, which must be
+  minimised as a modulus (part by part the optimum isn't unique, and the design picked
+  needless phase error). Along z, values above a free surface fold onto their mirror images
+  with the field's parity (`Field::lattice`: σzz, σxz, σyz odd). Pressure's adjoint applies
+  the node's stiffness to the three weights, not its row sums: near the surface σzz's weight
+  differs, and row sums broke the dot-product test (3.8e-4). Snapped, receivers 0.4 of a node
+  off cost 8–18% against Stokes; exact, 0.001–0.007%. The physics tests keep the positions
+  they used to snap to, written out: with exact positions one trace of the misfits' check
+  put its time shift's lag change at the start, which the shift's kink makes no gradient
+  check can pass.
 - **Run natively on the host** (`just mac`, 2026-11-22). The dev container is a Linux VM
   limited to 4 CPUs and 8 GiB of the maintainer's 10-core Mac, so long runs, gradients and
   inversions are faster on the host. `just in mac` cross-compiles the CLI for
@@ -157,8 +175,11 @@ doesn't show.
   (`xcrun`): expected. Keep the dependencies pure Rust (no TLS, no C) or this needs the SDK.
   `just lint` clippy-checks the macOS target too, since `memory::available` has a macOS
   branch (`vm_stat`: free, inactive, speculative and purgeable pages) that Linux builds never
-  compile. Not yet measured on the Mac: its speed against the container's, and whether its
-  traces match the container's bit for bit (same arm64 code; they should).
+  compile. Measured on the M1 Max: `examples/layered.toml` at 212 Mcells/s against the
+  container's 156 (10.4 s against 15.2 s; 134 on 4 threads, 200 on 8, so memory bandwidth
+  flattens it). The traces match the container's to 6e-12 of the peak but not bit for bit:
+  dt differs in its last bit, most likely from macOS's maths library in the optimised
+  coefficients' design, so don't expect bit-for-bit agreement between a Mac and a Linux run.
 
 - **The gradient against the exact kernels** (`tests/gradient_accuracy.rs`,
   `tests/common/stokes.rs`; the log's 2026-11-21 entry). In a homogeneous full space the
@@ -180,7 +201,7 @@ doesn't show.
   pair transposes to $10^{-12}$). Before, not after, as the codes a research agent read do it
   (DENISE, SeisFlows, LASIF filter first): filtering first smears a muted arrival back across
   the line by about a period of the corner, and in its prototype turned a kept arrival's
-  +0.100 s shift into -0.095 s; muting first leaked nothing. Offsets are between the nodes source and receivers snap to,
+  +0.100 s shift into -0.095 s; muting first leaked nothing. Offsets are between where the source and receivers are,
   worked out from the configuration (`offsets`) only when a stage mutes, and a misfit keeps
   them and its muted copy of the observed traces (both in `Misfit::held_bytes`). Weights and
   quiet traces are judged on the muted traces, so a window that removes a trace's arrivals
@@ -191,17 +212,17 @@ doesn't show.
   the difference.
 
 - **Interfaces** (`just interfaces`, `tests/common/plane.rs`; the log's "A planar
-  interface"). Layers are sampled at the nodes, so an interface acts midway between the
-  last node above it and the first below, wherever it lies: a layer's top on a node (both
-  of `examples/layered.toml`'s interfaces are) reflects $h/v$ early, a first-order error
+  interface"). Sampled at the nodes (`interfaces = "nodes"`), an interface acts midway
+  between the last node above it and the first below, wherever it lies: a layer's top on a
+  node (both of `examples/layered.toml`'s interfaces are) reflects $h/v$ early, a first-order error
   (reflection misfit 35% for P, 57% for S at 20 and 11.6 ppw at $f_0$; transmission 6–7%).
   Midway it is second order and the same at orders 4 to 16: at interfaces the model's
   sampling, not the stencil, sets the error. Band-limiting density and the compliances
   $1/\rho v_p^2$, $1/\rho v_s^2$ (a sinc tapered over ±4 nodes) makes the reflection
   independent of the interface's position (P 1.2%, S 12.6%, second order); band-limiting
   the moduli themselves, or their logarithms, leaves a position error, and clamping the
-  step's 7.3% overshoot costs most of the gain. It is opt-in, `[model] interfaces =
-  "band-limited"` (`model::layer_profile`): a node is fluid if the layer it lies in is; a
+  step's 7.3% overshoot costs most of the gain. It is the default since 2026-11-22,
+  `[model] interfaces = "band-limited"` (`model::layer_profile`): a node is fluid if the layer it lies in is; a
   solid node takes the solids' S compliance alone, capped at half its P modulus near a
   fluid (λ ≥ 0); and an interface whose contrast would let the overshoot stiffen a modulus
   by more than 1.25 (`MAX_STIFFENING`, a compliance ratio above 3.7, as for water on rock)
@@ -209,12 +230,13 @@ doesn't show.
   contrast of 48 cell averages beat a clamped sinc (S 2.4–9.1% against 6.1–11.9%), at 2.8
   the sinc beats them. The overshoot makes some interface nodes faster than any layer
   (3022 m/s next to a 3000 m/s layer; 2179 m/s in 2000 m/s rock under water), so
-  $\Delta t$ shrinks and `pml_vp_max` grows with it. Not the default yet: under it the gradient
-  checks fail (their mask spares only nodes at the fastest speed, so a 3000 m/s layer just
-  below a 3022 m/s plane is perturbed past it and changes $\Delta t$), the inversion's
-  set-up test expects `pml_vp_max` to be a layer's, and the walls-and-water wavefield
-  rebuilt backwards drifts $1.8 \times 10^{-6}$ instead of $9.6 \times 10^{-7}$; the
-  rest of `just physics` is unchanged. Spheres are still node-sampled. The test grid stays
+  $\Delta t$ shrinks and `pml_vp_max` grows with it. Making it the default (the log's
+  "Band-limited layers by default") took gradient checks that hold $\Delta t$ and the layers'
+  damping and perturb down the gradient (a 3000 m/s layer just below a 3022 m/s plane was
+  perturbed past it, which changed $\Delta t$); it doubled the walls-and-water wavefield's
+  drift rebuilt backwards ($1.8 \times 10^{-6}$ against $9.6 \times 10^{-7}$, not traced)
+  and moved the misfits' finite-difference checks within their noise; the rest of `just
+  physics` is unchanged. Spheres are still node-sampled. The test grid stays
   exactly 1D only because the values outside its sides copy the nearest node's every half
   step (`extend_sideways`): with ordinary edges, waves from the sides spoilt the
   transmitted P wave by 5% at 10 nodes from them, and by 1% at 30.
@@ -241,7 +263,8 @@ doesn't show.
   model's time step and layers, the slower one's band), so the two are sampled alike and the
   downloaded pair, run through `run --shots` and `invert`, gives the page's misfits (checked:
   51.4, 20.7, 14.4, 8.6, 5.5% for `examples/sphere-inversion.toml`, in the browser, on the
-  server and on the command line). `view::InversionView` steps it a unit at a time (a shot of
+  server and on the command line, with its sources snapped from y = 155 m to 160 m, as
+  positions were then). `view::InversionView` steps it a unit at a time (a shot of
   observed traces, the start, an iteration) for the worker and for `vibe-rations serve`, where
   an inversion is a run of `kind=inversion` in a thread of its own; its pictures
   (`view::Pictures`) are counted in `memory::estimate_synthetic_inversion`, exactly. Two things
@@ -454,11 +477,18 @@ doesn't show.
   (`Simulation::trace_warp(c)` → `Warp::apply_transpose`) before they are injected. Koene et
   al. criticise Wang & Xu for using that adjoint as the forward transform; here it is used
   only for adjoint sources, where it is the exact transpose of the data operator.
-- **The free-surface test's 2.5% is mostly its reference.** Doubling the P wave is exact
-  only for a plane wave; on finer grids (`free_surface_on_finer_grids`) the misfit tends to
-  about 2.2%, so stress imaging's own error is about 0.36% at 8 points per P wavelength
-  (0.23% with the time error kept, which partly cancels it). A higher-order free surface is
-  therefore less urgent than it looked; measure it on Lamb's problem with an exact solution.
+- **The free surface is the largest error for surface waves** (`tests/common/lamb.rs`,
+  `a_force_on_the_free_surface_matches_lambs_problem`, `lambs_problem_on_finer_grids`; the
+  log's "The free surface against Lamb's problem"). Against Pekeris's closed form for a
+  vertical force on a Poisson solid, the surface's $v_z$ misfits by 15–28% at the default's
+  4.6 points per shortest S wavelength (10.6 per Rayleigh wavelength at $f_0$), and 3.3–3.8%
+  only at 42: the Rayleigh wave runs about 1% fast (second order) and its swing is 3–6% too
+  large (first order at the fine end; the evenly mirrored $v_z$'s kink, which interpolation
+  reads at $0.342\,h$ per unit slope, accounts for part, not tested further). The order and
+  the time error change nothing. The P-doubling test's 2.5% is mostly its own reference
+  (doubling is exact only for a plane wave; on finer grids it tends to about 2.2%), so it
+  can't show this. Pekeris's formulas came from the article's scanned pages (PMC528118); his
+  eq. 66 gives the horizontal component, not implemented.
 - **A research brief** (another agent's literature review and von Neumann analysis,
   2026-11-20) was checked: its numbers reproduce (`docs/analysis/time_dispersion.py`), the
   transform and the stencil-matched interpolation came from it, and the log's entry lists
@@ -469,12 +499,15 @@ doesn't show.
   strain $\tilde\varepsilon$ *summed* from the adjoint strain rates (not $M^{-1}\tilde\sigma$:
   singular in fluids, cancels digits where $\mu \ll \lambda$), then the chain rule through
   the material averaging (once per slot a node fills: the grid's last planes clamp) and the
-  free surface's plane-stress moduli. Finite differences agree to $\le 2.8 \times 10^{-4}$
+  free surface's plane-stress moduli. Finite differences agree to $\le 7.4 \times 10^{-5}$
   (CPML at orders 4 and 8; rigid walls with water and uneven spacing) only after
   Richardson's extrapolation: plain central differences in single precision have an $h^2$
   error of percents down to $h \approx 2 \times 10^{-3}$, below which round-off takes over.
-  In a finite-difference check, keep $v_p$ below the model's fastest: it sets $\Delta t$ (via
-  the Courant fraction) and the layers' damping. The forward field is replayed from
+  In a finite-difference check, hold $\Delta t$ and `pml_vp_max` at the model's, as
+  `gradient_check` and an inversion do: with $\Delta t$ from a Courant fraction both follow
+  the fastest node, which a perturbation may move. And perturb down the gradient (random
+  amounts, the gradient's signs): along random signs $v_p$'s change cancelled tenfold and
+  the check sat on round-off, $2.5 \times 10^{-5}$ to $5 \times 10^{-4}$ by step. The forward field is replayed from
   checkpoints (`Solver::state`, `restore`), bit for bit; a unit test checks every interval
   gives the same gradient. Receiver components may not repeat: a second `p` once went into
   the adjoint run but not the adjoint strain and flipped the gradient's sign.
@@ -499,20 +532,25 @@ doesn't show.
 - **Physics test baselines at the default, order 8 with optimised coefficients at
   $C = 0.85$, the time error removed** (fail if they get worse; update this list if they get
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
-  free-surface P doubling 2.52% (mostly the reference, above); a planar interface midway
+  free-surface P doubling 2.52% (mostly the reference, above); Lamb's problem at 10 m,
+  15.5%, 21.4%, 28.2% at 150, 240, 330 m and 22.5% on the diagonal; a planar interface midway
   between nodes, plane P and S waves, direct 0.010% and 0.026%, reflected 0.72% and 7.5%,
   transmitted 0.078% and 0.44%; band-limited, on a node and a quarter of one off, reflected
   1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
-  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
-  $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
-  $\le 2.8 \times 10^{-4}$ (order 4's $v_p$, whose directional derivative is small; order 8
-  $\le 1.6 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
+  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8; between nodes too); the adjoint
+  dot-product test $\le 8.3 \times 10^{-8}$ (between nodes $5.9 \times 10^{-8}$); a point
+  force between nodes 0.001–0.007%; the gradient between nodes $v_p$ $2.4 \times 10^{-7}$,
+  $v_s$ $7.3 \times 10^{-5}$, $\rho$ $1.1 \times 10^{-5}$; gradients against extrapolated finite differences down the
+  gradient $\le 7.4 \times 10^{-5}$ ($v_s$, the extrapolation's $h^4$ error; $v_p$ and
+  $\rho$ $\le 1.2 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
   anomaly after 3 iterations, and its gradient matches finite differences to
-  $4.0 \times 10^{-6}$ (at $h = 10^{-2}$); the rebuilt wavefield retraces the run to
-  $\le 1.2 \times 10^{-6}$ of each array's peak and its gradient the replay's to
-  $\le 7.1 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
-  the replay's numbers (order 8 $\le 1.6 \times 10^{-5}$); the gradient against the exact
+  $4.9 \times 10^{-6}$ (at $h = 10^{-2}$; $4.0 \times 10^{-6}$ node-sampled, both within
+  the check's round-off); the rebuilt wavefield retraces the run to
+  $\le 1.8 \times 10^{-6}$ of each array's peak (walls and water; $\le 1.2 \times 10^{-6}$
+  node-sampled) and its gradient the replay's to
+  $\le 6.2 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
+  the replay's numbers; the gradient against the exact
   kernels at 3.5 points per S wavelength (`tests/gradient_accuracy.rs`), the wavefields' part
   0.26% (S) and 0.12% (P) in the Fresnel zone, +0.19% and −0.10% along a smooth change; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
@@ -572,8 +610,9 @@ doesn't show.
   1.9%. The textbook image method (Fichtner 2011 §3.2.3; Graves 1996) instead derives the
   velocities above the surface from the boundary conditions. It hasn't been tried here; any
   alternative must pass the reciprocity and long-run tests.
-- **Receiver and source interpolation is as long as the stencil** (`Solver::stagger_weights`):
-  $2L$-point Lagrange from the staggered values onto the node. Averaging two values costs
+- **Receiver and source interpolation is as long as the stencil** (`Solver::stagger_weights`
+  onto a node, `Solver::axis_weights` anywhere): $2L$-point Lagrange from the staggered
+  values onto the node. Averaging two values costs
   about $\cos(kh/2)$, roughly 2% at 8 points per wavelength; the cubic
   $(-1, 9, 9, -1)/16$ cut the misfits roughly threefold, and at order 8 the eight-point
   weights halved them again (at 4.5 ppw and $2.5 f_0$ the cubic loses 7.6% per receiver,

@@ -91,16 +91,27 @@ fn a_point_force_matches_stokes_solution_without_the_transform() {
     }
 }
 
+/// The same between nodes: the force at (40.37, 39.62, 40.89) nodes and the receivers the same
+/// offsets from it, so that every source and receiver interpolates along all three axes, at
+/// fractions of a node from 0.37 to 0.89. Measured: 0.001–0.005%, as on the nodes.
+#[test]
+fn a_point_force_between_nodes_matches_stokes_solution() {
+    for (what, e) in point_force_misfits_at([403.7, 396.2, 408.9], "") {
+        assert!(e < 2e-4, "misfit {e} in {what}");
+    }
+}
+
 /// The misfits of a point force against Stokes' solution along, across and diagonal to it,
 /// with `scheme` added to the configuration.
 fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
-    let source = [400.0, 400.0, 400.0];
+    point_force_misfits_at([400.0, 400.0, 400.0], scheme)
+}
+
+/// [`point_force_misfits`] with the force at `source`.
+fn point_force_misfits_at(source: [f64; 3], scheme: &str) -> Vec<(String, f64)> {
     // Along the force (P and near field), across it (S and near field), and in between.
-    let receivers = [
-        [600.0, 400.0, 400.0],
-        [400.0, 600.0, 400.0],
-        [540.0, 540.0, 400.0],
-    ];
+    let receivers = [[200.0, 0.0, 0.0], [0.0, 200.0, 0.0], [140.0, 140.0, 0.0]]
+        .map(|d: [f64; 3]| std::array::from_fn::<f64, 3, _>(|a| source[a] + d[a]));
     let points: String = receivers
         .iter()
         .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
@@ -143,6 +154,7 @@ fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
             println!(
                 "force{}, {what}: misfit {:.3}%",
                 match scheme {
+                    "" if source[0] != 400.0 => " between nodes",
                     "" => "",
                     s if s.contains("taylor") => ", Taylor's coefficients",
                     _ => ", without the transform",
@@ -197,6 +209,71 @@ fn the_free_surface_doubles_a_vertically_incident_p_wave() {
     let e = misfit(&trace(&sim, Component::Vz, 0), &exact);
     println!("free surface: misfit {:.2}%", 100.0 * e);
     assert!(e < 0.026, "misfit {e}");
+}
+
+/// Pekeris's closed form for Lamb's problem (`common::lamb`) is what it should be: zero at
+/// the P arrival, where the surface starts upward; continuous at the S arrival; Boussinesq's
+/// static displacement, F(1 - ν)/(2πμr), after the Rayleigh wave; and its velocity
+/// converged in the number of intervals.
+#[test]
+fn lambs_reference_is_consistent() {
+    use common::lamb::{gamma, survey};
+    let lamb = survey::lamb();
+    let (r, vs) = (240.0, survey::vs());
+    let at = |tau: f64| lamb.step(r, tau * r / vs);
+    let w = lamb.static_displacement(r);
+    let mu = survey::RHO * vs * vs;
+    assert!((w / (0.75 * 1e9 / (2.0 * std::f64::consts::PI * mu * r)) - 1.0).abs() < 1e-12);
+    assert!(
+        at(1.0 / 3f64.sqrt() + 1e-12).abs() < 1e-5 * w,
+        "{}",
+        at(0.5774)
+    );
+    assert!(at(0.6) < 0.0, "the surface starts upward");
+    assert!((at(1.0 - 1e-12) - at(1.0 + 1e-12)).abs() < 1e-6 * w);
+    assert_eq!(at(gamma() + 1e-12), w);
+    let times: Vec<f64> = (0..420).map(|k| k as f64 * 1e-3).collect();
+    let [coarse, fine] = [2000, 4000].map(|n| {
+        times
+            .iter()
+            .map(|&t| lamb.velocity_with(r, t, n))
+            .collect::<Vec<_>>()
+    });
+    let peak = fine.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let worst = coarse
+        .iter()
+        .zip(&fine)
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    println!(
+        "lamb reference: 2000 against 4000 intervals, {:.1e} of the peak",
+        worst / peak
+    );
+    assert!(worst < 1e-9 * peak, "{}", worst / peak);
+}
+
+/// Lamb's problem: a vertical force on the free surface of a Poisson solid, and the vertical
+/// velocity on the surface against Pekeris's closed form (`common::lamb::survey`) at 150,
+/// 240 and 330 m along x and 254.6 m along the diagonal. The Rayleigh wave dominates it: this
+/// is the free surface's own accuracy, which the P-doubling test can't separate from its
+/// reference.
+///
+/// Measured at the default, h = 10 m (10.6 points per Rayleigh wavelength at f0, 4.6 per
+/// shortest S wavelength): 15.5%, 21.4%, 28.2% and 22.5%, growing with distance. The Rayleigh
+/// wave runs about 1% fast (its peak 1.0 to 1.9 samples early), and its largest swing is 5%
+/// too large. Order 16 gives the same, so the free surface, not the stencil, sets it; it falls
+/// to 3.3–3.8% at 2.5 m (`lambs_problem_on_finer_grids` in `just accuracy`). The limits sit
+/// just above the measurements, so a free surface that gets worse fails.
+#[test]
+fn a_force_on_the_free_surface_matches_lambs_problem() {
+    use common::lamb::survey;
+    let sim = simulate(&survey::config(10.0, "", ""));
+    for ((r, e), limit) in survey::misfits(&sim)
+        .into_iter()
+        .zip([0.16, 0.22, 0.29, 0.23])
+    {
+        println!("lamb, vz at {r:.1} m: misfit {:.2}%", 100.0 * e);
+        assert!(e < limit, "{r} m: {e}");
+    }
 }
 
 /// Plane P and S waves at normal incidence on a planar interface between two layers, against
@@ -424,34 +501,52 @@ fn reciprocity(order: usize) {
             "#
         ))
     };
-    let a = [180.0, 220.0, 0.0]; // on the free surface
-    let b = [420.0, 260.0, 230.0];
     let unit =
         |axis: usize| std::array::from_fn::<f64, 3, _>(|i| if i == axis { 1e9 } else { 0.0 });
     let components = [Component::Vx, Component::Vy, Component::Vz];
-    for (i, j) in [(2, 0), (0, 1), (2, 2)] {
-        let ab = trace(&run(a, unit(i), b), components[j], 0);
-        let ba = trace(&run(b, unit(j), a), components[i], 0);
-        let peak = ab.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        let worst = ab
-            .iter()
-            .zip(&ba)
-            .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
-        println!(
-            "reciprocity, order {order}, force {} at A to {} at B: worst difference {:.2e} of peak",
-            ["x", "y", "z"][i],
-            components[j].name(),
-            worst / peak
-        );
-        assert!(
-            peak > 0.0 && worst < 1e-4 * peak,
-            "{i}->{j}: {worst} vs peak {peak}"
-        );
+    // On the nodes, A on the free surface; between nodes, A on the surface and then just
+    // below it, between the surface and the first node, where both interpolate across the
+    // mirror images.
+    for (label, a, b) in [
+        ("", [180.0, 220.0, 0.0], [420.0, 260.0, 230.0]),
+        (
+            ", between nodes",
+            [183.7, 216.1, 0.0],
+            [416.3, 263.8, 227.4],
+        ),
+        (
+            ", between nodes, A below the surface",
+            [176.2, 223.9, 4.1],
+            [416.3, 263.8, 227.4],
+        ),
+    ] {
+        for (i, j) in [(2, 0), (0, 1), (2, 2)] {
+            let ab = trace(&run(a, unit(i), b), components[j], 0);
+            let ba = trace(&run(b, unit(j), a), components[i], 0);
+            let peak = ab.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let worst = ab
+                .iter()
+                .zip(&ba)
+                .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
+            println!(
+                "reciprocity, order {order}{label}, force {} at A to {} at B: worst difference {:.2e} of peak",
+                ["x", "y", "z"][i],
+                components[j].name(),
+                worst / peak
+            );
+            assert!(
+                peak > 0.0 && worst < 1e-4 * peak,
+                "{label} {i}->{j}: {worst} vs peak {peak}"
+            );
+        }
     }
 }
 
 /// A long run with a free surface, a water layer, soft sediments and the absorbing layers
 /// meeting the surface at the corners: the energy must leave and stay gone.
+///
+/// Measured, what is left after 9.4 s relative to the peak, orders 4 / 8: 2.5e-6 / 9.6e-7 with
+/// band-limited layers, 2.7e-6 / 1.1e-6 node-sampled (until 2026-11-22).
 #[test]
 fn a_long_run_stays_stable_and_drains() {
     for order in [4, 8] {
@@ -534,11 +629,22 @@ fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
             ("cpml", true, "band-limited", 2),
             ("cpml", false, "white", 1),
         ] {
-            let e = dot_product(order, walls, free_surface, signal, every);
+            let e = dot_product(order, walls, free_surface, signal, every, [0.0; 3]);
             // Measured 2.3e-8 to 8.3e-8: single precision over about 1300 steps. Leaving the
             // adjoint's initial pressure state unmirrored gives 2.4e-7 to 2.8e-6.
             assert!(e < 1.5e-7, "order {order}, {walls}, {signal}: {e}");
         }
+    }
+}
+
+/// The same with the source and every receiver between nodes, the shallow ones 4.1 m below
+/// the free surface, between it and the first node: the operators that interpolate along all
+/// three axes and across the mirror images, pressure's included, are transposes too.
+#[test]
+fn the_adjoint_run_is_the_transpose_of_the_forward_run_between_nodes() {
+    for (walls, signal, every) in [("rigid", "white", 1), ("cpml", "band-limited", 2)] {
+        let e = dot_product(8, walls, true, signal, every, [3.7, -2.4, 4.1]);
+        assert!(e < 1.5e-7, "{walls}, {signal}: {e}");
     }
 }
 
@@ -577,7 +683,15 @@ fn band_limited(n: usize, seed: u64, f0: f64, dt: f64) -> Vec<f64> {
 /// |⟨F w, d̃⟩ - ⟨w, Fᵀ d̃⟩| / ⟨F w, d̃⟩ in the reciprocity test's model, with every component
 /// recorded at five receivers, one on the free surface and one just below it if there is one. The residuals are the
 /// data times random positive weights, so that the terms of ⟨F w, d̃⟩ can't cancel.
-fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, every: usize) -> f64 {
+/// `shift` (m) moves the source and the receivers off the nodes.
+fn dot_product(
+    order: usize,
+    walls: &str,
+    free_surface: bool,
+    signal: &str,
+    every: usize,
+    shift: [f64; 3],
+) -> f64 {
     let pml = if walls == "rigid" { 0 } else { 10 };
     // Without a free surface the top 100 m are an absorbing layer, and the shallow receivers
     // sit where their interpolation (four nodes up at order 8) stays out of it.
@@ -593,8 +707,12 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         [400.0, 140.0, shallow + 10.0],
     ]
     .iter()
-    .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
+    .map(|p| {
+        let p: [f64; 3] = std::array::from_fn(|a| p[a] + shift[a]);
+        format!("[[receivers.point]]\nposition = {p:?}\n")
+    })
     .collect();
+    let source: [f64; 3] = std::array::from_fn(|a| [330.0, 240.0, 200.0][a] + shift[a]);
     let mut sim = setup(&format!(
         r#"
         [grid]
@@ -626,7 +744,7 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         vs = 900.0
         rho = 1900.0
         [[source]]
-        position = [330.0, 240.0, 200.0]
+        position = {source:?}
         force = [0.6, 0.0, 0.8]
         wavelet = {{ kind = "ricker", frequency = 12.0 }}
         [receivers]
@@ -654,7 +772,7 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
             sim.receivers.record(&sim.solver);
         }
     }
-    let len = sim.receivers.nodes.len() * sim.receivers.samples;
+    let len = sim.receivers.points.len() * sim.receivers.samples;
     let residuals: Vec<Vec<f64>> = sim
         .receivers
         .traces
@@ -685,7 +803,7 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         .flat_map(|(d, r)| d.iter().zip(r).map(|(&a, &b)| a as f64 * b))
         .sum();
     // Adjoint: the residuals back from the receivers, read at A along the force.
-    let node = sim.sources[0].node;
+    let node = sim.sources[0].point;
     let mut adjoint = vibe_rations::adjoint::Adjoint::new(
         &sim,
         residuals
@@ -705,25 +823,32 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
     let e = (forward - backward).abs() / forward;
     println!(
         "dot product, order {order}, {walls} walls, free surface {free_surface}, {signal}, \
-         every {every}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, difference {e:.1e}"
+         every {every}, shifted {shift:?}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, \
+         difference {e:.1e}"
     );
     e
 }
 
 /// The gradient is that of the solver's forward run: perturbing vp, vs or ρ at every node
-/// outside the absorbing layers by random amounts changes the misfit as the gradient says,
-/// to within the finite difference's own error. The model has a free surface, two layers and
-/// a sphere; a force and an explosion; receivers on the surface and at depth recording every
-/// component, every second step.
+/// outside the absorbing layers by random amounts down the gradient changes the misfit as the
+/// gradient says, to within the finite difference's own error, with the time step and the
+/// layers' damping held at the model's. The model has a free surface, two band-limited layers
+/// and a sphere; a force and an explosion; receivers on the surface and at depth recording
+/// every component, every second step.
 ///
 /// Measured, extrapolated (orders 4 / 8), at the defaults (optimised coefficients pinned,
-/// C = 0.85, traces un-warped): vp 2.8e-4 / 3.9e-6, vs 2.1e-5 / 1.0e-5, ρ 4.4e-5 / 1.6e-5.
-/// The plain central differences are off by 2e-3 to 7e-1 at these steps, falling 4× per
-/// halving: their own h² error, with nothing beneath it. Order 4's vp is near the limit
-/// because its directional derivative is small here (4.5e-5), not because the gradient is
-/// off. Before the receiver line moved in from 100 m (at order 8 the first receiver read
-/// into a layer), with Taylor coefficients at C = 0.3: vp 1.7e-4 / 6.5e-5, vs 1.6e-6 /
-/// 5.8e-6, ρ 1.5e-5 / 1.2e-5.
+/// C = 0.85, traces un-warped, band-limited layers): vp 8.5e-6 / 2.3e-6, vs 6.9e-5 / 7.4e-5,
+/// ρ 2.5e-6 / 1.2e-5 (node-sampled layers: vp 1.0e-5 / 6.3e-6, vs 7.1e-5 / 7.2e-5, ρ 4.8e-6 /
+/// 1.3e-6). The plain central differences are off by 1e-4 to 1.4e-1 at these steps, falling
+/// 4× per halving: their own h² error. For vp the extrapolated error falls as h⁴ from 1e-4 at
+/// h = 3.2e-2 to a floor of about 3e-6 from 8e-3 down. Until 2026-11-22 the check perturbed
+/// random signs, and vp only below the fastest speed, which set dt and the layers: the whole
+/// lower layer stayed fixed. Then (node-sampled): vp 2.8e-4 / 3.9e-6, vs 2.1e-5 / 1.0e-5,
+/// ρ 4.4e-5 / 1.6e-5, order 4's vp near the limit because its change cancelled to 4.5e-5.
+/// Held dt and layers but random signs left vp's change cancelling tenfold and the check on
+/// round-off, 2.5e-5 to 5e-4 by step without a trend (it failed at 3.0e-4). Before the
+/// receiver line moved in from 100 m (at order 8 the first receiver read into a layer), with
+/// Taylor coefficients at C = 0.3: vp 1.7e-4 / 6.5e-5, vs 1.6e-6 / 5.8e-6, ρ 1.5e-5 / 1.2e-5.
 #[test]
 fn the_gradient_matches_finite_differences() {
     for order in [4, 8] {
@@ -736,17 +861,54 @@ fn the_gradient_matches_finite_differences() {
     }
 }
 
+/// The same between nodes: every source and receiver moved by (-3.7, -2.4, 4.1) m, so that the
+/// surface line, which records pressure too, sits 4.1 m down, between the surface and the
+/// first node. This covers what the gradient takes from residuals read between nodes,
+/// pressure's included (`gradient::PressureResiduals`), which the dot-product test doesn't.
+#[test]
+fn the_gradient_matches_finite_differences_between_nodes() {
+    gradient_check(
+        "between nodes, order 8",
+        8,
+        &|sphere| shifted(&gradient_model(8, sphere), [-3.7, -2.4, 4.1]),
+        Strategy::default(),
+    );
+}
+
+/// `config` with every `position = [x, y, z]` moved by `shift` (m).
+fn shifted(config: &str, shift: [f64; 3]) -> String {
+    config
+        .lines()
+        .map(
+            |line| match line.trim_start().strip_prefix("position = [") {
+                Some(rest) => {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    let p: Vec<f64> = rest
+                        .trim_end_matches(']')
+                        .split(',')
+                        .map(|v| v.trim().parse().unwrap())
+                        .collect();
+                    let q: [f64; 3] = std::array::from_fn(|a| p[a] + shift[a]);
+                    format!("{indent}position = {q:?}")
+                }
+                None => line.to_string(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The same where the first check doesn't reach: rigid walls, so every node is perturbed,
 /// the last ones (whose missing neighbours the material averaging clamps) included; uneven
 /// spacing; a water layer under the free surface, with fluid nodes on it and against the
 /// solid; a double couple; and every third step recorded.
 ///
-/// Measured, extrapolated, with Taylor coefficients at C = 0.85: vp 6.4e-5, vs 1.2e-5, ρ
-/// 1.6e-4 (at C = 0.3: vp 4.6e-5, vs 8.9e-7, ρ 2.2e-4). The plain differences for ρ are 37%
-/// off at h = 1.6e-2: what's left after extrapolating is the misfit's nonlinearity and
-/// round-off (perturbing the water layer alone, ρ agrees to 2.7e-5). With optimised
-/// coefficients ρ's plain differences are 61% off and extrapolate to 6.0e-4, a finite-difference
-/// limit (smaller steps drown in round-off); this check is about the geometry, and the first
+/// Measured, extrapolated, with Taylor coefficients at C = 0.85, band-limited layers, down the
+/// gradient: vp 5.4e-6, vs 9.1e-6, ρ 5.1e-6. Along random signs, node-sampled, vp below the
+/// fastest only (until 2026-11-22): vp 6.4e-5, vs 1.2e-5, ρ 1.6e-4 (at C = 0.3: vp 4.6e-5,
+/// vs 8.9e-7, ρ 2.2e-4); ρ's plain differences were then 37% off at h = 1.6e-2, and with
+/// optimised coefficients 61%, extrapolating to 6.0e-4, a finite-difference limit (perturbing
+/// the water layer alone, ρ agreed to 2.7e-5). This check is about the geometry, and the first
 /// one covers optimised coefficients.
 #[test]
 fn the_gradient_matches_finite_differences_with_walls_and_water() {
@@ -756,11 +918,13 @@ fn the_gradient_matches_finite_differences_with_walls_and_water() {
 /// The same checks with the forward wavefield rebuilt backwards from the band around the
 /// layers instead of replayed (`Strategy::Reconstruct`, default segments).
 ///
-/// Measured, extrapolated (replayed in brackets): order 4 vp 2.6e-4 (2.8e-4), vs 2.1e-5
-/// (2.1e-5), ρ 4.4e-5 (4.4e-5); order 8 vp 1.4e-6 (3.9e-6), vs 1.0e-5 (1.0e-5), ρ 1.6e-5
-/// (1.6e-5); walls and water vp 6.3e-5 (6.4e-5), vs 1.2e-5 (1.2e-5), ρ 1.6e-4 (1.6e-4). The
-/// rebuilt gradient moves the predicted change by 2e-5 at most (order 4's vp, whose
-/// directional derivative is small), well inside what the finite differences resolve.
+/// Measured, extrapolated (replayed in brackets): order 4 vp 8.6e-6 (8.5e-6), vs 6.9e-5
+/// (6.9e-5), ρ 2.6e-6 (2.5e-6); order 8 vp 2.3e-6, vs 7.4e-5, ρ 1.2e-5 (all as replayed);
+/// walls and water vp 5.4e-6, vs 9.1e-6, ρ 5.1e-6 (as replayed). The rebuilt gradient moves the
+/// predicted change by 4e-7 at most, well inside what the finite differences resolve. Along
+/// random signs, node-sampled (until 2026-11-22): order 4 vp 2.6e-4 (2.8e-4), vs 2.1e-5, ρ
+/// 4.4e-5; order 8 vp 1.4e-6 (3.9e-6), vs 1.0e-5, ρ 1.6e-5; walls and water vp 6.3e-5
+/// (6.4e-5), vs 1.2e-5, ρ 1.6e-4.
 #[test]
 fn the_gradient_matches_finite_differences_when_rebuilt() {
     let rebuilt = Strategy::Reconstruct { segment: None };
@@ -781,9 +945,13 @@ fn the_gradient_matches_finite_differences_when_rebuilt() {
 /// halo, always zero). The error is single-precision round-off, which accumulates as the
 /// rebuilt field steps back.
 ///
-/// Measured, largest over the run relative to each array's peak: order 4, 251 steps, 7.5e-7
-/// with a free surface and 6.3e-7 with layers all round; order 8, 283 steps, 6.2e-7 and
-/// 1.2e-6; walls and water, 213 steps, 9.6e-7. The tolerance is four times the largest.
+/// Measured, largest over the run relative to each array's peak, with band-limited layers:
+/// order 4, 253 steps, 8.0e-7 with a free surface and 9.0e-7 with layers all round; order 8,
+/// 285 steps, 8.0e-7 and 1.0e-6; walls and water, 216 steps, 1.8e-6. Node-sampled (until
+/// 2026-11-22): order 4, 251 steps, 7.5e-7 and 6.3e-7; order 8, 283 steps, 6.2e-7 and 1.2e-6;
+/// walls and water, 213 steps, 9.6e-7. The water's overshoot beside the rock stiffens a few
+/// nodes, and the drift grows with the loudest stretch of the field. The tolerance, 5e-6, was
+/// four times the largest node-sampled value.
 #[test]
 fn the_rebuilt_wavefield_follows_the_run() {
     for order in [4, 8] {
@@ -819,9 +987,10 @@ fn the_rebuilt_wavefield_follows_the_run() {
 /// finite-difference checks.
 ///
 /// Measured, largest difference relative to each parameter's largest value (default segments,
-/// then the whole run): order 4, 2.9e-7 (84 steps) and 5.3e-7 (251); order 8, 3.2e-7 (57) and
-/// 5.5e-7 (283); walls and water, 3.9e-7 (31) and 7.1e-7 (213). The tolerance is four times
-/// the largest.
+/// then the whole run), with band-limited layers: order 4, 3.9e-7 (85 steps) and 5.0e-7 (253);
+/// order 8, 3.6e-7 (57) and 5.4e-7 (285); walls and water, 3.3e-7 (31) and 6.2e-7 (216).
+/// Node-sampled (until 2026-11-22): 2.9e-7 (84) and 5.3e-7 (251); 3.2e-7 (57) and 5.5e-7 (283);
+/// 3.9e-7 (31) and 7.1e-7 (213). The tolerance is four times the largest.
 #[test]
 fn rebuilt_gradients_match_the_replay() {
     use vibe_rations::gradient::{gradient_with, l2_misfit};
@@ -881,6 +1050,7 @@ fn rebuilt_gradients_match_the_replay() {
     }
 }
 
+/// Its sources and receivers sit on the nodes they snapped to before positions were exact.
 fn walls_and_water(sphere: [f64; 3]) -> String {
     let [vp, vs, rho] = sphere;
     format!(
@@ -918,21 +1088,36 @@ fn walls_and_water(sphere: [f64; 3]) -> String {
         vs = {vs}
         rho = {rho}
         [[source]]
-        position = [120.0, 200.0, 160.0]
+        position = [121.0, 204.0, 157.5]
         double_couple = {{ strike = 30.0, dip = 60.0, rake = 90.0, m0 = 1e12 }}
         wavelet = {{ kind = "ricker", frequency = 10.0 }}
         [[source]]
-        position = [250.0, 120.0, 80.0]
+        position = [253.0, 120.0, 84.0]
         force = [0.0, 5e8, 1e9]
         wavelet = {{ kind = "ricker", frequency = 10.0, delay = 0.15 }}
         [receivers]
         components = ["vx", "vy", "vz", "p"]
-        [[receivers.line]]
-        from = [44.0, 180.0, 0.0]
-        to = [330.0, 180.0, 0.0]
-        count = 9
+        # The nodes a line from 44 to 330 m snapped to before positions were exact.
         [[receivers.point]]
-        position = [200.0, 100.0, 220.0]
+        position = [44.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [77.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [121.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [154.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [187.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [220.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [264.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [297.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [330.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [198.0, 96.0, 220.5]
         "#
     )
 }
@@ -982,10 +1167,23 @@ fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
         components = ["vx", "vy", "vz", "p"]
         # From 120 m in: at order 8 a velocity's interpolation reaches four nodes, and a
         # receiver reading into a layer makes the gradient there approximate.
-        [[receivers.line]]
-        from = [120.0, 200.0, 0.0]
-        to = [360.0, 200.0, 0.0]
-        count = 8
+        # The nodes a line of 8 from 120 to 360 m snapped to before positions were exact.
+        [[receivers.point]]
+        position = [120.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [150.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [190.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [220.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [260.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [290.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [330.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [360.0, 200.0, 0.0]
         [[receivers.point]]
         position = [240.0, 120.0, 180.0]
         [[receivers.point]]
@@ -1008,13 +1206,27 @@ fn gradient_check(
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
-    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers;
+    let base = std::path::Path::new(".");
+    let mut cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    // The time step and the layers' damping held at the model's, as an inversion holds them:
+    // with dt from a Courant fraction both follow the fastest node, which a perturbation may
+    // move (band-limited layers put it on an overshoot beside a slightly slower layer).
+    let dt = Simulation::with_model(&cfg, model.clone())
+        .unwrap()
+        .solver
+        .dt;
+    cfg.time.dt = Some(dt);
+    cfg.time.courant = None;
+    cfg.boundary.pml_vp_max.get_or_insert(model.vp_range()[1]);
+    let mut truth = Config::from_toml(&config([1900.0, 950.0, 1950.0])).unwrap();
+    (truth.time, truth.boundary) = (cfg.time.clone(), cfg.boundary.clone());
+    let mut observed = Simulation::new(&truth, base).unwrap();
+    observed.run(None, false).unwrap();
+    let observed = observed.receivers;
     let weights = balancing_weights(&observed.traces, &observed.components);
     let observed = observed.traces;
     let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
-    let cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
-    let base = std::path::Path::new(".");
-    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
     let misfit_of = |model: Model| {
         let mut sim = Simulation::with_model(&cfg, model).unwrap();
         sim.run(None, false).unwrap();
@@ -1030,17 +1242,20 @@ fn gradient_check(
     let run = gradient_with(&mut sim, |r| misfit(&r.traces), strategy).unwrap();
     let [g_vp, g_vs, g_rho] = run.gradient.velocities(&model);
 
-    // Every node outside the layers; vp only below the fastest, which sets dt and the layers.
+    // Every node outside the layers, the fastest included: dt and the layers are held. Down
+    // the gradient, by a random amount at each node: along random signs the predicted change
+    // cancels (vp's tenfold here, once the fast layer is perturbed too) and the finite
+    // differences' round-off, about 1e-7 of a unit of misfit, swamps it.
     let g = model.grid;
     let [nx, ny, nz] = g.n;
-    let vp_max = model.vp_range()[1] as f32;
     let inside = |i: usize, j: usize, k: usize| {
         (pml..nx - pml).contains(&i) && (pml..ny - pml).contains(&j) && k < nz - pml
     };
     for (name, grad, seed) in [("vp", &g_vp, 3), ("vs", &g_vs, 4), ("rho", &g_rho, 5)] {
         let u: Vec<f64> = noise(g.interior_len(), seed)
             .iter()
-            .map(|v| 2.0 * v - 1.0)
+            .zip(grad.iter())
+            .map(|(v, d)| -v * d.signum())
             .collect();
         let values = |m: &Model| match name {
             "vp" => m.vp.clone(),
@@ -1053,7 +1268,7 @@ fn gradient_check(
             for j in 0..ny {
                 for i in 0..nx {
                     let n = g.interior_idx(i, j, k);
-                    if inside(i, j, k) && !(name == "vp" && base_values[n] >= vp_max) {
+                    if inside(i, j, k) {
                         mask[n] = u[n];
                     }
                 }
@@ -1090,7 +1305,7 @@ fn gradient_check(
             e(extrapolated)
         );
         assert!(
-            e(extrapolated) < 3e-4,
+            e(extrapolated) < 1.5e-4,
             "{name}, {label}: {}",
             e(extrapolated)
         );
@@ -1128,7 +1343,7 @@ fn an_inversion_finds_a_sphere() {
             rho = 2100.0
             {sphere}
             [[source]]
-            position = [110.0, 155.0, 30.0]
+            position = [110.0, 160.0, 30.0]
             force = [0.0, 0.0, 1e9]
             wavelet = {{ kind = "ricker", frequency = 12.0 }}
             [[source]]
@@ -1146,8 +1361,8 @@ fn an_inversion_finds_a_sphere() {
             to = [260.0, 190.0, 0.0]
             count = 18
             [[receivers.line]]
-            from = [175.0, 90.0, 0.0]
-            to = [175.0, 220.0, 0.0]
+            from = [180.0, 90.0, 0.0]
+            to = [180.0, 220.0, 0.0]
             count = 14
             [inversion]
             observed = "unused"
@@ -1223,10 +1438,11 @@ fn an_inversion_finds_a_sphere() {
 /// vp, listed in that order, summed over two shots that record velocity and pressure), is the
 /// derivative of its misfit, checked down the gradient by extrapolated central differences.
 ///
-/// Measured with the defaults (optimised coefficients, time error removed): 4.0e-6 at
-/// h = 1e-2, between round-off in the single-precision traces at smaller steps (1.4e-5 at
-/// 8e-3, 5.1e-5 at 4e-3, 2.7e-5 at 2e-3, scattering rather than shrinking) and the
-/// extrapolation's h⁴ error at larger ones (2.5e-5 at 1.6e-2). Before the merge with
+/// Measured with the defaults (optimised coefficients, time error removed, band-limited
+/// layers): 4.9e-6 at h = 1e-2, between round-off in the single-precision traces at smaller
+/// steps (5.7e-7 at 5e-3, 1.4e-5 at 2.5e-3, scattering rather than shrinking) and the
+/// extrapolation's h⁴ error at larger ones (7.5e-5 at 2e-2). Node-sampled (until 2026-11-22):
+/// 4.0e-6 at 1e-2; 1.4e-5 at 8e-3, 5.1e-5 at 4e-3, 2.7e-5 at 2e-3; 2.5e-5 at 1.6e-2. Before the merge with
 /// stencil-long receiver interpolation (cubic receivers, Taylor coefficients, time error
 /// kept): 1.1e-5 at 4e-3, with the surface line reaching x = 70 and 220 m; with eight-point
 /// interpolation its end receivers read the side layers' damped values and the check gave
@@ -1242,8 +1458,10 @@ fn the_inversion_gradient_matches_finite_differences() {
 /// low-pass filtered traces (a frequency-continuation stage), the cross-correlation time shifts
 /// of filtered traces, and the time–frequency phase misfit.
 ///
-/// Measured (extrapolated, at the step given): filtered L2 4.4e-7 (h = 1e-2); phase 4.2e-6
-/// (h = 1e-2). The time shifts are checked at a smaller step and against a looser bound: each
+/// Measured (extrapolated, at the step given), with band-limited layers: filtered L2 2.4e-6
+/// (h = 1e-2; 1.9e-4 at 2e-2, 2.3e-5 at 5e-3, 6.2e-5 at 2.5e-3: h⁴ above, round-off below);
+/// phase 6.3e-7 (h = 1e-2); time shifts 1.2e-4 (h = 1e-3). Node-sampled (until 2026-11-22):
+/// 4.4e-7, 4.2e-6 and 1.3e-4. The time shifts are checked at a smaller step and against a looser bound: each
 /// trace's shift is only piecewise smooth, its derivative jumping where the correlation's peak
 /// moves to the next lag, and steps from 2e-3 up cross such jumps (8.5e-4 at 2e-3, 2.0e-3 at
 /// 3e-3); below that the check sits on a floor of round-off in the shifts of single-precision
@@ -1279,9 +1497,12 @@ fn the_misfits_gradients_match_finite_differences() {
 /// one window (which changes what they measure: the predicted change down the gradient is
 /// -9.47e-5 against -1.41e-4 without it).
 ///
-/// Measured (extrapolated): muted, filtered L2 8.7e-7 (h = 1e-2); windowed time shifts 2.6e-5
-/// (h = 1e-3; 1.0e-5 at 2e-3, 1.4e-4 at 5e-4, the shifts' round-off floor as without a window,
-/// 3.0e-5 to 9.9e-5). With the mute after the filter, as first written, the L2 check gave
+/// Measured (extrapolated), with band-limited layers: muted, filtered L2 1.9e-5 (h = 1e-2;
+/// 1.3e-4 at 2e-2, 2.5e-5 at 5e-3, 5.3e-5 at 2.5e-3: the extrapolation's h⁴ error above,
+/// round-off growing as 1/h below, about equal at 1e-2); windowed time shifts 9.1e-5
+/// (h = 1e-3), the shifts' round-off floor. Node-sampled (until 2026-11-22): 8.7e-7, a lucky
+/// cancellation within the same band, and 2.6e-5 (1.0e-5 at 2e-3, 1.4e-4 at 5e-4, 3.0e-5 to
+/// 9.9e-5 without a window). With the mute after the filter, as first written, the L2 check gave
 /// 1.5e-5 at h = 1e-2 and 2.2e-5 to 3.8e-5 at smaller steps; both orders transpose exactly
 /// (a unit test), and why the order changed the check's noise was not traced.
 #[test]
@@ -1357,10 +1578,20 @@ fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {
             wavelet = {{ kind = "ricker", frequency = 14.0 }}
             [receivers]
             components = ["vx", "vz", "p"]
-            [[receivers.line]]
-            from = [100.0, 140.0, 0.0]
-            to = [190.0, 140.0, 0.0]
-            count = 6
+            # The nodes a line of 6 from 100 to 190 m snapped to before positions were
+            # exact: exactly, one trace's time shift changes lag at the start (2026-11-22).
+            [[receivers.point]]
+            position = [100.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [120.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [140.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [150.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [170.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [190.0, 140.0, 0.0]
             [[receivers.point]]
             position = [150.0, 100.0, 120.0]
             [inversion]

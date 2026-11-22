@@ -1,4 +1,4 @@
-//! Receivers: traces of the wavefield at nodes.
+//! Receivers: traces of the wavefield at points (nodes, or anywhere between them).
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,8 @@ impl Component {
 /// Every receiver records every component, `samples` times.
 #[derive(Clone, Debug)]
 pub struct Receivers {
-    pub nodes: Vec<[usize; 3]>,
+    /// Where each receiver is, in grid coordinates ([`crate::grid::Grid::coordinates`]).
+    pub points: Vec<[f64; 3]>,
     pub components: Vec<Component>,
     pub samples: usize,
     /// One array per component: receiver-major, (receivers, samples).
@@ -43,20 +44,20 @@ pub struct Receivers {
 impl Receivers {
     pub fn new(
         solver: &Solver,
-        nodes: Vec<[usize; 3]>,
+        points: Vec<[f64; 3]>,
         components: Vec<Component>,
         samples: usize,
     ) -> Self {
         let traces = components
             .iter()
-            .map(|_| vec![0.0; nodes.len() * samples])
+            .map(|_| vec![0.0; points.len() * samples])
             .collect();
         let ops = components
             .iter()
-            .map(|&c| nodes.iter().map(|&n| solver.receiver_op(c, n)).collect())
+            .map(|&c| points.iter().map(|&p| solver.receiver_op(c, p)).collect())
             .collect();
         Self {
-            nodes,
+            points,
             components,
             samples,
             traces,
@@ -126,7 +127,7 @@ mod tests {
         let mut s = solver();
         let mut r = Receivers::new(
             &s,
-            vec![[4, 4, 4], [5, 6, 7]],
+            vec![[4.0, 4.0, 4.0], [5.0, 6.0, 7.0]],
             vec![Component::Vx, Component::P],
             3,
         );

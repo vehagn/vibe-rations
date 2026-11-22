@@ -54,11 +54,12 @@ unit *args:
 physics *args:
     cargo test --release --test physics {{ args }} -- --nocapture --test-threads 1
 
-# The accuracy study: misfits against exact solutions for every stencil order and time step
-# (about 1.5 minutes). The README's "Accuracy" section summarises it.
+# The accuracy study: misfits against exact solutions for every stencil order and time step,
+# and Lamb's problem on finer grids (about 4 minutes; a test's name runs that one alone, e.g.
+# `just accuracy lambs_problem_on_finer_grids`). The README's "Accuracy" section summarises it.
 [group("check")]
-accuracy:
-    cargo test --release --test accuracy -- --ignored --nocapture --test-threads 1
+accuracy *name:
+    cargo test --release --test accuracy {{ name }} -- --ignored --nocapture --test-threads 1
 
 # The gradient accuracy study: the solver's gradients against the exact sensitivity kernels
 # of a homogeneous full space, by grid spacing, order, time step and residual (about 40

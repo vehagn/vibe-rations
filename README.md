@@ -145,7 +145,7 @@ a free surface $z = 0$ is the surface.
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
-| `[model]` | `interfaces`: how the layers meet the nodes. `"nodes"` (default): each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off; `"band-limited"`: smoothed to the grid so it acts where it lies (see "Accuracy") |
+| `[model]` | `interfaces`: how the layers meet the nodes. `"band-limited"` (default): smoothed to the grid so an interface acts where it lies (see "Accuracy"); `"nodes"`: each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off |
 | `[model.files]` | Or `.npy` arrays for `vp`, `vs`, `rho`, relative to the configuration: shape (nz, ny, nx), or (nz, nx) for a section the same at every $y$; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
 | `[[model.sphere]]` | Spheres painted over the model |
 | `[[source]]` | `position`, `wavelet` (Ricker or Gaussian), and one of `explosion`, `moment`, `double_couple` (strike, dip, rake, m0) or `force` |
@@ -170,7 +170,7 @@ In the output directory:
 - `time.npy`: the sample times. Velocities lag stresses by half a step, so the first sample
   is at $\Delta t/2$. By default the traces are free of leapfrog's time error (see
   "Numerics"); snapshots are not.
-- `receivers.csv`: the receivers' positions after snapping to nodes
+- `receivers.csv`: the receivers' positions
 - `*_gather.png`: one column per receiver, each trace scaled to its own peak
 - `run.json`: the run's settings, time step, accuracy figures and warnings
 - `snapshots/`: sections as PNG (blue negative, red positive, colour $\propto \sqrt{|u|}$,
@@ -250,7 +250,7 @@ iterations = 5
 
 Mutes weigh the traces by time and offset, observed and synthetic alike, before the filter:
 each keeps one side of a line $t = x / v + t_0$ ($x$ the receiver's horizontal distance from
-the shot, between the nodes both snap to), multiplies the other by `weight` (0 removes it),
+the shot), multiplies the other by `weight` (0 removes it),
 and goes from one to the other with a half cosine over `taper` seconds, starting at the line,
 or with `shape = "exponential"` as $e^{-\tau/\text{taper}}$, $\tau$ the time past the line: the
 time damping that frequency-domain FWI applies from the first arrivals (Brossier et al.
@@ -683,26 +683,36 @@ Rules of thumb:
 What higher orders don't fix, from the literature and our measurements:
 
 - **Interfaces.** Measured with plane waves at normal incidence (`just interfaces`; the
-  research log's "A planar interface"). Layers are sampled at the nodes, so an interface
-  acts midway between the last node above it and the first below, wherever it lies: a
+  research log's "A planar interface"). Sampled at the nodes, an interface acts midway
+  between the last node above it and the first below, wherever it lies: a
   layer's top on a node reflects $h/v$ early, a first-order error (reflection misfit 35% for
   P and 57% for S at 20 and 11.6 points per wavelength at $f_0$). Midway between nodes the
   error is second order (0.72% and 7.5%) and the same at orders 4 to 16, so longer stencils
   gain nothing there. Band-limiting the model to the grid (Mittet 2017), density and the
   compliances, makes the reflection independent of where the interface falls (1.2% and
-  12.6%, second order): `[model] interfaces = "band-limited"`, off by default.
+  12.6%, second order): `[model] interfaces = "band-limited"`, the default (`"nodes"`
+  samples the layers at the nodes). Its overshoot makes a few nodes beside an interface
+  faster than either layer, so $\Delta t$ is up to about 8% shorter.
 - **The free surface.** Stress imaging is second order, so surface waves need finer grids
-  (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils. Our
-  free-surface test's 2.5% is mostly its reference, which doubles the P wave as if it were
-  plane: on finer grids the misfit tends to about 2.2%, which leaves about 0.4% to the
-  scheme at 8 points per P wavelength.
+  (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils.
+  Measured against Lamb's problem, Pekeris's (1955) closed form for a vertical force on a
+  Poisson solid (`just accuracy lambs_problem_on_finer_grids`; the research log's "The free
+  surface against Lamb's problem"), the surface's vertical velocity misfits by 15–28% at the
+  default's 4.6 points per shortest S wavelength, 10.6 per Rayleigh wavelength at $f_0$: the
+  Rayleigh wave runs about 1% fast and its swing is about 5% too large. It takes some 40
+  points per Rayleigh wavelength to get within 4%, and the stencil's order doesn't help: the
+  free surface, not the stencil, is the error for surface waves. (The P-doubling test's 2.5%
+  is mostly its reference, which doubles the P wave as if it were plane.)
 - **Absorbing layers.** Longer stencils reach further across the layers' inner edge:
   with the time error kept, reflection rises from $1.5 \times 10^{-4}$ of the peak at
   order 4 to $3.9 \times 10^{-4}$ (about $-68$ dB) at order 8. At the default it is
   $1.7 \times 10^{-4}$.
-- **Source and receiver positions.** They snap to nodes rather than being placed exactly
-  (Hicks 2002). A receiver 0.4 of a node off its position cost 26% misfit at 3.9 points per
-  wavelength.
+- **Source and receiver positions.** They sit where they are, between nodes too: a receiver
+  reads, and a source spreads onto, the values around it along all three axes with the
+  stencil's own interpolation, Lagrange's for Taylor coefficients and optimised over the same
+  band for optimised ones (Hicks 2002 does the same with windowed sincs). Snapped to nodes,
+  as they were, receivers 0.4 of a node off cost 8–18% misfit against Stokes' solution at 6.9
+  points per S wavelength; placed exactly, 0.001–0.007%, as on the nodes.
 
 Optimised coefficients gain little while the time error remains, which is why they only
 became worthwhile with the transform. Coefficients optimised for time and space together
@@ -720,11 +730,12 @@ removed) unless stated:
 | Point force against Stokes' solution: along, across and diagonal to the force | 0.001–0.005% (Taylor 0.001–0.008%) |
 | The same with the time error kept, at Courant 0.3 | 0.03–0.09% |
 | A P wave doubling at the free surface above a buried explosion | 2.5%, mostly the reference's (see "Accuracy") |
+| Lamb's problem: a vertical force on the surface of a Poisson solid, the surface's vertical velocity against Pekeris (1955) at 150–330 m | 15–28%: the Rayleigh wave about 1% fast and 5% large (see "Accuracy") |
 | Plane P and S waves at normal incidence on a planar interface midway between nodes, against the exact reflection and transmission | reflected 0.72% (P) and 7.5% (S), transmitted 0.08% and 0.44%; a layer's top on a node reflects $h/v$ early (see "Accuracy") |
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 8 \times 10^{-7}$ of peak |
 | Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 8.3 \times 10^{-8}$ |
-| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 2.8 \times 10^{-4}$ (order 8: $\le 1.6 \times 10^{-5}$) |
+| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed down the gradient, with $\Delta t$ and the layers held (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 7.4 \times 10^{-5}$ ($v_p$ and $\rho$: $\le 1.2 \times 10^{-5}$) |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI

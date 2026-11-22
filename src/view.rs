@@ -79,9 +79,9 @@ impl View {
         let receivers: Vec<[f64; 3]> = self
             .sim
             .receivers
-            .nodes
+            .points
             .iter()
-            .map(|&n| g.position(n))
+            .map(|p| std::array::from_fn(|a| p[a] * g.h[a]))
             .collect();
         info["receiver_positions"] = serde_json::json!(receivers);
         info
@@ -160,9 +160,9 @@ impl View {
         let c = self.recorded(name)?;
         let rows = rows.clamp(1, r.samples.max(1));
         Ok(Frame {
-            width: r.nodes.len(),
+            width: r.points.len(),
             height: rows,
-            rgba: image::gather_rgba(r.nodes.len(), r.samples, r.recorded(), &r.traces[c], rows),
+            rgba: image::gather_rgba(r.points.len(), r.samples, r.recorded(), &r.traces[c], rows),
             clip: 1.0,
             low: -1.0,
         })
@@ -172,7 +172,7 @@ impl View {
     pub fn traces_npy(&self, name: &str) -> Result<Vec<u8>> {
         let r = &self.sim.receivers;
         let i = self.recorded(name)?;
-        npy::to_bytes(&[r.nodes.len(), r.samples], &r.traces[i])
+        npy::to_bytes(&[r.points.len(), r.samples], &r.traces[i])
     }
 
     /// Which of the receivers' trace arrays holds `name`.
@@ -557,7 +557,7 @@ impl InversionView {
                     .context("setting up the true model")?;
                 sim.run(None, false)?;
                 let r = &sim.receivers;
-                let shape = vec![r.nodes.len(), r.samples];
+                let shape = vec![r.points.len(), r.samples];
                 self.observed.push(Observed {
                     shapes: Some(vec![shape; r.components.len()]),
                     times: Some(sim.sample_times().iter().map(|&t| t as f32).collect()),
