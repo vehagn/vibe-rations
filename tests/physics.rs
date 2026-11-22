@@ -91,16 +91,27 @@ fn a_point_force_matches_stokes_solution_without_the_transform() {
     }
 }
 
+/// The same between nodes: the force at (40.37, 39.62, 40.89) nodes and the receivers the same
+/// offsets from it, so that every source and receiver interpolates along all three axes, at
+/// fractions of a node from 0.37 to 0.89. Measured: 0.001–0.005%, as on the nodes.
+#[test]
+fn a_point_force_between_nodes_matches_stokes_solution() {
+    for (what, e) in point_force_misfits_at([403.7, 396.2, 408.9], "") {
+        assert!(e < 2e-4, "misfit {e} in {what}");
+    }
+}
+
 /// The misfits of a point force against Stokes' solution along, across and diagonal to it,
 /// with `scheme` added to the configuration.
 fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
-    let source = [400.0, 400.0, 400.0];
+    point_force_misfits_at([400.0, 400.0, 400.0], scheme)
+}
+
+/// [`point_force_misfits`] with the force at `source`.
+fn point_force_misfits_at(source: [f64; 3], scheme: &str) -> Vec<(String, f64)> {
     // Along the force (P and near field), across it (S and near field), and in between.
-    let receivers = [
-        [600.0, 400.0, 400.0],
-        [400.0, 600.0, 400.0],
-        [540.0, 540.0, 400.0],
-    ];
+    let receivers = [[200.0, 0.0, 0.0], [0.0, 200.0, 0.0], [140.0, 140.0, 0.0]]
+        .map(|d: [f64; 3]| std::array::from_fn::<f64, 3, _>(|a| source[a] + d[a]));
     let points: String = receivers
         .iter()
         .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
@@ -143,6 +154,7 @@ fn point_force_misfits(scheme: &str) -> Vec<(String, f64)> {
             println!(
                 "force{}, {what}: misfit {:.3}%",
                 match scheme {
+                    "" if source[0] != 400.0 => " between nodes",
                     "" => "",
                     s if s.contains("taylor") => ", Taylor's coefficients",
                     _ => ", without the transform",
@@ -489,29 +501,44 @@ fn reciprocity(order: usize) {
             "#
         ))
     };
-    let a = [180.0, 220.0, 0.0]; // on the free surface
-    let b = [420.0, 260.0, 230.0];
     let unit =
         |axis: usize| std::array::from_fn::<f64, 3, _>(|i| if i == axis { 1e9 } else { 0.0 });
     let components = [Component::Vx, Component::Vy, Component::Vz];
-    for (i, j) in [(2, 0), (0, 1), (2, 2)] {
-        let ab = trace(&run(a, unit(i), b), components[j], 0);
-        let ba = trace(&run(b, unit(j), a), components[i], 0);
-        let peak = ab.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        let worst = ab
-            .iter()
-            .zip(&ba)
-            .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
-        println!(
-            "reciprocity, order {order}, force {} at A to {} at B: worst difference {:.2e} of peak",
-            ["x", "y", "z"][i],
-            components[j].name(),
-            worst / peak
-        );
-        assert!(
-            peak > 0.0 && worst < 1e-4 * peak,
-            "{i}->{j}: {worst} vs peak {peak}"
-        );
+    // On the nodes, A on the free surface; between nodes, A on the surface and then just
+    // below it, between the surface and the first node, where both interpolate across the
+    // mirror images.
+    for (label, a, b) in [
+        ("", [180.0, 220.0, 0.0], [420.0, 260.0, 230.0]),
+        (
+            ", between nodes",
+            [183.7, 216.1, 0.0],
+            [416.3, 263.8, 227.4],
+        ),
+        (
+            ", between nodes, A below the surface",
+            [176.2, 223.9, 4.1],
+            [416.3, 263.8, 227.4],
+        ),
+    ] {
+        for (i, j) in [(2, 0), (0, 1), (2, 2)] {
+            let ab = trace(&run(a, unit(i), b), components[j], 0);
+            let ba = trace(&run(b, unit(j), a), components[i], 0);
+            let peak = ab.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let worst = ab
+                .iter()
+                .zip(&ba)
+                .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
+            println!(
+                "reciprocity, order {order}{label}, force {} at A to {} at B: worst difference {:.2e} of peak",
+                ["x", "y", "z"][i],
+                components[j].name(),
+                worst / peak
+            );
+            assert!(
+                peak > 0.0 && worst < 1e-4 * peak,
+                "{label} {i}->{j}: {worst} vs peak {peak}"
+            );
+        }
     }
 }
 
@@ -602,11 +629,22 @@ fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
             ("cpml", true, "band-limited", 2),
             ("cpml", false, "white", 1),
         ] {
-            let e = dot_product(order, walls, free_surface, signal, every);
+            let e = dot_product(order, walls, free_surface, signal, every, [0.0; 3]);
             // Measured 2.3e-8 to 8.3e-8: single precision over about 1300 steps. Leaving the
             // adjoint's initial pressure state unmirrored gives 2.4e-7 to 2.8e-6.
             assert!(e < 1.5e-7, "order {order}, {walls}, {signal}: {e}");
         }
+    }
+}
+
+/// The same with the source and every receiver between nodes, the shallow ones 4.1 m below
+/// the free surface, between it and the first node: the operators that interpolate along all
+/// three axes and across the mirror images, pressure's included, are transposes too.
+#[test]
+fn the_adjoint_run_is_the_transpose_of_the_forward_run_between_nodes() {
+    for (walls, signal, every) in [("rigid", "white", 1), ("cpml", "band-limited", 2)] {
+        let e = dot_product(8, walls, true, signal, every, [3.7, -2.4, 4.1]);
+        assert!(e < 1.5e-7, "{walls}, {signal}: {e}");
     }
 }
 
@@ -645,7 +683,15 @@ fn band_limited(n: usize, seed: u64, f0: f64, dt: f64) -> Vec<f64> {
 /// |⟨F w, d̃⟩ - ⟨w, Fᵀ d̃⟩| / ⟨F w, d̃⟩ in the reciprocity test's model, with every component
 /// recorded at five receivers, one on the free surface and one just below it if there is one. The residuals are the
 /// data times random positive weights, so that the terms of ⟨F w, d̃⟩ can't cancel.
-fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, every: usize) -> f64 {
+/// `shift` (m) moves the source and the receivers off the nodes.
+fn dot_product(
+    order: usize,
+    walls: &str,
+    free_surface: bool,
+    signal: &str,
+    every: usize,
+    shift: [f64; 3],
+) -> f64 {
     let pml = if walls == "rigid" { 0 } else { 10 };
     // Without a free surface the top 100 m are an absorbing layer, and the shallow receivers
     // sit where their interpolation (four nodes up at order 8) stays out of it.
@@ -661,8 +707,12 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         [400.0, 140.0, shallow + 10.0],
     ]
     .iter()
-    .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
+    .map(|p| {
+        let p: [f64; 3] = std::array::from_fn(|a| p[a] + shift[a]);
+        format!("[[receivers.point]]\nposition = {p:?}\n")
+    })
     .collect();
+    let source: [f64; 3] = std::array::from_fn(|a| [330.0, 240.0, 200.0][a] + shift[a]);
     let mut sim = setup(&format!(
         r#"
         [grid]
@@ -694,7 +744,7 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         vs = 900.0
         rho = 1900.0
         [[source]]
-        position = [330.0, 240.0, 200.0]
+        position = {source:?}
         force = [0.6, 0.0, 0.8]
         wavelet = {{ kind = "ricker", frequency = 12.0 }}
         [receivers]
@@ -722,7 +772,7 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
             sim.receivers.record(&sim.solver);
         }
     }
-    let len = sim.receivers.nodes.len() * sim.receivers.samples;
+    let len = sim.receivers.points.len() * sim.receivers.samples;
     let residuals: Vec<Vec<f64>> = sim
         .receivers
         .traces
@@ -753,7 +803,7 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
         .flat_map(|(d, r)| d.iter().zip(r).map(|(&a, &b)| a as f64 * b))
         .sum();
     // Adjoint: the residuals back from the receivers, read at A along the force.
-    let node = sim.sources[0].node;
+    let node = sim.sources[0].point;
     let mut adjoint = vibe_rations::adjoint::Adjoint::new(
         &sim,
         residuals
@@ -773,7 +823,8 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
     let e = (forward - backward).abs() / forward;
     println!(
         "dot product, order {order}, {walls} walls, free surface {free_surface}, {signal}, \
-         every {every}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, difference {e:.1e}"
+         every {every}, shifted {shift:?}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, \
+         difference {e:.1e}"
     );
     e
 }
@@ -808,6 +859,43 @@ fn the_gradient_matches_finite_differences() {
             Strategy::default(),
         );
     }
+}
+
+/// The same between nodes: every source and receiver moved by (-3.7, -2.4, 4.1) m, so that the
+/// surface line, which records pressure too, sits 4.1 m down, between the surface and the
+/// first node. This covers what the gradient takes from residuals read between nodes,
+/// pressure's included (`gradient::PressureResiduals`), which the dot-product test doesn't.
+#[test]
+fn the_gradient_matches_finite_differences_between_nodes() {
+    gradient_check(
+        "between nodes, order 8",
+        8,
+        &|sphere| shifted(&gradient_model(8, sphere), [-3.7, -2.4, 4.1]),
+        Strategy::default(),
+    );
+}
+
+/// `config` with every `position = [x, y, z]` moved by `shift` (m).
+fn shifted(config: &str, shift: [f64; 3]) -> String {
+    config
+        .lines()
+        .map(
+            |line| match line.trim_start().strip_prefix("position = [") {
+                Some(rest) => {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    let p: Vec<f64> = rest
+                        .trim_end_matches(']')
+                        .split(',')
+                        .map(|v| v.trim().parse().unwrap())
+                        .collect();
+                    let q: [f64; 3] = std::array::from_fn(|a| p[a] + shift[a]);
+                    format!("{indent}position = {q:?}")
+                }
+                None => line.to_string(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The same where the first check doesn't reach: rigid walls, so every node is perturbed,
@@ -962,6 +1050,7 @@ fn rebuilt_gradients_match_the_replay() {
     }
 }
 
+/// Its sources and receivers sit on the nodes they snapped to before positions were exact.
 fn walls_and_water(sphere: [f64; 3]) -> String {
     let [vp, vs, rho] = sphere;
     format!(
@@ -999,21 +1088,36 @@ fn walls_and_water(sphere: [f64; 3]) -> String {
         vs = {vs}
         rho = {rho}
         [[source]]
-        position = [120.0, 200.0, 160.0]
+        position = [121.0, 204.0, 157.5]
         double_couple = {{ strike = 30.0, dip = 60.0, rake = 90.0, m0 = 1e12 }}
         wavelet = {{ kind = "ricker", frequency = 10.0 }}
         [[source]]
-        position = [250.0, 120.0, 80.0]
+        position = [253.0, 120.0, 84.0]
         force = [0.0, 5e8, 1e9]
         wavelet = {{ kind = "ricker", frequency = 10.0, delay = 0.15 }}
         [receivers]
         components = ["vx", "vy", "vz", "p"]
-        [[receivers.line]]
-        from = [44.0, 180.0, 0.0]
-        to = [330.0, 180.0, 0.0]
-        count = 9
+        # The nodes a line from 44 to 330 m snapped to before positions were exact.
         [[receivers.point]]
-        position = [200.0, 100.0, 220.0]
+        position = [44.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [77.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [121.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [154.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [187.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [220.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [264.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [297.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [330.0, 180.0, 0.0]
+        [[receivers.point]]
+        position = [198.0, 96.0, 220.5]
         "#
     )
 }
@@ -1063,10 +1167,23 @@ fn gradient_model(order: usize, sphere: [f64; 3]) -> String {
         components = ["vx", "vy", "vz", "p"]
         # From 120 m in: at order 8 a velocity's interpolation reaches four nodes, and a
         # receiver reading into a layer makes the gradient there approximate.
-        [[receivers.line]]
-        from = [120.0, 200.0, 0.0]
-        to = [360.0, 200.0, 0.0]
-        count = 8
+        # The nodes a line of 8 from 120 to 360 m snapped to before positions were exact.
+        [[receivers.point]]
+        position = [120.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [150.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [190.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [220.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [260.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [290.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [330.0, 200.0, 0.0]
+        [[receivers.point]]
+        position = [360.0, 200.0, 0.0]
         [[receivers.point]]
         position = [240.0, 120.0, 180.0]
         [[receivers.point]]
@@ -1226,7 +1343,7 @@ fn an_inversion_finds_a_sphere() {
             rho = 2100.0
             {sphere}
             [[source]]
-            position = [110.0, 155.0, 30.0]
+            position = [110.0, 160.0, 30.0]
             force = [0.0, 0.0, 1e9]
             wavelet = {{ kind = "ricker", frequency = 12.0 }}
             [[source]]
@@ -1244,8 +1361,8 @@ fn an_inversion_finds_a_sphere() {
             to = [260.0, 190.0, 0.0]
             count = 18
             [[receivers.line]]
-            from = [175.0, 90.0, 0.0]
-            to = [175.0, 220.0, 0.0]
+            from = [180.0, 90.0, 0.0]
+            to = [180.0, 220.0, 0.0]
             count = 14
             [inversion]
             observed = "unused"
@@ -1461,10 +1578,20 @@ fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {
             wavelet = {{ kind = "ricker", frequency = 14.0 }}
             [receivers]
             components = ["vx", "vz", "p"]
-            [[receivers.line]]
-            from = [100.0, 140.0, 0.0]
-            to = [190.0, 140.0, 0.0]
-            count = 6
+            # The nodes a line of 6 from 100 to 190 m snapped to before positions were
+            # exact: exactly, one trace's time shift changes lag at the start (2026-11-22).
+            [[receivers.point]]
+            position = [100.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [120.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [140.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [150.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [170.0, 140.0, 0.0]
+            [[receivers.point]]
+            position = [190.0, 140.0, 0.0]
             [[receivers.point]]
             position = [150.0, 100.0, 120.0]
             [inversion]

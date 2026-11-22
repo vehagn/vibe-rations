@@ -137,7 +137,7 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
   runs a whole simulation goes in `tests/physics.rs`. New behaviour gets a test. Don't
   loosen a physics tolerance to make a change pass. When a deliberate change trades one
   baseline for another, record both numbers in the test's doc comment, here and in the log.
-- **Sources are the transpose of receivers** (`Solver::stagger_weights`, `PointOp`).
+- **Sources are the transpose of receivers** (`Solver::field_weights`, `PointOp`).
   Adjoint FWI depends on it; the reciprocity and dot-product tests check it.
 - SI units; $z$ points down; arrays are $x$-fastest, padded by `grid.halo` nodes.
 - Comments say why, not what. Doc comments on public items.
@@ -146,6 +146,23 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
+
+- **Sources and receivers sit where they are** (`Grid::coordinates`, `Solver::axis_weights`,
+  `Solver::field_weights`, `Stencil::interpolation_at`; the log's "Sources and receivers
+  between nodes"). Positions are grid coordinates, whole numbers on a node (within 1e-9, so
+  configurations on nodes read exactly as before, bit for bit). Between nodes a component
+  interpolates along every axis it lies off, from the 2L values of its lattice (nodes or
+  half nodes) around the point: Lagrange's weights for Taylor coefficients, and for
+  optimised ones a minimax over the stencil's band of the *complex* error, which must be
+  minimised as a modulus (part by part the optimum isn't unique, and the design picked
+  needless phase error). Along z, values above a free surface fold onto their mirror images
+  with the field's parity (`Field::lattice`: σzz, σxz, σyz odd). Pressure's adjoint applies
+  the node's stiffness to the three weights, not its row sums: near the surface σzz's weight
+  differs, and row sums broke the dot-product test (3.8e-4). Snapped, receivers 0.4 of a node
+  off cost 8–18% against Stokes; exact, 0.001–0.007%. The physics tests keep the positions
+  they used to snap to, written out: with exact positions one trace of the misfits' check
+  put its time shift's lag change at the start, which the shift's kink makes no gradient
+  check can pass.
 
 - **The gradient against the exact kernels** (`tests/gradient_accuracy.rs`,
   `tests/common/stokes.rs`; the log's 2026-11-21 entry). In a homogeneous full space the
@@ -167,7 +184,7 @@ doesn't show.
   pair transposes to $10^{-12}$). Before, not after, as the codes a research agent read do it
   (DENISE, SeisFlows, LASIF filter first): filtering first smears a muted arrival back across
   the line by about a period of the corner, and in its prototype turned a kept arrival's
-  +0.100 s shift into -0.095 s; muting first leaked nothing. Offsets are between the nodes source and receivers snap to,
+  +0.100 s shift into -0.095 s; muting first leaked nothing. Offsets are between where the source and receivers are,
   worked out from the configuration (`offsets`) only when a stage mutes, and a misfit keeps
   them and its muted copy of the observed traces (both in `Misfit::held_bytes`). Weights and
   quiet traces are judged on the muted traces, so a window that removes a trace's arrivals
@@ -229,7 +246,8 @@ doesn't show.
   model's time step and layers, the slower one's band), so the two are sampled alike and the
   downloaded pair, run through `run --shots` and `invert`, gives the page's misfits (checked:
   51.4, 20.7, 14.4, 8.6, 5.5% for `examples/sphere-inversion.toml`, in the browser, on the
-  server and on the command line). `view::InversionView` steps it a unit at a time (a shot of
+  server and on the command line, with its sources snapped from y = 155 m to 160 m, as
+  positions were then). `view::InversionView` steps it a unit at a time (a shot of
   observed traces, the start, an iteration) for the worker and for `vibe-rations serve`, where
   an inversion is a run of `kind=inversion` in a thread of its own; its pictures
   (`view::Pictures`) are counted in `memory::estimate_synthetic_inversion`, exactly. Two things
@@ -503,8 +521,10 @@ doesn't show.
   transmitted 0.078% and 0.44%; band-limited, on a node and a quarter of one off, reflected
   1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
-  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
-  $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences down the
+  reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8; between nodes too); the adjoint
+  dot-product test $\le 8.3 \times 10^{-8}$ (between nodes $5.9 \times 10^{-8}$); a point
+  force between nodes 0.001–0.007%; the gradient between nodes $v_p$ $2.4 \times 10^{-7}$,
+  $v_s$ $7.3 \times 10^{-5}$, $\rho$ $1.1 \times 10^{-5}$; gradients against extrapolated finite differences down the
   gradient $\le 7.4 \times 10^{-5}$ ($v_s$, the extrapolation's $h^4$ error; $v_p$ and
   $\rho$ $\le 1.2 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
   anomaly after 3 iterations, and its gradient matches finite differences to
@@ -573,8 +593,9 @@ doesn't show.
   1.9%. The textbook image method (Fichtner 2011 §3.2.3; Graves 1996) instead derives the
   velocities above the surface from the boundary conditions. It hasn't been tried here; any
   alternative must pass the reciprocity and long-run tests.
-- **Receiver and source interpolation is as long as the stencil** (`Solver::stagger_weights`):
-  $2L$-point Lagrange from the staggered values onto the node. Averaging two values costs
+- **Receiver and source interpolation is as long as the stencil** (`Solver::stagger_weights`
+  onto a node, `Solver::axis_weights` anywhere): $2L$-point Lagrange from the staggered
+  values onto the node. Averaging two values costs
   about $\cos(kh/2)$, roughly 2% at 8 points per wavelength; the cubic
   $(-1, 9, 9, -1)/16$ cut the misfits roughly threefold, and at order 8 the eight-point
   weights halved them again (at 4.5 ppw and $2.5 f_0$ the cubic loses 7.6% per receiver,

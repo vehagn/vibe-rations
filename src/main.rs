@@ -616,7 +616,7 @@ fn run() -> Result<()> {
                 );
             }
             let r = &sim.receivers;
-            let want = [r.nodes.len(), r.samples];
+            let want = [r.points.len(), r.samples];
             let data = r
                 .components
                 .iter()

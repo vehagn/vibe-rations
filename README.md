@@ -155,7 +155,7 @@ In the output directory:
 - `time.npy`: the sample times. Velocities lag stresses by half a step, so the first sample
   is at $\Delta t/2$. By default the traces are free of leapfrog's time error (see
   "Numerics"); snapshots are not.
-- `receivers.csv`: the receivers' positions after snapping to nodes
+- `receivers.csv`: the receivers' positions
 - `*_gather.png`: one column per receiver, each trace scaled to its own peak
 - `run.json`: the run's settings, time step, accuracy figures and warnings
 - `snapshots/`: sections as PNG (blue negative, red positive, colour $\propto \sqrt{|u|}$,
@@ -235,7 +235,7 @@ iterations = 5
 
 Mutes weigh the traces by time and offset, observed and synthetic alike, before the filter:
 each keeps one side of a line $t = x / v + t_0$ ($x$ the receiver's horizontal distance from
-the shot, between the nodes both snap to), multiplies the other by `weight` (0 removes it),
+the shot), multiplies the other by `weight` (0 removes it),
 and goes from one to the other with a half cosine over `taper` seconds, starting at the line,
 or with `shape = "exponential"` as $e^{-\tau/\text{taper}}$, $\tau$ the time past the line: the
 time damping that frequency-domain FWI applies from the first arrivals (Brossier et al.
@@ -692,9 +692,12 @@ What higher orders don't fix, from the literature and our measurements:
   with the time error kept, reflection rises from $1.5 \times 10^{-4}$ of the peak at
   order 4 to $3.9 \times 10^{-4}$ (about $-68$ dB) at order 8. At the default it is
   $1.7 \times 10^{-4}$.
-- **Source and receiver positions.** They snap to nodes rather than being placed exactly
-  (Hicks 2002). A receiver 0.4 of a node off its position cost 26% misfit at 3.9 points per
-  wavelength.
+- **Source and receiver positions.** They sit where they are, between nodes too: a receiver
+  reads, and a source spreads onto, the values around it along all three axes with the
+  stencil's own interpolation, Lagrange's for Taylor coefficients and optimised over the same
+  band for optimised ones (Hicks 2002 does the same with windowed sincs). Snapped to nodes,
+  as they were, receivers 0.4 of a node off cost 8–18% misfit against Stokes' solution at 6.9
+  points per S wavelength; placed exactly, 0.001–0.007%, as on the nodes.
 
 Optimised coefficients gain little while the time error remains, which is why they only
 became worthwhile with the transform. Coefficients optimised for time and space together

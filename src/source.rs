@@ -2,6 +2,7 @@
 
 use std::f64::consts::PI;
 
+use crate::grid::AsPoint;
 use crate::solver::{Field, Fields, PointOp, Solver};
 use crate::tdt::Warp;
 
@@ -87,10 +88,11 @@ pub enum Mechanism {
     Force([f64; 3]),
 }
 
-/// A point source on a node, ready to add to the wavefield.
+/// A point source, ready to add to the wavefield.
 #[derive(Clone, Debug)]
 pub struct Source {
-    pub node: [usize; 3],
+    /// Where it acts, in grid coordinates ([`crate::grid::Grid::coordinates`]).
+    pub point: [f64; 3],
     pub mechanism: Mechanism,
     pub wavelet: Wavelet,
     /// How it enters the wavefield, per unit of the wavelet.
@@ -102,54 +104,37 @@ pub struct Source {
 
 impl Source {
     /// A moment tensor enters as σij -= dt·Ṁij/V and a force as vi += dt·Fi/(ρV), spread onto
-    /// the staggered positions around the node with the receivers' interpolation weights
-    /// ([`Solver::stagger_weights`]), so that a source is the transpose of a receiver at the
-    /// same node. Shear components spread along both of their axes.
-    pub fn new(solver: &Solver, node: [usize; 3], mechanism: Mechanism, wavelet: Wavelet) -> Self {
-        let g = solver.grid;
-        let volume = g.cell_volume();
-        let idx = |n: [usize; 3]| g.idx(n[0], n[1], n[2]);
-        // The positions around the node along each (axis, mirror parity), with their weights.
-        let spread = |axes: &[(usize, f32)]| {
-            let mut out = vec![(node, 1.0f32)];
-            for &(axis, parity) in axes {
-                out = out
-                    .into_iter()
-                    .flat_map(|(n, w)| {
-                        solver
-                            .stagger_weights(axis, n[axis], parity)
-                            .into_iter()
-                            .map(move |(m, v)| {
-                                let mut n = n;
-                                n[axis] = m;
-                                (n, w * v)
-                            })
-                    })
-                    .collect();
-            }
-            out
-        };
+    /// the values around the point with the receivers' interpolation weights
+    /// ([`Solver::field_weights`]), so that a source is the transpose of a receiver at the same
+    /// point. On a node only the staggered components spread, shear ones along both of their
+    /// axes; between nodes every component spreads along the axes it lies off.
+    pub fn new(
+        solver: &Solver,
+        point: impl AsPoint,
+        mechanism: Mechanism,
+        wavelet: Wavelet,
+    ) -> Self {
+        let volume = solver.grid.cell_volume();
+        let point = point.point();
         let mut terms = Vec::new();
         match mechanism {
             Mechanism::Moment(m) => {
                 let scale = |v: f64| (-solver.dt * v / volume) as f32;
-                for (field, v) in [(Field::Sxx, m[0]), (Field::Syy, m[1]), (Field::Szz, m[2])] {
-                    if v != 0.0 {
-                        terms.push((field, idx(node), scale(v)));
-                    }
-                }
-                // σxz and σyz are odd about the free surface.
-                for (field, v, axes) in [
-                    (Field::Sxy, m[3], [(0, 1.0), (1, 1.0)]),
-                    (Field::Sxz, m[4], [(0, 1.0), (2, -1.0)]),
-                    (Field::Syz, m[5], [(1, 1.0), (2, -1.0)]),
+                for (field, v) in [
+                    (Field::Sxx, m[0]),
+                    (Field::Syy, m[1]),
+                    (Field::Szz, m[2]),
+                    (Field::Sxy, m[3]),
+                    (Field::Sxz, m[4]),
+                    (Field::Syz, m[5]),
                 ] {
                     if v != 0.0 {
                         let s = scale(v);
                         terms.extend(
-                            spread(&axes)
+                            solver
+                                .field_weights(field, point)
                                 .into_iter()
-                                .map(|(n, w)| (field, idx(n), s * w)),
+                                .map(|(i, w)| (field, i, s * w)),
                         );
                     }
                 }
@@ -160,9 +145,10 @@ impl Source {
                         let s = (f[axis] / volume) as f32;
                         let b = solver.material.buoyancy(axis);
                         terms.extend(
-                            spread(&[(axis, 1.0)])
+                            solver
+                                .field_weights(field, point)
                                 .into_iter()
-                                .map(|(n, w)| (field, idx(n), s * w * b[idx(n)])),
+                                .map(|(i, w)| (field, i, s * w * b[i])),
                         );
                     }
                 }
@@ -170,12 +156,13 @@ impl Source {
         }
         // On the free surface a value stands for half a cell, so the same source moves it twice
         // as much.
+        let g = solver.grid;
         let plane = g.plane_len();
         for (field, index, w) in &mut terms {
             *w /= solver.cell_share(*field, *index / plane - g.halo);
         }
         Self {
-            node,
+            point,
             mechanism,
             wavelet,
             op: PointOp { terms },

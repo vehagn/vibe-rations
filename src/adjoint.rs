@@ -80,20 +80,20 @@ impl Adjoint {
         );
         for (c, res) in r.components.iter().zip(&residuals) {
             ensure!(
-                res.len() == r.nodes.len() * r.samples,
+                res.len() == r.points.len() * r.samples,
                 "the {} residuals hold {} values; {} receivers × {} samples need {}",
                 c.name(),
                 res.len(),
-                r.nodes.len(),
+                r.points.len(),
                 r.samples,
-                r.nodes.len() * r.samples
+                r.points.len() * r.samples
             );
         }
         let solver = sim.solver.at_rest();
         let ops = r
             .components
             .iter()
-            .map(|&c| r.nodes.iter().map(|&n| solver.adjoint_op(c, n)).collect())
+            .map(|&c| r.points.iter().map(|&p| solver.adjoint_op(c, p)).collect())
             .collect();
         let mut adjoint = Self {
             solver,
@@ -266,7 +266,7 @@ mod tests {
 
     fn zeros(sim: &Simulation) -> Vec<Vec<f32>> {
         let r = &sim.receivers;
-        vec![vec![0.0; r.nodes.len() * r.samples]; r.components.len()]
+        vec![vec![0.0; r.points.len() * r.samples]; r.components.len()]
     }
 
     #[test]

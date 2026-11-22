@@ -488,8 +488,9 @@ fn velocities(s: &Solver) -> [Vec<f32>; 3] {
 
 /// The pressure residuals, as they enter the adjoint strain.
 struct PressureResiduals {
-    /// Padded index of each pressure receiver's node and the weight 1/(3W) there.
-    nodes: Vec<(usize, f32)>,
+    /// For each receiver, the terms it reads pressure from: (normal component 0–2, padded
+    /// index, its interpolation weight / (3W) there). On a node, one per component.
+    terms: Vec<Vec<(usize, usize, f32)>>,
     /// The pressure residuals, (receivers, samples), if pressure was recorded.
     values: Option<Vec<f32>>,
     samples: usize,
@@ -502,14 +503,25 @@ impl PressureResiduals {
         let s = &sim.solver;
         let g = s.grid;
         let volume = g.cell_volume() as f32;
-        let nodes = r
-            .nodes
+        let plane = g.plane_len();
+        let terms = r
+            .points
             .iter()
-            .map(|&[i, j, k]| {
-                (
-                    g.idx(i, j, k),
-                    1.0 / (3.0 * volume * s.cell_share(Field::Sxx, k)),
-                )
+            .map(|&p| {
+                [Field::Sxx, Field::Syy, Field::Szz]
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(c, f)| {
+                        s.field_weights(f, p).into_iter().map(move |(i, w)| {
+                            let k = i / plane - g.halo;
+                            (
+                                c,
+                                i,
+                                w * (1.0 / (3.0 * volume * s.cell_share(Field::Sxx, k))),
+                            )
+                        })
+                    })
+                    .collect()
             })
             .collect();
         let values = r
@@ -518,7 +530,7 @@ impl PressureResiduals {
             .position(|&c| c == Component::P)
             .and_then(|c| residuals.get(c).cloned());
         Self {
-            nodes,
+            terms,
             values,
             samples: r.samples,
             record_every: sim.record_every,
@@ -545,10 +557,10 @@ impl PressureResiduals {
         if sample >= self.samples {
             return;
         }
-        for (r, &(p, w)) in self.nodes.iter().enumerate() {
+        for (r, terms) in self.terms.iter().enumerate() {
             let delta = values[r * self.samples + sample];
-            for e in &mut adjoint_strain[..3] {
-                e[p] += w * delta;
+            for &(c, p, w) in terms {
+                adjoint_strain[c][p] += w * delta;
             }
         }
     }

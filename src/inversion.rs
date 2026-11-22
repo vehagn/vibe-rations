@@ -1008,11 +1008,11 @@ impl Inversion {
             let mut forces = Vec::new();
             let mut stresses = Vec::new();
             for (c, (&component, w)) in shot.components.iter().zip(&weights).enumerate() {
-                for (r, (&node, &w)) in sim.receivers.nodes.iter().zip(w).enumerate() {
+                for (r, (&point, &w)) in sim.receivers.points.iter().zip(w).enumerate() {
                     if w <= 0.0 {
                         continue;
                     }
-                    let op = sim.solver.adjoint_op(component, node);
+                    let op = sim.solver.adjoint_op(component, point);
                     let amplitude = sign(run, r, c) * (w / self.shots.len() as f64).sqrt();
                     match component {
                         Component::P => stresses.push((op, amplitude)),
@@ -1203,7 +1203,7 @@ impl Observed {
     /// samples), sampled at the same times.
     pub fn check(&self, sim: &Simulation) -> Result<()> {
         let r = &sim.receivers;
-        let want = [r.nodes.len(), r.samples];
+        let want = [r.points.len(), r.samples];
         let hint = "observed and synthetic traces must share their sampling: give both runs \
                     the same [time] dt and record_every";
         ensure!(
@@ -1658,7 +1658,7 @@ mod tests {
         sim.run(None, false).unwrap();
         let r = &sim.receivers;
         Observed {
-            shapes: Some(vec![vec![r.nodes.len(), r.samples]; r.components.len()]),
+            shapes: Some(vec![vec![r.points.len(), r.samples]; r.components.len()]),
             times: Some(sim.sample_times().iter().map(|&t| t as f32).collect()),
             traces: sim.receivers.traces,
         }

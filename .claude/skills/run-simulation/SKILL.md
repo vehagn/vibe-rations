@@ -79,7 +79,7 @@ In `[output] dir`:
 |---|---|
 | `vx.npy` … `p.npy` | float32, shape (receivers, samples) |
 | `time.npy` | sample times; the first is dt/2 (velocities lag stresses by half a step) |
-| `receivers.csv` | receiver positions after snapping to nodes |
+| `receivers.csv` | receiver positions, in metres |
 | `run.json` | dt, steps, accuracy figures, warnings |
 | `*_gather.png` | a column per receiver, time down, each trace scaled to its own peak |
 | `snapshots/<field>_<plane><index>_<step>.png` | blue negative, red positive, colour $\propto \sqrt{|u|}$; grey shows the model, darker in the layers |

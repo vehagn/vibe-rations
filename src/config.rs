@@ -298,7 +298,8 @@ pub struct SphereConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
-    /// Position in metres; snapped to the nearest node.
+    /// Position in metres, anywhere on the grid: between nodes the source spreads onto the
+    /// values around it with the receivers' interpolation weights.
     pub position: [f64; 3],
     pub wavelet: WaveletConfig,
     /// An isotropic moment tensor with this amplitude on the diagonal.

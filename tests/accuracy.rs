@@ -205,7 +205,7 @@ fn removing_time_dispersion() {
     for (wave, h, label) in [
         (Wave::P, 20.0, "P, 4.0 points per wavelength"),
         (Wave::S, 20.0, "S, 3.5 points per wavelength"),
-        // The spacing must divide the distances, or the receivers snap off them.
+        // The spacing divides the distances, so the receivers sit on nodes.
         (Wave::S, 300.0 / 17.0, "S, 3.9 points per wavelength"),
         (Wave::S, 15.0, "S, 4.6 points per wavelength"),
     ] {

@@ -2846,6 +2846,73 @@ included, carry this error into the misfit.
 **Reproduce:** `just physics lamb`; `just accuracy lambs_problem_on_finer_grids` (about two
 and a half minutes).
 
+## 2026-11-22 — Sources and receivers between nodes
+
+**Question.** Sources and receivers snapped to the nearest node, and a receiver 0.4 of a node
+off its position cost 26% misfit at 3.9 points per wavelength (2026-11-20, removing time
+dispersion). Can they sit where they are, with the scheme's accuracy and the adjoint's
+exactness intact?
+
+**Method.** A position becomes grid coordinates, position over spacing, whole numbers on a
+node (within $10^{-9}$, so a configuration on nodes reads exactly as before). Each component
+lives on a lattice, nodes or half nodes along each axis (`Field::lattice`), and is read at a
+point from the $2L$ values of its lattice around it along every axis the point lies off: on
+its own lattice point, the value; a staggered value onto a node, the stencil's interpolation as
+before; otherwise weights for an offset $\delta \in (0, 1)$ past the value below
+(`Stencil::interpolation_at`). With Taylor's coefficients those are Lagrange's; with optimised
+ones they minimise the largest complex error $|\sum_j w_j e^{i x (j - \delta)} - 1|$ for
+$kh$ up to the stencil's band, weighted by $(k/k_\text{band})^{-2}$ as the node's are, exact
+for constants and linear functions (Lagrange's weights plus a null-space combination, Lawson's
+algorithm on the modulus). The three axes multiply (`Solver::field_weights`); along $z$, values
+above a free surface fold onto their mirror images with the field's parity, odd for $\sigma_{zz}$,
+$\sigma_{xz}$ and $\sigma_{yz}$. A source spreads with the same weights, so it stays the
+receiver's transpose; Hicks (2002) does the same with Kaiser-windowed sincs [@hicks2002].
+Pressure's adjoint
+source applies the node's stiffness (plane stress on the surface) to the three normal weights,
+and the gradient's pressure residuals go to the adjoint strain with them. Checked against
+Stokes's solution, reciprocity, the dot-product test and a gradient check, each with the
+source and receivers between nodes, some between the free surface and the first node.
+
+**Results.**
+
+- *Weights.* The design at $\delta = \frac12$ reproduces the node's to $10^{-13}$ (order 4 to
+  16). Largest error over the band, Lagrange → optimised: order 4 (band 1.5) $3.3 \times
+  10^{-2}$ → $2.0 \times 10^{-2}$ at $\delta = 0.1$, $9.1 \times 10^{-2}$ → $5.7 \times 10^{-2}$ at
+  0.37; order 8 (1.8) $1.8 \times 10^{-2}$ → $1.6 \times 10^{-3}$, $5.1 \times 10^{-2}$ →
+  $4.7 \times 10^{-3}$; order 16 (2.4) $4.4 \times 10^{-2}$ → $7.2 \times 10^{-4}$,
+  $1.3 \times 10^{-1}$ → $2.1 \times 10^{-3}$. Minimising the real and imaginary parts
+  separately came out $7 \times 10^{-2}$ away from the node's design at $\delta = \frac12$: part by
+  part the optimum isn't unique, and the design picked a needless phase error.
+- *Accuracy.* A force at (40.37, 39.62, 40.89) nodes and receivers the same offsets from it
+  (6.9 points per S wavelength): 0.001–0.007% against Stokes's solution, as on the nodes
+  (0.001–0.005%). With the force on a node and receivers 0.37–0.41 of a node off, snapped:
+  10.0%, 17.7%, 7.7% ($v_x$) and 0.14% ($v_y$); exact: 0.003%, 0.005%, 0.007% and 0.001%.
+- *Transposes.* Reciprocity, one end on the surface between nodes or 4.1 m below it (between
+  the surface and the first node): $\le 6.8 \times 10^{-7}$ at orders 4 and 8, as on the nodes
+  ($\le 7.9 \times 10^{-7}$). The dot-product test with every receiver and the source moved by
+  (3.7, −2.4, 4.1) m, all four components: $3.8 \times 10^{-10}$ (rigid walls) and
+  $5.9 \times 10^{-8}$ (absorbing layers). The first version gave pressure's adjoint the row
+  sums of the stiffness, right only where the three normal weights are equal; moved along $z$
+  only, pressure broke the test ($2.7 \times 10^{-3}$, $2.1 \times 10^{-2}$), moved sideways it
+  didn't ($1.8 \times 10^{-8}$). The gradient check with the gradient model moved by
+  (−3.7, −2.4, 4.1) m, pressure recorded 4.1 m below the surface: $v_p$ $2.4 \times 10^{-7}$,
+  $v_s$ $7.3 \times 10^{-5}$, $\rho$ $1.1 \times 10^{-5}$, as on the nodes.
+- *The existing tests.* Lines whose receivers fell between nodes (and three sources) moved
+  them: the sphere inversion left 18.2% of its misfit instead of 17.9%, and the misfits'
+  check failed for the time shifts ($6.2 \times 10^{-3}$, $3.9$–$5.4 \times 10^{-3}$ for $h$
+  from $2 \times 10^{-3}$ to $1.25 \times 10^{-4}$). One-sided differences show why: forward
+  and backward slopes differ by about 1% as $h \to 0$, so one trace's correlation peak changes
+  lag at the start itself, where the shift has a kink; filtered L2's errors stay symmetric
+  ($\pm 1.8 \times 10^{-2}$ at $1.25 \times 10^{-4}$). The tests now list the positions they
+  used to snap to, and every number is as before.
+
+**Decision.** Sources and receivers sit where they are; there is no option to snap. On nodes
+nothing changes. A point between nodes reads $(2L)^3$ values (512 at order 8), which costs
+nothing next to a step.
+
+**Reproduce:** `just unit fd::tests::interpolates_from_any_offset`; `just physics between`
+(the force, reciprocity, dot-product and gradient checks between nodes).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2901,9 +2968,10 @@ and a half minutes).
   with converted waves, which needs point sources and an exact reference, or plane waves
   at an angle in a grid whose sides wrap around; and the S reflection's second-order error
   at the point densities FWI runs at.
-- **Source and receiver positions** off the nodes [@hicks2002; @petersson2016]: snapping
-  a receiver 0.4 h off its position cost 26% misfit at 3.9 ppw (2026-11-20, removing time
-  dispersion).
+- **Source and receiver positions.** Between nodes they now interpolate with the stencil's
+  own weights (2026-11-22, "Sources and receivers between nodes"). Still open: sources and
+  receivers at a fluid–solid interface or near a sharp contrast, where interpolating across
+  it smooths what they see [@petersson2016].
 - **Optimised coefficients, further.** Weight the error by the wavelets' spectrum and the
   model's range of speeds instead of $(\xi/\beta)^{-2}$; measure the observed order under grid
   refinement (the band shrinks with $h$, so the operator tends to Taylor's); and choose the

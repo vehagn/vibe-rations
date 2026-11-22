@@ -415,11 +415,7 @@ fn split(
 /// The receivers' x in metres.
 fn receiver_x(sim: &Simulation) -> Vec<f64> {
     let h = sim.solver.grid.h[0];
-    sim.receivers
-        .nodes
-        .iter()
-        .map(|n| n[0] as f64 * h)
-        .collect()
+    sim.receivers.points.iter().map(|p| p[0] * h).collect()
 }
 
 /// The start's misfit split as `split` does, summed over the shots, then its gradient split

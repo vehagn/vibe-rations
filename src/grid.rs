@@ -81,6 +81,24 @@ impl Grid {
         std::array::from_fn(|a| node[a] as f64 * self.h[a])
     }
 
+    /// A position's grid coordinates, position / spacing along each axis (a node's are whole
+    /// numbers), or None if it is off the grid. Coordinates within 1e-9 of a whole number are
+    /// that number, so a position on a node is read exactly as the node.
+    pub fn coordinates(&self, position: [f64; 3]) -> Option<[f64; 3]> {
+        let mut point = [0.0; 3];
+        for a in 0..3 {
+            let mut x = position[a] / self.h[a];
+            if (x - x.round()).abs() < 1e-9 {
+                x = x.round();
+            }
+            if !(0.0..=(self.n[a] - 1) as f64).contains(&x) {
+                return None;
+            }
+            point[a] = x;
+        }
+        Some(point)
+    }
+
     /// The node nearest a position, or None if the position is off the grid.
     pub fn nearest_node(&self, position: [f64; 3]) -> Option<[usize; 3]> {
         let mut node = [0; 3];
@@ -92,6 +110,24 @@ impl Grid {
             node[a] = r as usize;
         }
         Some(node)
+    }
+}
+
+/// Something that stands for a point in grid coordinates: a node, or any point
+/// ([`Grid::coordinates`]).
+pub trait AsPoint {
+    fn point(&self) -> [f64; 3];
+}
+
+impl AsPoint for [usize; 3] {
+    fn point(&self) -> [f64; 3] {
+        self.map(|n| n as f64)
+    }
+}
+
+impl AsPoint for [f64; 3] {
+    fn point(&self) -> [f64; 3] {
+        *self
     }
 }
 
