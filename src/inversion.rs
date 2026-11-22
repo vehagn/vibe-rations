@@ -1682,7 +1682,11 @@ mod tests {
         assert_eq!(inv.unknowns(), (interior - fluid) + interior);
         let shot = &inv.shots[0].config;
         assert_eq!(shot.time.dt, Some(1e-3));
-        assert_eq!(shot.boundary.pml_vp_max, Some(2000.0));
+        // The start's fastest node: band-limited layers overshoot past the rock's 2000 m/s
+        // beside the water.
+        let fastest = start(&cfg).vp_range()[1];
+        assert!(fastest > 2000.0, "{fastest}");
+        assert_eq!(shot.boundary.pml_vp_max, Some(fastest));
         let p = inv.preconditioner.as_ref().unwrap();
         assert_eq!(p.len(), inv.unknowns());
         assert!(p.iter().all(|&v| v.is_finite() && v > 0.0));

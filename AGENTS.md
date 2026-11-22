@@ -176,17 +176,17 @@ doesn't show.
   the difference.
 
 - **Interfaces** (`just interfaces`, `tests/common/plane.rs`; the log's "A planar
-  interface"). Layers are sampled at the nodes, so an interface acts midway between the
-  last node above it and the first below, wherever it lies: a layer's top on a node (both
-  of `examples/layered.toml`'s interfaces are) reflects $h/v$ early, a first-order error
+  interface"). Sampled at the nodes (`interfaces = "nodes"`), an interface acts midway
+  between the last node above it and the first below, wherever it lies: a layer's top on a
+  node (both of `examples/layered.toml`'s interfaces are) reflects $h/v$ early, a first-order error
   (reflection misfit 35% for P, 57% for S at 20 and 11.6 ppw at $f_0$; transmission 6–7%).
   Midway it is second order and the same at orders 4 to 16: at interfaces the model's
   sampling, not the stencil, sets the error. Band-limiting density and the compliances
   $1/\rho v_p^2$, $1/\rho v_s^2$ (a sinc tapered over ±4 nodes) makes the reflection
   independent of the interface's position (P 1.2%, S 12.6%, second order); band-limiting
   the moduli themselves, or their logarithms, leaves a position error, and clamping the
-  step's 7.3% overshoot costs most of the gain. It is opt-in, `[model] interfaces =
-  "band-limited"` (`model::layer_profile`): a node is fluid if the layer it lies in is; a
+  step's 7.3% overshoot costs most of the gain. It is the default since 2026-11-22,
+  `[model] interfaces = "band-limited"` (`model::layer_profile`): a node is fluid if the layer it lies in is; a
   solid node takes the solids' S compliance alone, capped at half its P modulus near a
   fluid (λ ≥ 0); and an interface whose contrast would let the overshoot stiffen a modulus
   by more than 1.25 (`MAX_STIFFENING`, a compliance ratio above 3.7, as for water on rock)
@@ -194,12 +194,13 @@ doesn't show.
   contrast of 48 cell averages beat a clamped sinc (S 2.4–9.1% against 6.1–11.9%), at 2.8
   the sinc beats them. The overshoot makes some interface nodes faster than any layer
   (3022 m/s next to a 3000 m/s layer; 2179 m/s in 2000 m/s rock under water), so
-  $\Delta t$ shrinks and `pml_vp_max` grows with it. Not the default yet: under it the gradient
-  checks fail (their mask spares only nodes at the fastest speed, so a 3000 m/s layer just
-  below a 3022 m/s plane is perturbed past it and changes $\Delta t$), the inversion's
-  set-up test expects `pml_vp_max` to be a layer's, and the walls-and-water wavefield
-  rebuilt backwards drifts $1.8 \times 10^{-6}$ instead of $9.6 \times 10^{-7}$; the
-  rest of `just physics` is unchanged. Spheres are still node-sampled. The test grid stays
+  $\Delta t$ shrinks and `pml_vp_max` grows with it. Making it the default (the log's
+  "Band-limited layers by default") took gradient checks that hold $\Delta t$ and the layers'
+  damping and perturb down the gradient (a 3000 m/s layer just below a 3022 m/s plane was
+  perturbed past it, which changed $\Delta t$); it doubled the walls-and-water wavefield's
+  drift rebuilt backwards ($1.8 \times 10^{-6}$ against $9.6 \times 10^{-7}$, not traced)
+  and moved the misfits' finite-difference checks within their noise; the rest of `just
+  physics` is unchanged. Spheres are still node-sampled. The test grid stays
   exactly 1D only because the values outside its sides copy the nearest node's every half
   step (`extend_sideways`): with ordinary edges, waves from the sides spoilt the
   transmitted P wave by 5% at 10 nodes from them, and by 1% at 30.
@@ -454,12 +455,15 @@ doesn't show.
   strain $\tilde\varepsilon$ *summed* from the adjoint strain rates (not $M^{-1}\tilde\sigma$:
   singular in fluids, cancels digits where $\mu \ll \lambda$), then the chain rule through
   the material averaging (once per slot a node fills: the grid's last planes clamp) and the
-  free surface's plane-stress moduli. Finite differences agree to $\le 2.8 \times 10^{-4}$
+  free surface's plane-stress moduli. Finite differences agree to $\le 7.4 \times 10^{-5}$
   (CPML at orders 4 and 8; rigid walls with water and uneven spacing) only after
   Richardson's extrapolation: plain central differences in single precision have an $h^2$
   error of percents down to $h \approx 2 \times 10^{-3}$, below which round-off takes over.
-  In a finite-difference check, keep $v_p$ below the model's fastest: it sets $\Delta t$ (via
-  the Courant fraction) and the layers' damping. The forward field is replayed from
+  In a finite-difference check, hold $\Delta t$ and `pml_vp_max` at the model's, as
+  `gradient_check` and an inversion do: with $\Delta t$ from a Courant fraction both follow
+  the fastest node, which a perturbation may move. And perturb down the gradient (random
+  amounts, the gradient's signs): along random signs $v_p$'s change cancelled tenfold and
+  the check sat on round-off, $2.5 \times 10^{-5}$ to $5 \times 10^{-4}$ by step. The forward field is replayed from
   checkpoints (`Solver::state`, `restore`), bit for bit; a unit test checks every interval
   gives the same gradient. Receiver components may not repeat: a second `p` once went into
   the adjoint run but not the adjoint strain and flipped the gradient's sign.
@@ -490,14 +494,16 @@ doesn't show.
   1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection
   $1.7 \times 10^{-4}$ of the peak without a free surface, $1.9 \times 10^{-3}$ along one;
   reciprocity $\le 8 \times 10^{-7}$ (orders 4 and 8); the adjoint dot-product test
-  $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences
-  $\le 2.8 \times 10^{-4}$ (order 4's $v_p$, whose directional derivative is small; order 8
-  $\le 1.6 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
+  $\le 8.3 \times 10^{-8}$; gradients against extrapolated finite differences down the
+  gradient $\le 7.4 \times 10^{-5}$ ($v_s$, the extrapolation's $h^4$ error; $v_p$ and
+  $\rho$ $\le 1.2 \times 10^{-5}$); the sphere inversion leaves 17.9% of its misfit and 91.9% of the $v_s$
   anomaly after 3 iterations, and its gradient matches finite differences to
-  $4.0 \times 10^{-6}$ (at $h = 10^{-2}$); the rebuilt wavefield retraces the run to
-  $\le 1.2 \times 10^{-6}$ of each array's peak and its gradient the replay's to
-  $\le 7.1 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
-  the replay's numbers (order 8 $\le 1.6 \times 10^{-5}$); the gradient against the exact
+  $4.9 \times 10^{-6}$ (at $h = 10^{-2}$; $4.0 \times 10^{-6}$ node-sampled, both within
+  the check's round-off); the rebuilt wavefield retraces the run to
+  $\le 1.8 \times 10^{-6}$ of each array's peak (walls and water; $\le 1.2 \times 10^{-6}$
+  node-sampled) and its gradient the replay's to
+  $\le 6.2 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
+  the replay's numbers; the gradient against the exact
   kernels at 3.5 points per S wavelength (`tests/gradient_accuracy.rs`), the wavefields' part
   0.26% (S) and 0.12% (P) in the Fresnel zone, +0.19% and −0.10% along a smooth change; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact

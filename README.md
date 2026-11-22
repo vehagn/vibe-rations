@@ -130,7 +130,7 @@ a free surface $z = 0$ is the surface.
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
-| `[model]` | `interfaces`: how the layers meet the nodes. `"nodes"` (default): each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off; `"band-limited"`: smoothed to the grid so it acts where it lies (see "Accuracy") |
+| `[model]` | `interfaces`: how the layers meet the nodes. `"band-limited"` (default): smoothed to the grid so an interface acts where it lies (see "Accuracy"); `"nodes"`: each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off |
 | `[model.files]` | Or `.npy` arrays for `vp`, `vs`, `rho`, relative to the configuration: shape (nz, ny, nx), or (nz, nx) for a section the same at every $y$; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
 | `[[model.sphere]]` | Spheres painted over the model |
 | `[[source]]` | `position`, `wavelet` (Ricker or Gaussian), and one of `explosion`, `moment`, `double_couple` (strike, dip, rake, m0) or `force` |
@@ -668,14 +668,16 @@ Rules of thumb:
 What higher orders don't fix, from the literature and our measurements:
 
 - **Interfaces.** Measured with plane waves at normal incidence (`just interfaces`; the
-  research log's "A planar interface"). Layers are sampled at the nodes, so an interface
-  acts midway between the last node above it and the first below, wherever it lies: a
+  research log's "A planar interface"). Sampled at the nodes, an interface acts midway
+  between the last node above it and the first below, wherever it lies: a
   layer's top on a node reflects $h/v$ early, a first-order error (reflection misfit 35% for
   P and 57% for S at 20 and 11.6 points per wavelength at $f_0$). Midway between nodes the
   error is second order (0.72% and 7.5%) and the same at orders 4 to 16, so longer stencils
   gain nothing there. Band-limiting the model to the grid (Mittet 2017), density and the
   compliances, makes the reflection independent of where the interface falls (1.2% and
-  12.6%, second order): `[model] interfaces = "band-limited"`, off by default.
+  12.6%, second order): `[model] interfaces = "band-limited"`, the default (`"nodes"`
+  samples the layers at the nodes). Its overshoot makes a few nodes beside an interface
+  faster than either layer, so $\Delta t$ is up to about 8% shorter.
 - **The free surface.** Stress imaging is second order, so surface waves need finer grids
   (Kristek et al. 2002); Mittet (2002) gives a free surface suited to long stencils. Our
   free-surface test's 2.5% is mostly its reference, which doubles the P wave as if it were
@@ -709,7 +711,7 @@ removed) unless stated:
 | Absorbing layers against a domain too large to reflect, without / with a free surface | 0.017% / 0.19% of peak |
 | Reciprocity in a layered model with a sphere, one end on the free surface (orders 4 and 8) | $\le 8 \times 10^{-7}$ of peak |
 | Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 8.3 \times 10^{-8}$ |
-| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 2.8 \times 10^{-4}$ (order 8: $\le 1.6 \times 10^{-5}$) |
+| Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed down the gradient, with $\Delta t$ and the layers held (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 7.4 \times 10^{-5}$ ($v_p$ and $\rho$: $\le 1.2 \times 10^{-5}$) |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 
 ## Towards elastic FWI

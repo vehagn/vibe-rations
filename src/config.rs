@@ -250,12 +250,14 @@ pub struct ModelConfig {
 pub enum Interfaces {
     /// Each node takes the layer it lies in, a node on an interface the layer below. An
     /// interface then acts midway between the nodes either side of it, wherever it lies: up
-    /// to half a node off.
-    #[default]
+    /// to half a node off: a first-order error in the reflection's timing.
     Nodes,
-    /// Band-limited to the grid: each interface's step is smoothed by a sinc tapered over four
-    /// nodes either side, applied to density and to the compliances 1/(ρvp²) and 1/(ρvs²), so
-    /// an interface acts where it lies, between nodes too (`crate::model::band_limited_step`).
+    /// Band-limited to the grid (the default): each interface's step is smoothed by a sinc
+    /// tapered over four nodes either side, applied to density and to the compliances
+    /// 1/(ρvp²) and 1/(ρvs²), so an interface acts where it lies, between nodes too
+    /// (`crate::model::band_limited_step`). Its overshoot makes a few nodes beside an
+    /// interface faster than either layer, which shortens Δt by up to about 8%.
+    #[default]
     BandLimited,
 }
 

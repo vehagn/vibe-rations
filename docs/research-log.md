@@ -2689,6 +2689,87 @@ part. The rest of the follow-ups were not run (open questions).
 **Reproduce:** `just in marmousi2-study stages_muted_after_the_first` (60 minutes on four
 cores).
 
+## 2026-11-22 — Band-limited layers by default
+
+**Question.** Band-limited layers put an interface where it lies (2026-11-21, "Band-limited
+layers, opt in"), but flipping the default failed three gradient checks and the inversion's
+set-up test. What do the checks need, and what does the flip change elsewhere?
+
+**Method.** `config::Interfaces::BandLimited` made the default. The gradient checks
+(`gradient_check` in `tests/physics.rs`) perturbed random signs at every node outside the
+layers, but $v_p$ only below the model's fastest speed, which sets $\Delta t$ through the
+Courant fraction and the layers' damping. Band-limited, the fastest is an overshoot plane
+(3022 m/s) above a 3000 m/s layer, which a perturbation pushes past it. The checks now hold
+$\Delta t$ and `pml_vp_max` at the base model's for the observed, base and perturbed runs, as
+`Inversion::new` does, and perturb $v_p$ everywhere. The step was swept over
+$h = 3.2 \times 10^{-2}$ to $2 \times 10^{-3}$ for $v_p$, with random signs and down the
+gradient (random amounts with the gradient's signs, as the inversion's check does), under
+both samplings. Then the whole of `just physics` under both samplings with the new checks;
+for the misfits' checks (`inversion_gradient_check`), steps from $2 \times 10^{-2}$ to
+$2.5 \times 10^{-3}$.
+
+**Results.**
+
+- *Random signs with $\Delta t$ held* fail: $v_p$'s extrapolated error scatters without a
+  trend as $h$ shrinks, $2.5 \times 10^{-5}$ to $4.2 \times 10^{-4}$ at order 4 and
+  $9.7 \times 10^{-5}$ to $7.3 \times 10^{-4}$ at order 8, and node sampling fails at
+  $3.0 \times 10^{-4}$. Perturbing the fast lower layer too, which the old mask had kept
+  fixed, leaves the predicted change cancelling between nodes ($4.0 \times 10^{-4}$ per unit
+  $h$ against $v_s$'s $6.3 \times 10^{-3}$), and the finite differences' round-off, about
+  $10^{-7}$ of a unit of misfit (the same as $v_s$'s), swamps it.
+- *Down the gradient* the change can't cancel ($-4.9 \times 10^{-2}$ for $v_p$), and $v_p$'s
+  extrapolated error falls as $h^4$, from $1.0 \times 10^{-4}$ at $3.2 \times 10^{-2}$ to a
+  floor of about $3 \times 10^{-6}$ from $8 \times 10^{-3}$ down. At $h = 1.6 \times 10^{-2}$,
+  band-limited (node-sampled):
+
+  | | order 4 | order 8 | walls and water |
+  |---|---|---|---|
+  | $v_p$ | $8.5 \times 10^{-6}$ ($1.0 \times 10^{-5}$) | $2.3 \times 10^{-6}$ ($6.3 \times 10^{-6}$) | $5.4 \times 10^{-6}$ |
+  | $v_s$ | $6.9 \times 10^{-5}$ ($7.1 \times 10^{-5}$) | $7.4 \times 10^{-5}$ ($7.2 \times 10^{-5}$) | $9.1 \times 10^{-6}$ |
+  | $\rho$ | $2.5 \times 10^{-6}$ ($4.8 \times 10^{-6}$) | $1.2 \times 10^{-5}$ ($1.3 \times 10^{-6}$) | $5.1 \times 10^{-6}$ |
+
+  Before, along random signs with $v_p$'s lower layer fixed (node-sampled): $v_p$
+  $2.8 \times 10^{-4}$ / $3.9 \times 10^{-6}$, $v_s$ $2.1 \times 10^{-5}$ / $1.0 \times 10^{-5}$,
+  $\rho$ $4.4 \times 10^{-5}$ / $1.6 \times 10^{-5}$; walls and water $6.4 \times 10^{-5}$,
+  $1.2 \times 10^{-5}$, $1.6 \times 10^{-4}$. $v_s$ is now the largest, the same at both
+  orders and samplings: the extrapolation's $h^4$ error along a direction that changes the
+  misfit more nonlinearly, not round-off. The rebuilt wavefield's checks give the same
+  numbers to $4 \times 10^{-7}$ of the predicted change.
+- *Elsewhere in `just physics`*, node-sampled → band-limited: the long run drains to
+  $2.7 \times 10^{-6}$ → $2.5 \times 10^{-6}$ (order 4) and $1.1 \times 10^{-6}$ →
+  $9.6 \times 10^{-7}$ (order 8); the wavefield rebuilt backwards drifts $7.5$, $6.3$, $6.2$,
+  $12 \times 10^{-7}$ → $8.0$, $9.0$, $8.0$, $10 \times 10^{-7}$ (orders 4 and 8, with a
+  free surface and with layers all round) and $9.6 \times 10^{-7}$ → $1.8 \times 10^{-6}$ with
+  walls and water; its gradient differs from the replay's by at most $7.1 \times 10^{-7}$ →
+  $6.2 \times 10^{-7}$. The inversion's checks, down the gradient at one step: inversion
+  gradient $4.0 \times 10^{-6}$ → $4.9 \times 10^{-6}$, filtered L2 $4.4 \times 10^{-7}$ →
+  $2.4 \times 10^{-6}$, phase $4.2 \times 10^{-6}$ → $6.3 \times 10^{-7}$, filtered time
+  shifts $1.3 \times 10^{-4}$ → $1.2 \times 10^{-4}$, muted filtered L2 $8.7 \times 10^{-7}$
+  → $1.9 \times 10^{-5}$, windowed time shifts $2.6 \times 10^{-5}$ → $9.1 \times 10^{-5}$.
+  Swept, band-limited, the muted L2 check gives $1.3 \times 10^{-4}$, $1.9 \times 10^{-5}$,
+  $2.5 \times 10^{-5}$ and $5.3 \times 10^{-5}$ at $h = 2 \times 10^{-2}$, $10^{-2}$,
+  $5 \times 10^{-3}$ and $2.5 \times 10^{-3}$: the extrapolation's $h^4$ error above,
+  round-off growing as $1/h$ below, about equal at $10^{-2}$. Filtered L2 ($1.9 \times
+  10^{-4}$, $2.4 \times 10^{-6}$, $2.3 \times 10^{-5}$, $6.2 \times 10^{-5}$) and the
+  inversion gradient ($7.5 \times 10^{-5}$, $4.9 \times 10^{-6}$, $5.7 \times 10^{-7}$,
+  $1.4 \times 10^{-5}$) behave the same. A wrong gradient would leave the same error at every
+  step, so these moved within the checks' noise; node sampling's $8.7 \times 10^{-7}$ was a
+  lucky cancellation in it. Every other test is unchanged (its configuration sets the
+  sampling, or has no interface between layers).
+- The inversion's set-up test expected `pml_vp_max` to be the rock's 2000 m/s; the start's
+  fastest node is now the overshoot beside the water, which it now takes.
+
+**Decision.** Band-limited layers are the default; `interfaces = "nodes"` keeps node
+sampling. The gradient checks hold $\Delta t$ and the layers' damping and go down the
+gradient, and their tolerance is tightened from $3 \times 10^{-4}$ to $1.5 \times 10^{-4}$,
+twice the largest error. The doubled drift of the wavefield rebuilt beside water is recorded,
+not traced: band-limiting puts solid nodes with small shear moduli beside the water, a
+candidate (the gradient's notes on $\mu \ll \lambda$), untested.
+
+**Reproduce:** `just physics`; for node sampling, move `#[default]` in `config::Interfaces`
+back to `Nodes`. The step sweeps need a loop over $h$ in `gradient_check` and
+`inversion_gradient_check` (not committed).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2734,9 +2815,9 @@ cores).
 - **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
   node-sampled layers put an interface midway between nodes (first-order error),
   band-limiting density and compliances [@mittet2017] makes it second order wherever it
-  lies, and the stencil's order doesn't matter. Band-limited layers are opt-in
-  (2026-11-21, "Band-limited layers, opt in"). Still open: whether they should be the
-  default (the gradient checks' mask first), spheres, and how accurate the water rule is
+  lies, and the stencil's order doesn't matter. Band-limited layers are the default
+  (2026-11-21, "Band-limited layers, opt in"; 2026-11-22, "Band-limited layers by default").
+  Still open: spheres, and how accurate the water rule is
   against a fluid–solid reference (Scholte waves); oblique incidence
   with converted waves, which needs point sources and an exact reference, or plane waves
   at an angle in a grid whose sides wrap around; and the S reflection's second-order error
@@ -2766,7 +2847,8 @@ cores).
   rebuilding it backwards from the band (2026-11-20: single-precision round-off,
   $10^{-7}$–$10^{-6}$ of the gradient, set by the field's loudest stretch in a segment; the
   layers and the free surface add nothing). Still open there: why a water layer drifts five
-  times more, and whether that drift moves an inversion. Dispersion in a homogeneous full space
+  times more (and with band-limited layers twice that again, 2026-11-22), and whether that
+  drift moves an inversion. Dispersion in a homogeneous full space
   is settled too, against the exact kernels (2026-11-21, "The gradient against the exact
   kernels"): at the defaults the wavefields put 0.26% into the gradient at 3.5 points per
   shortest S wavelength and $\le 0.05\%$ from 4.6, less than into the traces; with the time

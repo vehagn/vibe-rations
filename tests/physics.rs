@@ -452,6 +452,9 @@ fn reciprocity(order: usize) {
 
 /// A long run with a free surface, a water layer, soft sediments and the absorbing layers
 /// meeting the surface at the corners: the energy must leave and stay gone.
+///
+/// Measured, what is left after 9.4 s relative to the peak, orders 4 / 8: 2.5e-6 / 9.6e-7 with
+/// band-limited layers, 2.7e-6 / 1.1e-6 node-sampled (until 2026-11-22).
 #[test]
 fn a_long_run_stays_stable_and_drains() {
     for order in [4, 8] {
@@ -711,19 +714,25 @@ fn dot_product(order: usize, walls: &str, free_surface: bool, signal: &str, ever
 }
 
 /// The gradient is that of the solver's forward run: perturbing vp, vs or ρ at every node
-/// outside the absorbing layers by random amounts changes the misfit as the gradient says,
-/// to within the finite difference's own error. The model has a free surface, two layers and
-/// a sphere; a force and an explosion; receivers on the surface and at depth recording every
-/// component, every second step.
+/// outside the absorbing layers by random amounts down the gradient changes the misfit as the
+/// gradient says, to within the finite difference's own error, with the time step and the
+/// layers' damping held at the model's. The model has a free surface, two band-limited layers
+/// and a sphere; a force and an explosion; receivers on the surface and at depth recording
+/// every component, every second step.
 ///
 /// Measured, extrapolated (orders 4 / 8), at the defaults (optimised coefficients pinned,
-/// C = 0.85, traces un-warped): vp 2.8e-4 / 3.9e-6, vs 2.1e-5 / 1.0e-5, ρ 4.4e-5 / 1.6e-5.
-/// The plain central differences are off by 2e-3 to 7e-1 at these steps, falling 4× per
-/// halving: their own h² error, with nothing beneath it. Order 4's vp is near the limit
-/// because its directional derivative is small here (4.5e-5), not because the gradient is
-/// off. Before the receiver line moved in from 100 m (at order 8 the first receiver read
-/// into a layer), with Taylor coefficients at C = 0.3: vp 1.7e-4 / 6.5e-5, vs 1.6e-6 /
-/// 5.8e-6, ρ 1.5e-5 / 1.2e-5.
+/// C = 0.85, traces un-warped, band-limited layers): vp 8.5e-6 / 2.3e-6, vs 6.9e-5 / 7.4e-5,
+/// ρ 2.5e-6 / 1.2e-5 (node-sampled layers: vp 1.0e-5 / 6.3e-6, vs 7.1e-5 / 7.2e-5, ρ 4.8e-6 /
+/// 1.3e-6). The plain central differences are off by 1e-4 to 1.4e-1 at these steps, falling
+/// 4× per halving: their own h² error. For vp the extrapolated error falls as h⁴ from 1e-4 at
+/// h = 3.2e-2 to a floor of about 3e-6 from 8e-3 down. Until 2026-11-22 the check perturbed
+/// random signs, and vp only below the fastest speed, which set dt and the layers: the whole
+/// lower layer stayed fixed. Then (node-sampled): vp 2.8e-4 / 3.9e-6, vs 2.1e-5 / 1.0e-5,
+/// ρ 4.4e-5 / 1.6e-5, order 4's vp near the limit because its change cancelled to 4.5e-5.
+/// Held dt and layers but random signs left vp's change cancelling tenfold and the check on
+/// round-off, 2.5e-5 to 5e-4 by step without a trend (it failed at 3.0e-4). Before the
+/// receiver line moved in from 100 m (at order 8 the first receiver read into a layer), with
+/// Taylor coefficients at C = 0.3: vp 1.7e-4 / 6.5e-5, vs 1.6e-6 / 5.8e-6, ρ 1.5e-5 / 1.2e-5.
 #[test]
 fn the_gradient_matches_finite_differences() {
     for order in [4, 8] {
@@ -741,12 +750,12 @@ fn the_gradient_matches_finite_differences() {
 /// spacing; a water layer under the free surface, with fluid nodes on it and against the
 /// solid; a double couple; and every third step recorded.
 ///
-/// Measured, extrapolated, with Taylor coefficients at C = 0.85: vp 6.4e-5, vs 1.2e-5, ρ
-/// 1.6e-4 (at C = 0.3: vp 4.6e-5, vs 8.9e-7, ρ 2.2e-4). The plain differences for ρ are 37%
-/// off at h = 1.6e-2: what's left after extrapolating is the misfit's nonlinearity and
-/// round-off (perturbing the water layer alone, ρ agrees to 2.7e-5). With optimised
-/// coefficients ρ's plain differences are 61% off and extrapolate to 6.0e-4, a finite-difference
-/// limit (smaller steps drown in round-off); this check is about the geometry, and the first
+/// Measured, extrapolated, with Taylor coefficients at C = 0.85, band-limited layers, down the
+/// gradient: vp 5.4e-6, vs 9.1e-6, ρ 5.1e-6. Along random signs, node-sampled, vp below the
+/// fastest only (until 2026-11-22): vp 6.4e-5, vs 1.2e-5, ρ 1.6e-4 (at C = 0.3: vp 4.6e-5,
+/// vs 8.9e-7, ρ 2.2e-4); ρ's plain differences were then 37% off at h = 1.6e-2, and with
+/// optimised coefficients 61%, extrapolating to 6.0e-4, a finite-difference limit (perturbing
+/// the water layer alone, ρ agreed to 2.7e-5). This check is about the geometry, and the first
 /// one covers optimised coefficients.
 #[test]
 fn the_gradient_matches_finite_differences_with_walls_and_water() {
@@ -756,11 +765,13 @@ fn the_gradient_matches_finite_differences_with_walls_and_water() {
 /// The same checks with the forward wavefield rebuilt backwards from the band around the
 /// layers instead of replayed (`Strategy::Reconstruct`, default segments).
 ///
-/// Measured, extrapolated (replayed in brackets): order 4 vp 2.6e-4 (2.8e-4), vs 2.1e-5
-/// (2.1e-5), ρ 4.4e-5 (4.4e-5); order 8 vp 1.4e-6 (3.9e-6), vs 1.0e-5 (1.0e-5), ρ 1.6e-5
-/// (1.6e-5); walls and water vp 6.3e-5 (6.4e-5), vs 1.2e-5 (1.2e-5), ρ 1.6e-4 (1.6e-4). The
-/// rebuilt gradient moves the predicted change by 2e-5 at most (order 4's vp, whose
-/// directional derivative is small), well inside what the finite differences resolve.
+/// Measured, extrapolated (replayed in brackets): order 4 vp 8.6e-6 (8.5e-6), vs 6.9e-5
+/// (6.9e-5), ρ 2.6e-6 (2.5e-6); order 8 vp 2.3e-6, vs 7.4e-5, ρ 1.2e-5 (all as replayed);
+/// walls and water vp 5.4e-6, vs 9.1e-6, ρ 5.1e-6 (as replayed). The rebuilt gradient moves the
+/// predicted change by 4e-7 at most, well inside what the finite differences resolve. Along
+/// random signs, node-sampled (until 2026-11-22): order 4 vp 2.6e-4 (2.8e-4), vs 2.1e-5, ρ
+/// 4.4e-5; order 8 vp 1.4e-6 (3.9e-6), vs 1.0e-5, ρ 1.6e-5; walls and water vp 6.3e-5
+/// (6.4e-5), vs 1.2e-5, ρ 1.6e-4.
 #[test]
 fn the_gradient_matches_finite_differences_when_rebuilt() {
     let rebuilt = Strategy::Reconstruct { segment: None };
@@ -781,9 +792,13 @@ fn the_gradient_matches_finite_differences_when_rebuilt() {
 /// halo, always zero). The error is single-precision round-off, which accumulates as the
 /// rebuilt field steps back.
 ///
-/// Measured, largest over the run relative to each array's peak: order 4, 251 steps, 7.5e-7
-/// with a free surface and 6.3e-7 with layers all round; order 8, 283 steps, 6.2e-7 and
-/// 1.2e-6; walls and water, 213 steps, 9.6e-7. The tolerance is four times the largest.
+/// Measured, largest over the run relative to each array's peak, with band-limited layers:
+/// order 4, 253 steps, 8.0e-7 with a free surface and 9.0e-7 with layers all round; order 8,
+/// 285 steps, 8.0e-7 and 1.0e-6; walls and water, 216 steps, 1.8e-6. Node-sampled (until
+/// 2026-11-22): order 4, 251 steps, 7.5e-7 and 6.3e-7; order 8, 283 steps, 6.2e-7 and 1.2e-6;
+/// walls and water, 213 steps, 9.6e-7. The water's overshoot beside the rock stiffens a few
+/// nodes, and the drift grows with the loudest stretch of the field. The tolerance, 5e-6, was
+/// four times the largest node-sampled value.
 #[test]
 fn the_rebuilt_wavefield_follows_the_run() {
     for order in [4, 8] {
@@ -819,9 +834,10 @@ fn the_rebuilt_wavefield_follows_the_run() {
 /// finite-difference checks.
 ///
 /// Measured, largest difference relative to each parameter's largest value (default segments,
-/// then the whole run): order 4, 2.9e-7 (84 steps) and 5.3e-7 (251); order 8, 3.2e-7 (57) and
-/// 5.5e-7 (283); walls and water, 3.9e-7 (31) and 7.1e-7 (213). The tolerance is four times
-/// the largest.
+/// then the whole run), with band-limited layers: order 4, 3.9e-7 (85 steps) and 5.0e-7 (253);
+/// order 8, 3.6e-7 (57) and 5.4e-7 (285); walls and water, 3.3e-7 (31) and 6.2e-7 (216).
+/// Node-sampled (until 2026-11-22): 2.9e-7 (84) and 5.3e-7 (251); 3.2e-7 (57) and 5.5e-7 (283);
+/// 3.9e-7 (31) and 7.1e-7 (213). The tolerance is four times the largest.
 #[test]
 fn rebuilt_gradients_match_the_replay() {
     use vibe_rations::gradient::{gradient_with, l2_misfit};
@@ -1008,13 +1024,27 @@ fn gradient_check(
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
-    let observed = simulate(&config([1900.0, 950.0, 1950.0])).receivers;
+    let base = std::path::Path::new(".");
+    let mut cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    // The time step and the layers' damping held at the model's, as an inversion holds them:
+    // with dt from a Courant fraction both follow the fastest node, which a perturbation may
+    // move (band-limited layers put it on an overshoot beside a slightly slower layer).
+    let dt = Simulation::with_model(&cfg, model.clone())
+        .unwrap()
+        .solver
+        .dt;
+    cfg.time.dt = Some(dt);
+    cfg.time.courant = None;
+    cfg.boundary.pml_vp_max.get_or_insert(model.vp_range()[1]);
+    let mut truth = Config::from_toml(&config([1900.0, 950.0, 1950.0])).unwrap();
+    (truth.time, truth.boundary) = (cfg.time.clone(), cfg.boundary.clone());
+    let mut observed = Simulation::new(&truth, base).unwrap();
+    observed.run(None, false).unwrap();
+    let observed = observed.receivers;
     let weights = balancing_weights(&observed.traces, &observed.components);
     let observed = observed.traces;
     let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
-    let cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
-    let base = std::path::Path::new(".");
-    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
     let misfit_of = |model: Model| {
         let mut sim = Simulation::with_model(&cfg, model).unwrap();
         sim.run(None, false).unwrap();
@@ -1030,17 +1060,20 @@ fn gradient_check(
     let run = gradient_with(&mut sim, |r| misfit(&r.traces), strategy).unwrap();
     let [g_vp, g_vs, g_rho] = run.gradient.velocities(&model);
 
-    // Every node outside the layers; vp only below the fastest, which sets dt and the layers.
+    // Every node outside the layers, the fastest included: dt and the layers are held. Down
+    // the gradient, by a random amount at each node: along random signs the predicted change
+    // cancels (vp's tenfold here, once the fast layer is perturbed too) and the finite
+    // differences' round-off, about 1e-7 of a unit of misfit, swamps it.
     let g = model.grid;
     let [nx, ny, nz] = g.n;
-    let vp_max = model.vp_range()[1] as f32;
     let inside = |i: usize, j: usize, k: usize| {
         (pml..nx - pml).contains(&i) && (pml..ny - pml).contains(&j) && k < nz - pml
     };
     for (name, grad, seed) in [("vp", &g_vp, 3), ("vs", &g_vs, 4), ("rho", &g_rho, 5)] {
         let u: Vec<f64> = noise(g.interior_len(), seed)
             .iter()
-            .map(|v| 2.0 * v - 1.0)
+            .zip(grad.iter())
+            .map(|(v, d)| -v * d.signum())
             .collect();
         let values = |m: &Model| match name {
             "vp" => m.vp.clone(),
@@ -1053,7 +1086,7 @@ fn gradient_check(
             for j in 0..ny {
                 for i in 0..nx {
                     let n = g.interior_idx(i, j, k);
-                    if inside(i, j, k) && !(name == "vp" && base_values[n] >= vp_max) {
+                    if inside(i, j, k) {
                         mask[n] = u[n];
                     }
                 }
@@ -1090,7 +1123,7 @@ fn gradient_check(
             e(extrapolated)
         );
         assert!(
-            e(extrapolated) < 3e-4,
+            e(extrapolated) < 1.5e-4,
             "{name}, {label}: {}",
             e(extrapolated)
         );
@@ -1223,10 +1256,11 @@ fn an_inversion_finds_a_sphere() {
 /// vp, listed in that order, summed over two shots that record velocity and pressure), is the
 /// derivative of its misfit, checked down the gradient by extrapolated central differences.
 ///
-/// Measured with the defaults (optimised coefficients, time error removed): 4.0e-6 at
-/// h = 1e-2, between round-off in the single-precision traces at smaller steps (1.4e-5 at
-/// 8e-3, 5.1e-5 at 4e-3, 2.7e-5 at 2e-3, scattering rather than shrinking) and the
-/// extrapolation's h⁴ error at larger ones (2.5e-5 at 1.6e-2). Before the merge with
+/// Measured with the defaults (optimised coefficients, time error removed, band-limited
+/// layers): 4.9e-6 at h = 1e-2, between round-off in the single-precision traces at smaller
+/// steps (5.7e-7 at 5e-3, 1.4e-5 at 2.5e-3, scattering rather than shrinking) and the
+/// extrapolation's h⁴ error at larger ones (7.5e-5 at 2e-2). Node-sampled (until 2026-11-22):
+/// 4.0e-6 at 1e-2; 1.4e-5 at 8e-3, 5.1e-5 at 4e-3, 2.7e-5 at 2e-3; 2.5e-5 at 1.6e-2. Before the merge with
 /// stencil-long receiver interpolation (cubic receivers, Taylor coefficients, time error
 /// kept): 1.1e-5 at 4e-3, with the surface line reaching x = 70 and 220 m; with eight-point
 /// interpolation its end receivers read the side layers' damped values and the check gave
@@ -1242,8 +1276,10 @@ fn the_inversion_gradient_matches_finite_differences() {
 /// low-pass filtered traces (a frequency-continuation stage), the cross-correlation time shifts
 /// of filtered traces, and the time–frequency phase misfit.
 ///
-/// Measured (extrapolated, at the step given): filtered L2 4.4e-7 (h = 1e-2); phase 4.2e-6
-/// (h = 1e-2). The time shifts are checked at a smaller step and against a looser bound: each
+/// Measured (extrapolated, at the step given), with band-limited layers: filtered L2 2.4e-6
+/// (h = 1e-2; 1.9e-4 at 2e-2, 2.3e-5 at 5e-3, 6.2e-5 at 2.5e-3: h⁴ above, round-off below);
+/// phase 6.3e-7 (h = 1e-2); time shifts 1.2e-4 (h = 1e-3). Node-sampled (until 2026-11-22):
+/// 4.4e-7, 4.2e-6 and 1.3e-4. The time shifts are checked at a smaller step and against a looser bound: each
 /// trace's shift is only piecewise smooth, its derivative jumping where the correlation's peak
 /// moves to the next lag, and steps from 2e-3 up cross such jumps (8.5e-4 at 2e-3, 2.0e-3 at
 /// 3e-3); below that the check sits on a floor of round-off in the shifts of single-precision
@@ -1279,9 +1315,12 @@ fn the_misfits_gradients_match_finite_differences() {
 /// one window (which changes what they measure: the predicted change down the gradient is
 /// -9.47e-5 against -1.41e-4 without it).
 ///
-/// Measured (extrapolated): muted, filtered L2 8.7e-7 (h = 1e-2); windowed time shifts 2.6e-5
-/// (h = 1e-3; 1.0e-5 at 2e-3, 1.4e-4 at 5e-4, the shifts' round-off floor as without a window,
-/// 3.0e-5 to 9.9e-5). With the mute after the filter, as first written, the L2 check gave
+/// Measured (extrapolated), with band-limited layers: muted, filtered L2 1.9e-5 (h = 1e-2;
+/// 1.3e-4 at 2e-2, 2.5e-5 at 5e-3, 5.3e-5 at 2.5e-3: the extrapolation's h⁴ error above,
+/// round-off growing as 1/h below, about equal at 1e-2); windowed time shifts 9.1e-5
+/// (h = 1e-3), the shifts' round-off floor. Node-sampled (until 2026-11-22): 8.7e-7, a lucky
+/// cancellation within the same band, and 2.6e-5 (1.0e-5 at 2e-3, 1.4e-4 at 5e-4, 3.0e-5 to
+/// 9.9e-5 without a window). With the mute after the filter, as first written, the L2 check gave
 /// 1.5e-5 at h = 1e-2 and 2.2e-5 to 3.8e-5 at smaller steps; both orders transpose exactly
 /// (a unit test), and why the order changed the check's noise was not traced.
 #[test]
