@@ -93,6 +93,9 @@ drift:
 mac:
     MACOSX_DEPLOYMENT_TARGET=11.0 cargo zigbuild --release --target aarch64-apple-darwin --bin vibe-rations
     mkdir -p out/mac
+    # macOS kills a signed binary rewritten in place (its code-signing cache keeps the old
+    # file's), so the new one goes in as a new file.
+    rm -f out/mac/vibe-rations
     cp "${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release/vibe-rations" out/mac/
 
 # rustfmt and clippy with -D warnings
@@ -177,18 +180,19 @@ check config:
 
 # Starts `vibe-rations serve` on a remote machine with Docker (or Podman: ENGINE=podman), from
 # the published image, if it isn't running already. Its runs and results live in the
-# vibe-rations volume there; it listens on that machine's localhost only.
+# vibe-rations volume there, or where the machine's /etc/vibe-rations.conf says (`data=...`,
+# as `deploy/simulation-host/setup.sh` writes it); it listens on that machine's localhost only.
 [doc("On the host: start the solver server on a remote machine, e.g. `just remote-up me@box`")]
 [group("remote")]
 remote-up host image="ghcr.io/vehagn/vibe-rations:main":
-    ssh {{ host }} '{{ engine }} start vibe-rations 2>/dev/null || {{ engine }} run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v vibe-rations:/data {{ image }}'
+    ssh {{ host }} 'data=vibe-rations; [ -r /etc/vibe-rations.conf ] && . /etc/vibe-rations.conf; {{ engine }} start vibe-rations 2>/dev/null || {{ engine }} run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v "$data":/data {{ image }}'
 
 # Replaces the remote server with the image's latest version. Runs in progress there are lost;
-# finished runs' results stay in the volume.
+# finished runs' results stay where they were.
 [doc("On the host: update the remote solver server to the latest image")]
 [group("remote")]
 remote-update host image="ghcr.io/vehagn/vibe-rations:main":
-    ssh {{ host }} '{{ engine }} pull {{ image }} && {{ engine }} rm -f vibe-rations && {{ engine }} run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v vibe-rations:/data {{ image }}'
+    ssh {{ host }} 'data=vibe-rations; [ -r /etc/vibe-rations.conf ] && . /etc/vibe-rations.conf; {{ engine }} pull {{ image }} && {{ engine }} rm -f vibe-rations && {{ engine }} run -d --name vibe-rations --restart unless-stopped -p 127.0.0.1:8088:8088 -v "$data":/data {{ image }}'
 
 # Forwards a local port to the remote server for the web page (and for the CLI in the dev
 # container, at http://host.docker.internal:<port>). Stop it with Ctrl-C.

@@ -346,7 +346,10 @@ just remote-up me@bigbox
 ```
 
 That starts the image `ghcr.io/vehagn/vibe-rations` there, with the runs and their results
-in a volume. `just remote-update me@bigbox` replaces it with the latest image (runs in
+in a volume, or where the machine's `/etc/vibe-rations.conf` puts them (`data=/srv/data/runs`).
+`deploy/simulation-host/setup.sh` sets a Debian machine up for all of it (Docker, the server,
+a clone with its dev container for the studies), and its README records the machine it was
+written for, gauss. `just remote-update me@bigbox` replaces it with the latest image (runs in
 progress are lost; results are kept). Without `just`, it is one `docker run`:
 
 ```bash

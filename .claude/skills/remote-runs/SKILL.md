@@ -10,6 +10,12 @@ description: Run vibe-rations simulations on another machine - `vibe-rations ser
 and SSH tunnels reach it. The README's "Remote runs" has the user's view; this is for working
 on it.
 
+The maintainer's simulation machine is `gauss` (`ssh gauss`; 6-core Xeon, 62 GiB, Debian 13):
+the server runs there, its runs in `/srv/data/runs`, and a clone with its dev container in
+`/srv/data/vibe-rations` runs the studies (`ssh gauss 'cd /srv/data/vibe-rations && just in
+<recipe>'`). `deploy/simulation-host/` has its setup script and the record of what it got;
+add to that record whatever you install there.
+
 ## Try it locally
 
 ```bash

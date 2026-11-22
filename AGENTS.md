@@ -97,6 +97,8 @@ docs/
   research-log.md experiments, results and decisions, for the paper
   analysis/      von Neumann analysis (pure Python): dispersion, time-space, time dispersion
 deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
+deploy/simulation-host/  setup.sh for a Debian machine that runs simulations, and the record of
+                 gauss, the one it was written for
 .github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
@@ -147,6 +149,17 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
+
+- **gauss, the simulation machine** (`deploy/simulation-host/`, 2026-11-22). A 6-core Xeon
+  E5-1650 v3 with 62 GiB on Debian 13, reached as root by `ssh gauss`: the solver server
+  (`--remote gauss`, `just tunnel gauss`) with its runs on the 2 TB data disk
+  (`/srv/data/runs`), and a clone with its dev container in `/srv/data/vibe-rations` for the
+  studies, which can use the memory the Mac's container hasn't got (the whole Marmousi2
+  section's gradient, 15 GiB). It runs `examples/layered.toml` at 90 Mcells/s from the image,
+  104 built for its CPU (AVX2), half the Mac's native speed: it frees the Mac rather than
+  outruns it. Record everything installed there in its README; `setup.sh` must stay able to
+  redo it. `just mac` removes the old binary before copying the new: macOS killed one
+  rewritten in place (SIGKILL, exit 137).
 
 - **Sources and receivers sit where they are** (`Grid::coordinates`, `Solver::axis_weights`,
   `Solver::field_weights`, `Stencil::interpolation_at`; the log's "Sources and receivers
