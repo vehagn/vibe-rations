@@ -1,6 +1,7 @@
 # Development container for vibe-rations: the Rust toolchain with the WebAssembly target,
-# wasm-bindgen and wasm-opt for the web app, just, and a zsh. Bump the pinned Rust version
-# here and in rust-toolchain.toml together, then rebuild.
+# wasm-bindgen and wasm-opt for the web app, zig and cargo-zigbuild to build the command line
+# for macOS, just, and a zsh. Bump the pinned Rust version here and in rust-toolchain.toml
+# together, then rebuild.
 FROM docker.io/library/rust:1.99.1-trixie
 
 ARG USERNAME=dev
@@ -10,21 +11,37 @@ ARG WASM_BINDGEN_VERSION=0.2.130
 # For the web app's threaded build (a std rebuilt with atomics); WASM_THREADS_TOOLCHAIN in
 # web/build.sh must name the same one.
 ARG WASM_THREADS_TOOLCHAIN=nightly-2026-11-18
+# zig links the command-line program for macOS on Apple silicon (`just mac`, through
+# cargo-zigbuild), so nothing need be installed on the host. The zig project publishes zig on
+# PyPI as `ziglang`; the hashes are its Linux wheels' (x86_64, aarch64): bump them together.
+ARG ZIG_VERSION=0.17.1
+ARG ZIG_WHEEL_SHA256="ea6cc5d87b033cf0aedfbc8f9549a908cae6c50ac31f1698188fa48a74524b54 b7c5f02fccd40f89b999ee16a1f5ddced56e6182370f8affe494bcf8a28cf07e"
+ARG CARGO_ZIGBUILD_VERSION=0.24.1
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN apt-get update; \
     apt-get install -y --no-install-recommends \
-      bash-completion binaryen file htop jq just less locales procps sudo tree vim zsh; \
+      bash-completion binaryen file htop jq just less locales procps python3-venv sudo tree \
+      vim zsh; \
     rm -rf /var/lib/apt/lists/*; \
     sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen; \
     locale-gen
 
+RUN python3 -m venv /opt/zig; \
+    hashes=""; for h in ${ZIG_WHEEL_SHA256}; do hashes+=" --hash=sha256:${h}"; done; \
+    echo "ziglang==${ZIG_VERSION}${hashes}" > /tmp/zig.txt; \
+    /opt/zig/bin/pip install --no-cache-dir --require-hashes -r /tmp/zig.txt; \
+    rm /tmp/zig.txt; \
+    ln -s /opt/zig/lib/python3*/site-packages/ziglang/zig /usr/local/bin/zig; \
+    zig version
+
 RUN rustup component add clippy rustfmt rust-src rust-analyzer; \
-    rustup target add wasm32-unknown-unknown; \
+    rustup target add wasm32-unknown-unknown aarch64-apple-darwin; \
     rustup toolchain install "${WASM_THREADS_TOOLCHAIN}" --profile minimal \
       --component rust-src --target wasm32-unknown-unknown; \
     cargo install --locked "wasm-bindgen-cli@${WASM_BINDGEN_VERSION}"; \
+    cargo install --locked "cargo-zigbuild@${CARGO_ZIGBUILD_VERSION}"; \
     rm -rf "${CARGO_HOME}/registry/"* "${CARGO_HOME}/git"
 
 # Non-root user with passwordless sudo. Directories that compose mounts volumes onto

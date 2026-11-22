@@ -34,6 +34,7 @@ opens a shell there instead.
 | `just marmousi2` | Fetch Marmousi2 (467 MB, once) and make its model files, for `examples/marmousi2*` | ~2 min |
 | `just marmousi2-bench` | Time forward and gradient runs on it at orders 4 and 8, with their memory | ~10 min |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
+| `just mac` | Cross-compile the command line for macOS on Apple silicon into `out/mac/vibe-rations`, to run on the host | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
 
 ## Skills
@@ -144,6 +145,20 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
+
+- **Run natively on the host** (`just mac`, 2026-11-22). The dev container is a Linux VM
+  limited to 4 CPUs and 8 GiB of the maintainer's 10-core Mac, so long runs, gradients and
+  inversions are faster on the host. `just in mac` cross-compiles the CLI for
+  `aarch64-apple-darwin` in the container with `cargo zigbuild` (zig as the linker, pinned in
+  `.devcontainer/Containerfile` from PyPI's `ziglang` by version and wheel hashes, since no
+  Apple SDK is needed for a pure-Rust binary that links only libSystem), with
+  `MACOSX_DEPLOYMENT_TARGET=11.0`; then `out/mac/vibe-rations <command>` on the host. zig
+  signs it ad hoc, which arm64 macOS requires. rustc warns that it can't find the macOS SDK
+  (`xcrun`): expected. Keep the dependencies pure Rust (no TLS, no C) or this needs the SDK.
+  `just lint` clippy-checks the macOS target too, since `memory::available` has a macOS
+  branch (`vm_stat`: free, inactive, speculative and purgeable pages) that Linux builds never
+  compile. Not yet measured on the Mac: its speed against the container's, and whether its
+  traces match the container's bit for bit (same arm64 code; they should).
 
 - **The gradient against the exact kernels** (`tests/gradient_accuracy.rs`,
   `tests/common/stokes.rs`; the log's 2026-11-21 entry). In a homogeneous full space the

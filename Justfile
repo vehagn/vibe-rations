@@ -85,12 +85,22 @@ study *args:
 drift:
     cargo test --release --test reconstruction -- --ignored --nocapture --test-threads 1
 
+# Builds the command-line program for macOS on Apple silicon into out/mac/vibe-rations, to run
+# natively on the host with all its cores and memory: `out/mac/vibe-rations invert ...`. Cross-
+# compiled here, linked by zig; rustc's warning that it can't find the macOS SDK is expected.
+[group("build")]
+mac:
+    MACOSX_DEPLOYMENT_TARGET=11.0 cargo zigbuild --release --target aarch64-apple-darwin --bin vibe-rations
+    mkdir -p out/mac
+    cp "${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release/vibe-rations" out/mac/
+
 # rustfmt and clippy with -D warnings
 [group("check")]
 lint:
     cargo fmt --check
     cargo clippy --release --workspace --all-targets -- -D warnings
     cargo clippy --release --package vibe-rations-web --target wasm32-unknown-unknown -- -D warnings
+    cargo clippy --release --package vibe-rations --target aarch64-apple-darwin --all-targets -- -D warnings
 
 # Formats the code.
 [group("check")]
