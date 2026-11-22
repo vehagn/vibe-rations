@@ -42,6 +42,23 @@ All by `setup.sh` (it was first done by hand, the same steps):
   once in the clone before the line was metered, so the workspace's crates are in the dev
   container's cache (they come again only when `Cargo.lock` changes).
 
+### Downloaded while unmetered (2026-11-22)
+
+Before the metered line, `prefetch.sh` fetched what later work may need:
+
+- `rsync` 3.5.0+ds1-0+deb13u2, `tmux` 3.5a-3, `htop` 3.4.1-5 and `time` 1.9-0.2 (no updates
+  were pending; no reboot needed).
+- Every crate in `Cargo.lock`, in the dev container's cache.
+- Marmousi2's SEG-Y (446 MB, `data/marmousi2`) and every model file `convert.sh` makes, plus
+  `examples/marmousi2/25m-smooth`, the whole section smoothed over 250 m (`whole.toml`'s
+  start).
+- The command line built for gauss's CPU (`-C target-cpu=native`: AVX2) as
+  `/srv/data/bin/vibe-rations-native`, 15% faster than the image's.
+- numpy 2.5.5 and matplotlib 3.11.2 in `out/venv` in the clone, for the dev container's
+  Python (`out/venv/bin/python`).
+- The solver image built from the clone once (`vibe-rations-solver:local`), which caches its
+  toolchains, the WebAssembly tools and the Debian base for later builds.
+
 Left alone: users (everything runs as root or in containers), SSH, the firewall (none; the
 server listens on localhost only). Nothing updates by itself: `unattended-upgrades` isn't
 installed and no `APT::Periodic` setting is, so `apt-daily.timer` does nothing; update by hand
@@ -64,8 +81,9 @@ maths library rounds its last bit its own way).
 
 gauss's line is metered, so what crosses it is kept small, within reason:
 
-- **Marmousi2.** Don't run `just marmousi2` there (467 MB of SEG-Y). Send the converted
-  model files from a checkout that has them, 1.4 MB:
+- **Marmousi2.** The SEG-Y and its model files are there (above). On a machine without
+  them, don't run `just marmousi2` over a metered line (467 MB): send the converted model
+  files from a checkout that has them, 1.4 MB:
 
   ```bash
   cd examples/marmousi2 && tar czf - 25m 25m-* 50m | ssh gauss 'tar xzf - -C /srv/data/vibe-rations/examples/marmousi2 && chown -R 1000:1000 /srv/data/vibe-rations/examples/marmousi2'

@@ -53,5 +53,5 @@ fn every_example_sets_up_cleanly() {
 #[test]
 fn the_marmousi2_examples_parse_and_set_up_once_made() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/marmousi2");
-    assert_eq!(check(&dir).0, 3);
+    assert_eq!(check(&dir).0, 5);
 }

@@ -1,0 +1,75 @@
+# The whole Marmousi2 section, 17 km by 3.5 km, extruded 5 km along y: an elastic FWI sized
+# to use about 48 GiB on gauss (`vibe-rations memory --invert`). Starts from the section
+# smoothed over 250 m (25m-smooth, made with `vibe-rations extrude ... --smooth 250`), with
+# the true density; inverts vp and vs from nine shots' vx and vz on the seafloor, by L2 with
+# the slow seafloor waves muted (the central part's study, tests/marmousi2_study.rs).
+[grid]
+points = [681, 201, 141]
+spacing = 25.0
+[time]
+duration = 3.5
+dt = 0.002
+[boundary]
+pml_width = 16
+pml_vp_max = 4700.0
+[scheme]
+order = 8
+optimised_for = 4.2
+[model.files]
+vp = "25m-smooth/vp.npy"
+vs = "25m-smooth/vs.npy"
+rho = "25m/rho.npy"  # as it is: only vp and vs are inverted
+[[source]]
+position = [500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [2500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [4500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [6500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [8500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [10500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [12500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [14500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [16500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[receivers]
+components = ["vx", "vz"]
+[[receivers.line]]
+from = [500.0, 2500.0, 475.0]
+to = [16500.0, 2500.0, 475.0]
+count = 641
+[output]
+dir = "out/marmousi2/whole"
+[inversion]
+observed = "../../out/marmousi2/whole-observed"
+parameters = ["vp", "vs"]
+iterations = 5
+fixed_above = 500.0  # the water, and the seafloor's first solid nodes, where the receivers are
+[[inversion.mute]]  # the slow seafloor waves: keep what arrives before a 600 m/s line
+keep = "before"
+velocity = 600.0
+delay = 0.87
+taper = 0.42

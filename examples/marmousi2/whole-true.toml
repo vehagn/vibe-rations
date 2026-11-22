@@ -1,0 +1,61 @@
+# The true model of whole.toml, for its observed traces: `vibe-rations run --shots whole-true.toml`.
+[grid]
+points = [681, 201, 141]
+spacing = 25.0
+[time]
+duration = 3.5
+dt = 0.002
+[boundary]
+pml_width = 16
+pml_vp_max = 4700.0
+[scheme]
+order = 8
+optimised_for = 4.2
+[model.files]
+vp = "25m/vp.npy"
+vs = "25m/vs.npy"
+rho = "25m/rho.npy"  # as it is: only vp and vs are inverted
+[[source]]
+position = [500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [2500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [4500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [6500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [8500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [10500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [12500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [14500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[[source]]
+position = [16500.0, 2500.0, 50.0]
+explosion = 1e12
+wavelet = { kind = "ricker", frequency = 1.2 }
+[receivers]
+components = ["vx", "vz"]
+[[receivers.line]]
+from = [500.0, 2500.0, 475.0]
+to = [16500.0, 2500.0, 475.0]
+count = 641
+[output]
+dir = "out/marmousi2/whole-observed"
