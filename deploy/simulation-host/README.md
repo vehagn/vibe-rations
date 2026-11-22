@@ -76,8 +76,9 @@ gauss's line is metered, so what crosses it is kept small, within reason:
   the Debian base (79 MB unpacked) only when CI's base image has changed. Update when there
   is something to have, not by habit; don't prune Docker's images or build cache, which would
   all come again.
-- **The page.** Each load through the tunnel downloads the page again, 2.6 MB (the server
-  sends `no-cache` without a validator), and watching a run keeps fetching its pictures for
+- **The page.** The first load through the tunnel downloads it, 2.6 MB; later loads ask
+  whether each file has changed and get an empty 304 if not (ETags in the server's
+  page route), until a new image changes them. Watching a run keeps fetching its pictures for
   as long as the page is open. Follow long runs with `vibe-rations remote gauss list` (a line of JSON) and leave
   the page closed; a run nobody watches also runs about 12% faster.
 - **Results.** `run --remote` fetches all of a run's outputs, snapshots included. For long

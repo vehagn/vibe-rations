@@ -441,7 +441,9 @@ doesn't show.
   whole headless run (and a first measurement, which found no difference, was an artifact
   of picture requests starving the same way). Status lives in `Run::shared`, never held
   while stepping; requests for the wavefield go through `Run::state`, which registers them
-  so the scheduler lets them in before its next chunk.
+  so the scheduler lets them in before its next chunk. The page's files carry ETags (length
+  and modification time) and come back as an empty 304 when unchanged, for metered lines;
+  a 304 has no Content-Type, since caches take its headers into the response they keep.
 - **Memory is counted before it is allocated** (`memory::estimate`, `vibe-rations memory`).
   It shares `simulation::timing` with `Simulation::new`, takes the model's extremes from
   `Model::extremes` (layers, spheres, or `.npy` files streamed), and must stay exact:

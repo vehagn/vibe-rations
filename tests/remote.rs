@@ -178,6 +178,66 @@ fn uploads_model_files() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// The page's files carry ETags, and a browser revalidating one it has (the server sends
+/// `no-cache`) gets an empty 304, without a Content-Type a cache would take into the file it
+/// keeps; a changed file gets a new tag and comes whole.
+#[test]
+fn the_page_is_revalidated_not_sent_again() {
+    let dir = scratch("etag");
+    let page = dir.join("page");
+    fs::create_dir_all(&page).unwrap();
+    fs::write(page.join("index.html"), "<!doctype html><title>t</title>").unwrap();
+    fs::write(page.join("app.wasm"), vec![0u8; 4096]).unwrap();
+    let server = Server::start(&dir.join("data"), Some(&page));
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let url = format!("{}/app.wasm", server.url);
+    let first = agent.get(&url).call().unwrap();
+    assert_eq!(first.status().as_u16(), 200);
+    assert_eq!(first.headers()["content-type"], "application/wasm");
+    let tag = first.headers()["etag"].to_str().unwrap().to_string();
+    assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
+    // Revalidated: nothing but the tag.
+    let mut again = agent
+        .get(&url)
+        .header("If-None-Match", &tag)
+        .call()
+        .unwrap();
+    assert_eq!(again.status().as_u16(), 304);
+    assert_eq!(again.headers()["etag"], tag.as_str());
+    assert!(!again.headers().contains_key("content-type"));
+    assert!(again.body_mut().read_to_vec().unwrap().is_empty());
+    // Weak or listed among others, it still matches; another tag doesn't.
+    for header in [format!("W/{tag}"), format!("\"x\", {tag}"), "*".to_string()] {
+        let r = agent
+            .get(&url)
+            .header("If-None-Match", &header)
+            .call()
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 304, "{header}");
+    }
+    let r = agent
+        .get(&url)
+        .header("If-None-Match", "\"x\"")
+        .call()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    // A new build of the file: a new tag, and the file.
+    fs::write(page.join("app.wasm"), vec![1u8; 5000]).unwrap();
+    let mut changed = agent
+        .get(&url)
+        .header("If-None-Match", &tag)
+        .call()
+        .unwrap();
+    assert_eq!(changed.status().as_u16(), 200);
+    assert_ne!(changed.headers()["etag"], tag.as_str());
+    assert_eq!(changed.body_mut().read_to_vec().unwrap().len(), 5000);
+    drop(server);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// What the page does: create a run held at step 0, look at it, run it, pause and resume it,
 /// and pick it up again from another connection; and what a restart leaves.
 #[test]

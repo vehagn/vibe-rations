@@ -444,6 +444,10 @@ enum Reply {
     Json(serde_json::Value),
     Bytes(&'static str, Vec<u8>, Vec<(&'static str, String)>),
     File(File, &'static str),
+    /// One of the page's files, with its ETag.
+    Page(File, &'static str, String),
+    /// The page's file the client has, by its ETag.
+    NotModified(String),
     Empty,
 }
 
@@ -466,6 +470,7 @@ fn handle(server: &Server, mut request: Request) {
     if server.log {
         let code = match &reply {
             Ok(Reply::Empty) => 204,
+            Ok(Reply::NotModified(_)) => 304,
             Ok(_) => 200,
             Err(Error(code, _)) => *code,
         };
@@ -482,6 +487,20 @@ fn handle(server: &Server, mut request: Request) {
         Ok(Reply::Bytes(kind, body, headers)) => respond(request, 200, kind, body, headers),
         Ok(Reply::File(file, kind)) => {
             let response = with_headers(Response::from_file(file), kind, vec![]);
+            request.respond(response)
+        }
+        Ok(Reply::Page(file, kind, tag)) => {
+            let response = with_headers(Response::from_file(file), kind, vec![("ETag", tag)]);
+            request.respond(response)
+        }
+        Ok(Reply::NotModified(tag)) => {
+            // No Content-Type: a cache takes the 304's headers into the response it keeps.
+            let mut response = Response::empty(304);
+            for (name, value) in [("ETag", tag.as_str()), ("Cache-Control", "no-cache")] {
+                if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                    response.add_header(h);
+                }
+            }
             request.respond(response)
         }
         Ok(Reply::Empty) => respond(request, 204, "text/plain", vec![], vec![]),
@@ -509,7 +528,8 @@ fn respond(
 }
 
 /// The content type, the extra headers, and those every response gets: cross-origin isolation
-/// (the page's threads need it), no caching, no sniffing.
+/// (the page's threads need it), revalidation before any reuse (`no-cache`; the page's files
+/// carry ETags, so that costs a 304), no sniffing.
 fn with_headers<R: io::Read>(
     mut response: Response<R>,
     kind: &str,
@@ -709,7 +729,13 @@ fn route(
             };
             let path = inside(page, &rel)?;
             let file = File::open(&path).map_err(|_| not_found("such file"))?;
-            Ok(Reply::File(file, content_type(&path)))
+            // Browsers revalidate (no-cache), and a file they have comes back as a 304: over
+            // a tunnel on a metered line the page (2.6 MB) costs a few hundred bytes a load.
+            match etag(&file) {
+                Some(tag) if has_tag(request, &tag) => Ok(Reply::NotModified(tag)),
+                Some(tag) => Ok(Reply::Page(file, content_type(&path), tag)),
+                None => Ok(Reply::File(file, content_type(&path))),
+            }
         }
         _ => Err(Error(405, "method not allowed".into())),
     }
@@ -1085,6 +1111,29 @@ fn list_files(root: &Path, dir: &Path, out: &mut Vec<serde_json::Value>) {
             }));
         }
     }
+}
+
+/// A file's ETag: its length and modification time, which change with every build of the
+/// page (a new image), so a client's copy is current if its tag is.
+fn etag(file: &File) -> Option<String> {
+    let meta = file.metadata().ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!("\"{:x}-{:x}\"", meta.len(), modified.as_nanos()))
+}
+
+/// Whether the request's If-None-Match names `tag` (or any tag, `*`), weak or not.
+fn has_tag(request: &Request, tag: &str) -> bool {
+    request
+        .headers()
+        .iter()
+        .filter(|h| h.field.equiv("If-None-Match"))
+        .flat_map(|h| h.value.as_str().split(','))
+        .map(|t| t.trim())
+        .any(|t| t == "*" || t.strip_prefix("W/").unwrap_or(t) == tag)
 }
 
 fn content_type(path: &Path) -> &'static str {
