@@ -276,6 +276,47 @@ fn a_force_on_the_free_surface_matches_lambs_problem() {
     }
 }
 
+/// With `[boundary] surface_slope`, sources and receivers near the free surface read the
+/// evenly mirrored fields continued with their slope instead of across the mirror's kink
+/// (`Solver::continue_with_slope`): sources stay the transpose of receivers, between nodes and
+/// just below the surface too. Measured at order 8: reciprocity up to 1.1e-6 of the peak (7.3e-7
+/// without: the slope's weights add single-precision round-off), the dot-product test 1.6e-8
+/// on the nodes and 9.6e-8 between them.
+#[test]
+fn the_surface_slope_keeps_sources_the_transpose_of_receivers() {
+    reciprocity(8, true);
+    for shift in [[0.0; 3], [3.7, -2.4, 4.1]] {
+        let e = dot_product(8, "rigid", true, "white", 1, shift, true);
+        assert!(e < 1.5e-7, "shifted {shift:?}: {e}");
+    }
+}
+
+/// Lamb's problem at 5 m with `[boundary] surface_slope`: the Rayleigh wave's largest swing,
+/// 5.2–5.4% too large read across the mirror's kink, is within half a per cent, and the
+/// misfits fall from 6.4, 7.8, 9.5 and (diagonal) 8.1% to 4.3, 6.2, 8.2 and 6.5%. What is
+/// left is mostly the Rayleigh wave's speed, about 0.3% fast here (the research log's
+/// 2026-11-23 entries).
+#[test]
+fn the_surface_slope_takes_the_kink_out_of_lambs_problem() {
+    use common::lamb::survey;
+    let sim = simulate(&survey::config(5.0, "", "").replace(
+        "free_surface = true",
+        "free_surface = true\nsurface_slope = true",
+    ));
+    for ([r, e, _, _, swing], limit) in survey::compare(&sim)
+        .into_iter()
+        .zip([0.044, 0.063, 0.084, 0.067])
+    {
+        println!(
+            "lamb with the surface slope, h = 5 m, vz at {r:.1} m: misfit {:.2}%, largest swing {:+.2}%",
+            100.0 * e,
+            100.0 * (swing - 1.0)
+        );
+        assert!(e < limit, "{r} m: {e}");
+        assert!((swing - 1.0).abs() < 0.005, "{r} m: swing {swing}");
+    }
+}
+
 /// Plane P and S waves at normal incidence on a planar interface between two layers, against
 /// the exact reflection and transmission (`common::plane`; R = -0.304 for P, -0.238 for S).
 /// This checks the material averaging where a layer meets another: density at the
@@ -453,11 +494,11 @@ fn swapping_source_and_receiver_gives_the_same_trace() {
     // Longer stencils reach further above the free surface; the mirroring must stay
     // self-adjoint for every order.
     for order in [4, 8] {
-        reciprocity(order);
+        reciprocity(order, false);
     }
 }
 
-fn reciprocity(order: usize) {
+fn reciprocity(order: usize, surface_slope: bool) {
     let model = format!(
         r#"
         [grid]
@@ -467,6 +508,7 @@ fn reciprocity(order: usize) {
         duration = 0.5
         [boundary]
         pml_width = 10
+        surface_slope = {surface_slope}
         [scheme]
         order = {order}
         [[model.layer]]
@@ -528,8 +570,9 @@ fn reciprocity(order: usize) {
                 .iter()
                 .zip(&ba)
                 .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
+            let slope = if surface_slope { ", surface slope" } else { "" };
             println!(
-                "reciprocity, order {order}{label}, force {} at A to {} at B: worst difference {:.2e} of peak",
+                "reciprocity, order {order}{slope}{label}, force {} at A to {} at B: worst difference {:.2e} of peak",
                 ["x", "y", "z"][i],
                 components[j].name(),
                 worst / peak
@@ -629,7 +672,7 @@ fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
             ("cpml", true, "band-limited", 2),
             ("cpml", false, "white", 1),
         ] {
-            let e = dot_product(order, walls, free_surface, signal, every, [0.0; 3]);
+            let e = dot_product(order, walls, free_surface, signal, every, [0.0; 3], false);
             // Measured 2.3e-8 to 8.3e-8: single precision over about 1300 steps. Leaving the
             // adjoint's initial pressure state unmirrored gives 2.4e-7 to 2.8e-6.
             assert!(e < 1.5e-7, "order {order}, {walls}, {signal}: {e}");
@@ -643,7 +686,7 @@ fn the_adjoint_run_is_the_transpose_of_the_forward_run() {
 #[test]
 fn the_adjoint_run_is_the_transpose_of_the_forward_run_between_nodes() {
     for (walls, signal, every) in [("rigid", "white", 1), ("cpml", "band-limited", 2)] {
-        let e = dot_product(8, walls, true, signal, every, [3.7, -2.4, 4.1]);
+        let e = dot_product(8, walls, true, signal, every, [3.7, -2.4, 4.1], false);
         assert!(e < 1.5e-7, "{walls}, {signal}: {e}");
     }
 }
@@ -691,6 +734,7 @@ fn dot_product(
     signal: &str,
     every: usize,
     shift: [f64; 3],
+    surface_slope: bool,
 ) -> f64 {
     let pml = if walls == "rigid" { 0 } else { 10 };
     // Without a free surface the top 100 m are an absorbing layer, and the shallow receivers
@@ -723,6 +767,7 @@ fn dot_product(
         [boundary]
         pml_width = {pml}
         free_surface = {free_surface}
+        surface_slope = {surface_slope}
         [scheme]
         order = {order}
         [output]

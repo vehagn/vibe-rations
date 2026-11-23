@@ -308,7 +308,9 @@ impl Simulation {
             vp_max: pml_vp,
             sponge: b.pml_sponge,
         };
-        let solver = Solver::new(model, dt, w, b.free_surface, &pml).with_stencil(stencil);
+        let solver = Solver::new(model, dt, w, b.free_surface, &pml)
+            .with_stencil(stencil)
+            .with_surface_slope(b.surface_slope);
         // Whether the node nearest a point is in an absorbing layer.
         let in_pml = |point: [f64; 3]| {
             point

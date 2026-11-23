@@ -18,7 +18,7 @@ opens a shell there instead.
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
-| `just accuracy [name]` | The stencil order and time step study, Lamb's problem on finer grids, and the free surface's excess by frequency and depth (prints tables) | ~8 min |
+| `just accuracy [name]` | The stencil order and time step study, Lamb's problem on finer grids, and the free surface's excess by frequency and depth (prints tables) | ~11 min |
 | `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
@@ -506,7 +506,21 @@ doesn't show.
   alike; with both at $h/2$, on $v_z$'s own points, there is none. Check such a hypothesis
   with pairs of runs that differ in one end alone: the free surface's other errors cancel in
   the difference. What is left with no kink is a negative error growing about as $f^2$
-  ($-1.2$% at 15 Hz and 5 m) and the speed error, which sets the misfit from 15 Hz up. The P-doubling test's 2.5% is mostly its own reference
+  ($-1.2$% at 15 Hz and 5 m) and the speed error, which sets the misfit from 15 Hz up.
+  **`[boundary] surface_slope`** (opt-in, `Solver::continue_with_slope`; the log's
+  "Continuing the mirrored fields with their slope") folds evenly mirrored fields onto their
+  images as $v(-\zeta) = v(\zeta) - 2\zeta\,\partial_z v(0)$, the slope from six values below:
+  linear in the fields and independent of the model, so sources stay the receivers' transpose
+  and the gradient stays exact, with no change to the gradient code. Each end's excess falls
+  from about 11% to 2.5% per unit $kh_R$, Lamb's misfit at 2.5 m from 3.3–3.8% to 1.3–2.3%.
+  Not the default: per travelling component it beats the mirror up to a vertical wavenumber of
+  about 1.1 per node and loses above it; it reaches six nodes down; and switching would move
+  baselines (P doubling 2.52 → 2.85% at 10 m against its plane-wave reference, the same 2.2%
+  limit on finer grids; reciprocity to about 1.1e-6; the walls-and-water gradient check needs
+  $h = 8 \times 10^{-3}$ for its $h^4$, and the time-shift check $5 \times 10^{-4}$ to miss a
+  lag change). The boundary condition's slope, $-\frac{\lambda}{\lambda + 2\mu}(\partial_x v_x +
+  \partial_y v_y)$, would have none of those faults but depends on the model, so the gradient
+  would need the point operators' derivative (or the ratio pinned, as $\Delta t$ is). The P-doubling test's 2.5% is mostly its own reference
   (doubling is exact only for a plane wave; on finer grids it tends to about 2.2%), so it
   can't show this. Pekeris's formulas came from the article's scanned pages (PMC528118); his
   eq. 66 gives the horizontal component, not implemented.
@@ -554,7 +568,9 @@ doesn't show.
   $C = 0.85$, the time error removed** (fail if they get worse; update this list if they get
   better): explosion vs analytic 0.005–0.007%; point force vs Stokes 0.001–0.005%;
   free-surface P doubling 2.52% (mostly the reference, above); Lamb's problem at 10 m,
-  15.5%, 21.4%, 28.2% at 150, 240, 330 m and 22.5% on the diagonal; a planar interface midway
+  15.5%, 21.4%, 28.2% at 150, 240, 330 m and 22.5% on the diagonal (at 5 m with
+  `surface_slope` 4.3, 6.2, 8.2 and 6.5%, the swing within +0.43%; reciprocity with it
+  $\le 1.1 \times 10^{-6}$, the dot-product test $\le 9.6 \times 10^{-8}$); a planar interface midway
   between nodes, plane P and S waves, direct 0.010% and 0.026%, reflected 0.72% and 7.5%,
   transmitted 0.078% and 0.44%; band-limited, on a node and a quarter of one off, reflected
   1.19% and 12.8% at worst, transmitted 0.125% and 0.76%; CPML reflection
