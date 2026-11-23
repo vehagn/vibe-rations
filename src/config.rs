@@ -143,6 +143,13 @@ pub struct BoundaryConfig {
     /// fastest. An inversion holds it at the starting model's, so the layers don't change
     /// as the model does.
     pub pml_vp_max: Option<f64>,
+    /// Sources and receivers near the free surface read the fields mirrored evenly above it
+    /// continued with their slope at the surface, estimated from the values below, rather
+    /// than as if flat (`Solver::continue_with_slope`). Off by default: it removes the
+    /// mirror's kink, which made a Rayleigh wave about 11% too strong per unit kh at each end
+    /// on the surface, but reaches six nodes down and misreads steep waves near the band's top.
+    #[serde(default)]
+    pub surface_slope: bool,
 }
 
 impl Default for BoundaryConfig {
@@ -156,6 +163,7 @@ impl Default for BoundaryConfig {
             pml_alpha_frequency: None,
             pml_sponge: default_pml_sponge(),
             pml_vp_max: None,
+            surface_slope: false,
         }
     }
 }

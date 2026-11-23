@@ -29,6 +29,8 @@ the traces):
 | `a_force_on_the_free_surface_matches_lambs_problem` | 15.5%, 21.4%, 28.2% (150, 240, 330 m), 22.5% (diagonal) | the free surface's Rayleigh wave: its condition, mirroring, sources and receivers on the surface |
 | `a_planar_interface_reflects_and_transmits_plane_waves` | P direct 0.010%, reflected 0.72%, transmitted 0.078%; S 0.026%, 7.5%, 0.44%; a layer's top on a node reflects $h/v$ early | material averaging (ρ at the velocities, μ harmonically), how layers meet the nodes |
 | `band_limited_interfaces_act_where_they_lie` | P reflected 1.19%, transmitted 0.125%; S 12.8%, 0.76%; shifts under 0.01 $h/v$ | `model::layer_profile`'s band-limited layers, `band_limited_step` |
+| `the_surface_slope_keeps_sources_the_transpose_of_receivers` | reciprocity ≤ 1.1e-6, dot product 1.6e-8 and 9.6e-8 with `surface_slope` | `Solver::continue_with_slope`, how point operators fold across the surface |
+| `the_surface_slope_takes_the_kink_out_of_lambs_problem` | at 5 m with `surface_slope`: 4.3, 6.2, 8.2, 6.5%; largest swing within +0.15 to +0.43% | the slope continuation, its points and reach |
 | `absorbing_layers_reflect_little` (± free surface) | $1.7 \times 10^{-4}$ / $1.9 \times 10^{-3}$ of peak | CPML profiles or memory, the sponge |
 | `a_point_force_between_nodes_matches_stokes_solution` | 0.001–0.007% | interpolation between nodes (`Solver::axis_weights`, `Stencil::interpolation_at`) |
 | `swapping_source_and_receiver_gives_the_same_trace` | $\le 8 \times 10^{-7}$, between nodes too | anything making the scheme non-self-adjoint, or sources no longer the transpose of receivers |

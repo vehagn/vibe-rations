@@ -40,6 +40,11 @@ use crate::fd::Stencil;
 use crate::grid::{AsPoint, Grid};
 use crate::model::Model;
 
+/// How many values below a free surface estimate a field's slope there, one-sidedly
+/// ([`Solver::continue_with_slope`]): fifth order. Four points misread a vertically incident P
+/// wave, whose even profile curves sharply, by 2.3% at kh = 0.6; six by 0.06%.
+const SLOPE_POINTS: usize = 6;
+
 /// The nine wavefield arrays, padded.
 #[derive(Clone, Debug)]
 pub struct Fields {
@@ -262,6 +267,9 @@ pub struct Solver {
     pub stencil: Stencil,
     /// Factors along x, y and z for the plain damping inside the side layers, if any.
     sponge: Option<[Vec<f32>; 3]>,
+    /// Whether point operators continue evenly mirrored fields above a free surface with their
+    /// slope ([`Solver::continue_with_slope`]); off, they read them as mirrored.
+    pub surface_slope: bool,
     /// Steps taken.
     pub step: usize,
 }
@@ -307,8 +315,17 @@ impl Solver {
             psi_s: sizes.map(|s| vec![0.0; s]),
             sponge,
             stencil: Stencil::taylor(4).expect("order 4 exists"),
+            surface_slope: false,
             step: 0,
         }
+    }
+
+    /// Reads and spreads fields mirrored evenly above a free surface continued with their
+    /// slope there ([`Solver::continue_with_slope`]). Set it before making sources and
+    /// receivers: their weights come from it.
+    pub fn with_surface_slope(mut self, on: bool) -> Self {
+        self.surface_slope = on;
+        self
     }
 
     /// Uses `stencil` for the spatial derivatives. The grid's halo must be at least its
@@ -340,6 +357,7 @@ impl Solver {
             psi_s: self.psi_s.each_ref().map(|p| vec![0.0; p.len()]),
             stencil: self.stencil.clone(),
             sponge: self.sponge.clone(),
+            surface_slope: self.surface_slope,
             step: 0,
         }
     }
@@ -822,17 +840,64 @@ impl Solver {
         };
         let at = at as isize;
         let mut out: Vec<(usize, f32)> = Vec::with_capacity(raw.len());
+        let mut folded = 0.0;
         for (offset, w) in raw {
             let m = at + offset;
             // Index -1 - m mirrors index m across the surface (positions -m - ½ and m + ½).
-            let (m, w) = if m < 0 { (-1 - m, parity * w) } else { (m, w) };
+            let (m, w) = if m < 0 {
+                folded += w as f64 * -(m as f64 + 0.5);
+                (-1 - m, parity * w)
+            } else {
+                (m, w)
+            };
             match out.iter_mut().find(|(i, _)| *i == m as usize) {
                 Some((_, sum)) => *sum += w,
                 None => out.push((m as usize, w)),
             }
         }
+        if parity > 0.0 {
+            self.continue_with_slope(&mut out, axis, folded, 0.5);
+        }
         out.retain(|&(_, w)| w != 0.0);
         out
+    }
+
+    /// Values folded onto their mirror images across a free surface, with even parity, read
+    /// the field as if it had no slope there; but velocities and the stresses that don't
+    /// vanish on the surface do have one (σzz = 0 gives ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy)),
+    /// so evenly mirrored they have a kink at the surface, and an interpolation across it
+    /// reads them as if from the mean depth of its folded weights below: vz on the surface
+    /// from 0.34 h below at order 8, a Rayleigh wave 11% too strongly per unit kh at each end
+    /// (the research log's 2026-11-23 entry). The true continuation is v(-ζ) = v(ζ) - 2ζ ∂z v(0)
+    /// to second order, so each weight w folded from -ζ adds -2 w ζ times the slope at the
+    /// surface, `folded` (Σ w ζ, in nodes) in all, the slope estimated one-sidedly from the
+    /// field's first values below (at m + `shift`): linear in the fields and independent of
+    /// the model, so a source, the transpose, stays exact, and so does the gradient. Only with
+    /// [`Solver::surface_slope`]: the estimate reaches six nodes down, so an interface there
+    /// spoils it, and it misreads waves whose vertical wavenumber passes about 1.1 per node.
+    fn continue_with_slope(
+        &self,
+        out: &mut Vec<(usize, f32)>,
+        axis: usize,
+        folded: f64,
+        shift: f64,
+    ) {
+        if !self.surface_slope || folded == 0.0 || axis != 2 {
+            return;
+        }
+        let points: Vec<f64> = (0..SLOPE_POINTS.min(self.grid.n[2]))
+            .map(|m| m as f64 + shift)
+            .collect();
+        for (m, d) in crate::fd::lagrange_slope_at_zero(&points)
+            .into_iter()
+            .enumerate()
+        {
+            let w = (-2.0 * folded * d) as f32;
+            match out.iter_mut().find(|(i, _)| *i == m) {
+                Some((_, sum)) => *sum += w,
+                None => out.push((m, w)),
+            }
+        }
     }
 
     /// Weights on the interior indices along `axis` that interpolate a quantity stored at
@@ -869,10 +934,12 @@ impl Solver {
             crate::fd::lagrange_at_zero(&points)
         };
         let mut out: Vec<(usize, f32)> = Vec::with_capacity(weights.len());
+        let mut folded = 0.0;
         for (m, w) in (lo..=hi).zip(weights) {
             // Above the surface, a node's index -m mirrors m; a value half a node down, at
             // index m (position m + ½), mirrors index -1 - m.
             let (m, w) = if m < 0 {
+                folded += w * -(m as f64 + shift);
                 (if shift == 0.0 { -m } else { -1 - m }, parity * w as f32)
             } else {
                 (m, w as f32)
@@ -881,6 +948,9 @@ impl Solver {
                 Some((_, sum)) => *sum += w,
                 None => out.push((m as usize, w)),
             }
+        }
+        if mirror && parity > 0.0 {
+            self.continue_with_slope(&mut out, axis, folded, shift);
         }
         out.retain(|&(_, w)| w != 0.0);
         out
@@ -1488,6 +1558,49 @@ mod tests {
             free.stagger_weights(2, 5, -1.0),
             open.stagger_weights(2, 5, 1.0)
         );
+    }
+
+    /// With `surface_slope`, fields mirrored evenly are continued above a free surface with
+    /// their slope, so the interpolation reads anything with a slope there, here
+    /// a + b z + c z², exactly, on the surface and between it and the stencil's reach, on half
+    /// nodes and on nodes, at orders 4 and 8. Without it vz on the surface reads b as if from
+    /// 0.34 h below at order 8.
+    #[test]
+    fn interpolation_continues_even_fields_with_their_slope_across_the_free_surface() {
+        let f = |z: f64| 2.0 + 3.0 * z - 0.7 * z * z;
+        for order in [4, 8] {
+            let g = Grid::new([12, 12, 12], [10.0; 3]).with_halo(order / 2);
+            let s = Solver::new(
+                Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
+                1e-3,
+                0,
+                true,
+                &pml(),
+            )
+            .with_stencil(Stencil::taylor(order).unwrap())
+            .with_surface_slope(true);
+            for (shift, x) in [
+                (0.5, 0.0),
+                (0.5, 0.3),
+                (0.5, 1.0),
+                (0.5, 2.7),
+                (0.0, 0.3),
+                (0.0, 1.5),
+            ] {
+                let w = s.axis_weights(2, x, shift, 1.0);
+                let read: f64 = w.iter().map(|&(m, w)| w as f64 * f(m as f64 + shift)).sum();
+                assert!(
+                    (read - f(x)).abs() < 1e-5,
+                    "order {order}, shift {shift}, z {x}: {read} for {}",
+                    f(x)
+                );
+            }
+            // Odd fields vanish on the surface: an odd function is folded exactly as it is.
+            let odd = |z: f64| 3.0 * z;
+            let w = s.axis_weights(2, 0.3, 0.5, -1.0);
+            let read: f64 = w.iter().map(|&(m, w)| w as f64 * odd(m as f64 + 0.5)).sum();
+            assert!((read - odd(0.3)).abs() < 1e-5, "{read}");
+        }
     }
 
     /// The interpolation is as long as the stencil, and exact for polynomials up to one

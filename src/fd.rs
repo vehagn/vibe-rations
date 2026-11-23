@@ -305,6 +305,25 @@ pub fn lagrange_at_zero(points: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Weights that differentiate at 0 the polynomial through values at `points`: the
+/// derivatives at 0 of Lagrange's basis polynomials.
+pub fn lagrange_slope_at_zero(points: &[f64]) -> Vec<f64> {
+    (0..points.len())
+        .map(|i| {
+            (0..points.len())
+                .filter(|&k| k != i)
+                .map(|k| {
+                    let others: f64 = (0..points.len())
+                        .filter(|&j| j != i && j != k)
+                        .map(|j| -points[j] / (points[i] - points[j]))
+                        .product();
+                    others / (points[i] - points[k])
+                })
+                .sum()
+        })
+        .collect()
+}
+
 /// Interpolation weights at 0 for values at `points` (2L of them, the two nearest 0 at
 /// indices L - 1 and L) minimising the weighted largest complex error over the band, exact for
 /// constants and linear functions: Lagrange's weights plus a combination of vectors that

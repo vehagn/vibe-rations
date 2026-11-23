@@ -3200,6 +3200,92 @@ negative amplitude error of case (c), which a free surface of higher order must 
 **Reproduce:** `just accuracy the_free_surface_excess_by_frequency_and_depth` (about four
 minutes on four cores).
 
+## 2026-11-23 — Continuing the mirrored fields with their slope
+
+**Question.** The free surface's amplitude excess is the evenly mirrored $v_z$'s kink, read
+by sources and receivers on the surface (the entry before). Can the point operators read
+across the surface without it, keeping sources the receivers' transpose and the gradient
+exact?
+
+**Method.** Where an interpolation along $z$ folds values from above the surface onto their
+mirror images with even parity (velocities, $\sigma_{xx}$, $\sigma_{yy}$, $\sigma_{xy}$),
+continue the field with its slope instead of flat: $v(-\zeta) = v(\zeta) - 2\zeta\,\partial_z
+v(0)$ to second order, so each folded weight $w$ adds $-2w\zeta$ times the slope, estimated
+one-sidedly from the field's first values below (Lagrange's derivative at the surface;
+`Solver::continue_with_slope`). Odd fields vanish on the surface and keep their fold. The
+operator is linear in the fields and independent of the model, so sources, built from the same
+weights, stay the receivers' transpose and the gradient needs nothing new. The slope of the
+boundary condition, $\partial_z v_z = -\frac{\lambda}{\lambda+2\mu}(\partial_x v_x +
+\partial_y v_y)$, would be exact for every wave but makes the operators depend on the model.
+Points for the slope: the reading error per travelling component $e^{i k_z z}$ (true value 1)
+for order 8's interpolation onto the surface:
+
+| $k_z h$ | mirror | one-sided, 4 points | 6 points |
+|---|---|---|---|
+| 0.2 | 6.9% | 0.05% | 0.02% |
+| 0.4 | 13.8% | 0.72% | 0.24% |
+| 0.6 | 21.0% | 3.5% | 1.7% |
+| 0.8 | 28.5% | 10.6% | 7.6% |
+| 1.0 | 36.5% | 24.6% | 24.3% |
+| 1.2 | 45.4% | 47.9% | 62.2% |
+| 1.4 | 55.2% | 82.4% | 134% |
+
+and on an even profile $\cos(k_z z)$, which a vertically incident P wave has (true slope 0,
+which the mirror reads exactly): 4 points $-2.3$% at $k_z h = 0.6$, 6 points 0.06%. Six
+points, then: better than the mirror up to $k_z h \approx 1.1$, worse above, where at the
+default's sampling only nearly vertical S above about $2.2 f_0$ lies. Measured with
+`the_free_surface_excess_by_frequency_and_depth` (now with (a′) and (b′), (a) and (b) with
+the continuation), Lamb's survey on finer grids and the physics tests, with it on and off.
+
+**Results.**
+
+- *The kink's excess is gone.* Each end's own excess, per unit $kh_R$: 11.1, 11.3, 11.1,
+  10.6 and 9.3% at 7.5–30 Hz read across the mirror; 1.9, 2.4, 2.6, 2.5 and 2.5% with the
+  slope (at 15 Hz +0.72 to +0.78% per end instead of +3.27 to +3.29%). Four points left 1.0%
+  at 7.5 Hz but 5.9% at 30.
+- *Lamb's problem* (order 8; misfit at 150, 240, 330 m and the diagonal; the largest swing):
+
+  | $h$ | mirror | swing | slope | swing |
+  |---|---|---|---|---|
+  | 10 m | 15.5 / 21.4 / 28.2 / 22.6% | +4.8 to +5.0% | 14.6 / 20.8 / 27.2 / 21.9% | −2.9 to −2.7% |
+  | 7.5 m | 10.5 / 13.9 / 18.1 / 14.6% | +5.6 to +5.8% | 9.0 / 12.9 / 17.0 / 13.6% | −1.3 to −1.0% |
+  | 5 m | 6.4 / 7.8 / 9.5 / 8.1% | +5.2 to +5.4% | 4.3 / 6.2 / 8.2 / 6.5% | +0.2 to +0.4% |
+  | 3.75 m | 4.8 / 5.4 / 6.3 / 5.5% | +4.4 to +4.5% | 2.5 / 3.6 / 4.8 / 3.8% | +0.6 to +0.8% |
+  | 2.5 m | 3.3 / 3.5 / 3.8 / 3.5% | +3.3% | 1.3 / 1.7 / 2.3 / 1.8% | +0.7 to +0.8% |
+
+  What is left is mostly the Rayleigh wave's speed (the lateness is unchanged). At 10 and
+  7.5 m the swing is now too small: the negative second-order error that the kink had
+  cancelled shows.
+- *P doubling* (Taylor coefficients, 10, 7.5 and 5 m): 2.53, 2.36 and 2.26% mirrored; 2.86,
+  2.38 and 2.27% with the slope. The same limit, the reference's 2.2%: this spherical wave
+  spreads sideways at the epicentre, so its $v_z$ has a slope there (about 0.75% over the
+  3.4 m the mirror read from), and the mirror's error had partly cancelled the plane-wave
+  reference's. At the default (optimised, 10 m) 2.52% becomes 2.85%.
+- *Sources stay the receivers' transpose*: reciprocity up to $1.1 \times 10^{-6}$ of the peak
+  at order 8 ($7.3 \times 10^{-7}$ mirrored; $1.35 \times 10^{-6}$ at order 4), the
+  dot-product test $1.6 \times 10^{-8}$ on the nodes and $9.6 \times 10^{-8}$ between them.
+  The larger weights add single-precision round-off.
+- *The gradient checks with it on*: still exact, but two need other steps. The walls-and-water
+  $v_p$ check's direction curves more: extrapolated $4.8 \times 10^{-3}$, $2.9 \times 10^{-4}$,
+  $1.2 \times 10^{-5}$ and $3.5 \times 10^{-5}$ at $h$ = 3.2e-2, 1.6e-2, 8e-3 and 4e-3 (the
+  $h^4$ of Richardson's extrapolation, then round-off), so 1.6e-2 fails its 1.5e-4. And the
+  time-shift check's step of 1e-3 crosses a lag change (1.6e-3), 5e-4 doesn't (2.1e-4).
+
+**Decision.** Opt-in, `[boundary] surface_slope = true`, off by default; every baseline is
+unchanged with it off. `the_surface_slope_keeps_sources_the_transpose_of_receivers` and
+`the_surface_slope_takes_the_kink_out_of_lambs_problem` test it on. For surface data, a
+land survey's especially, it removes the free surface's first-order amplitude error; it isn't
+the default because it trades that for an error at the top of the band, reaches six nodes
+down (a near-surface interface within them spoils the slope) and would move the baselines
+above. Making the boundary condition's slope work instead would fix all three, at the cost of
+operators that depend on the model: the gradient would need their derivative (or the ratio
+pinned at the starting model, as $\Delta t$ is). The Rayleigh wave's speed is the free
+surface's remaining first-order concern for misfits.
+
+**Reproduce:** `just accuracy the_free_surface_excess_by_frequency_and_depth` (about seven
+minutes); `just physics surface_slope`; Lamb's finer grids with `surface_slope = true` in
+`survey::config`'s `[boundary]`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -3250,9 +3336,10 @@ minutes on four cores).
   (2026-11-22, "The free surface against Lamb's problem"): the Rayleigh wave misfits by
   15–28% at the default's sampling, about 1% fast (second order) and 3–6% too large. The
   excess is the evenly mirrored $v_z$'s kink, read by sources and receivers on the surface
-  (2026-11-23): about 11% per unit $kh_R$ per end, none with both at $h/2$. Next: continue
-  $v_z$ above the surface with the boundary condition's slope in the surface point operators,
-  and measure what is left. The horizontal component (Pekeris's eq. 66, elliptic integrals)
+  (2026-11-23): about 11% per unit $kh_R$ per end, none with both at $h/2$. Continuing the
+  mirrored fields with a one-sided slope (`surface_slope`, opt-in, 2026-11-23) leaves about
+  2.5%; the boundary condition's slope, model-dependent, would be exact at every wavenumber.
+  Whether either should be the default is open. The horizontal component (Pekeris's eq. 66, elliptic integrals)
   is not measured.
 - **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
   node-sampled layers put an interface midway between nodes (first-order error),

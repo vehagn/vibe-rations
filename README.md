@@ -143,7 +143,7 @@ a free surface $z = 0$ is the surface.
 | `[grid]` | `points = [nx, ny, nz]`, `spacing` (one value or `[dx, dy, dz]`) |
 | `[time]` | `duration`; `dt`, or `courant` (fraction of the stability limit; by default 0.85, or 0.3 at orders above 4 without `remove_time_dispersion`) |
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
-| `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning |
+| `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning; `surface_slope` (default false): sources and receivers near the free surface continue the mirrored fields with their slope (see "Accuracy") |
 | `[[model.layer]]` | Horizontal layers: `top` depth, `vp`, `vs`, `rho`. `vs = 0` is a fluid |
 | `[model]` | `interfaces`: how the layers meet the nodes. `"band-limited"` (default): smoothed to the grid so an interface acts where it lies (see "Accuracy"); `"nodes"`: each node takes the layer it lies in, so an interface acts midway between nodes, up to half a node off |
 | `[model.files]` | Or `.npy` arrays for `vp`, `vs`, `rho`, relative to the configuration: shape (nz, ny, nx), or (nz, nx) for a section the same at every $y$; `vibe-rations extrude` makes them from a 2D SEG-Y section (see "Marmousi2") |
@@ -708,7 +708,12 @@ What higher orders don't fix, from the literature and our measurements:
   and receivers on the surface read $v_z$: mirrored evenly, it has a kink at the surface, so
   each end reads it as if from $0.34\,h$ below and over-reads by about 11% per unit $kh$ of
   the Rayleigh wave (`just accuracy the_free_surface_excess_by_frequency_and_depth`); at
-  $h/2$, where $v_z$ lives, there is none. (The P-doubling test's 2.5%
+  $h/2$, where $v_z$ lives, there is none. `[boundary] surface_slope = true` continues the
+  mirrored fields with their slope, estimated from six values below, instead: about 2.5% per
+  unit $kh$ is left at each end, and Lamb's misfit at 2.5 m falls from 3.3–3.8% to 1.3–2.3%.
+  It is off by default: it misreads waves whose vertical wavenumber passes about 1.1 per node,
+  reaches six nodes down (an interface there spoils it), and moves the P-doubling test from
+  2.52% to 2.85% at 10 m against its approximate reference (the research log, 2026-11-23). (The P-doubling test's 2.5%
   is mostly its reference, which doubles the P wave as if it were plane.)
 - **Absorbing layers.** Longer stencils reach further across the layers' inner edge:
   with the time error kept, reflection rises from $1.5 \times 10^{-4}$ of the peak at
