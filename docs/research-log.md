@@ -2913,6 +2913,72 @@ nothing next to a step.
 **Reproduce:** `just unit fd::tests::interpolates_from_any_offset`; `just physics between`
 (the force, reciprocity, dot-product and gradient checks between nodes).
 
+## 2026-11-23 — Marmousi2 in the literature
+
+**Question.** Which published inversions of Marmousi2 [@martin2006] can ours be set
+against, how do their setups differ from ours, and which comparison is worth making first?
+
+**Method.** The paper library, web searches and Crossref; the full texts that could be
+opened were read (three in the library, three as the publishers' or arXiv's HTML by reading
+agents), the rest as abstracts. `docs/marmousi2-literature.md` has the table, the notes on
+each study and the proposed comparisons; every work is in the bibliography with how deeply
+it was read. Proposed configurations were sized with `vibe-rations memory --invert` (the
+macOS build; the 20 m surveys on a stand-in layered model with $\Delta t$ and `pml_vp_max`
+pinned, which fixes the plan). The effect of the literature's model change on ours was
+measured on `convert.sh`'s files: $v_s$ raised to $v_p/\sqrt3$ wherever it is lower on a
+solid node, i.e. Poisson's ratio capped at 0.25.
+
+**Results.**
+
+- *The elastic Marmousi2 inversions read in full raised $v_s$ first*: Poisson's ratio
+  capped at 0.25 [@kohn2012], set to 0.25 with the water removed [@jeong2012], set to about
+  0.25 [@cao2022]; another runs 20 Hz on a 20 m grid, where the original sediments would get
+  under a point per S wavelength, and doesn't say [@sun2022]. None found says it keeps the
+  soft sediments. The cap changes $v_s$ at 94.7% of the central part's solid nodes (90.7% of
+  the whole section's), by 131%, 98%, 59%, 26% and 9% on average in the bands 475–750,
+  750–1000, 1000–1500, 1500–2500 and 2500–3500 m; the slowest $v_s$ goes from 315 to
+  886 m/s (start: 407 to 953; western part: 345 to 599; whole section: 303 to 599, set by
+  nodes with $v_p$ near 1040 m/s). The capped model has no slow seafloor waves.
+- *They invert 8–20 Hz from 6–10 Hz sources on 20 m grids*, lowest bands from 0.2 Hz
+  [@jeong2012], 0–5 Hz [@cao2022], up to 2 Hz [@kohn2012], 2–4 Hz [@sun2022], 3–5 Hz
+  [@pan2018]; for 40–1300 iterations, from starts as smooth as ours or smoother (Gaussian
+  800 m [@kohn2012], a linear gradient [@jeong2012]).
+- *One reports our measure*: $E_p = \lVert m_p^\text{est} - m_p^\text{true} \rVert /
+  \lVert m_p^0 - m_p^\text{true} \rVert$ was 0.83, 0.72 and 1.04 for $v_p$, $v_s$ and $\rho$
+  after 40 L-BFGS iterations at 3–8 Hz on a 3.4 × 1.2 km section with surface acquisition
+  [@pan2018]. Cao et al. report relative data residuals of 2.25–2.86% [@cao2022]; the rest,
+  pictures. None reports a cosine with the true update or anything by depth.
+- *Soft seabeds*: on a Valhall synthetic elastic inversion needed low frequencies, a
+  hierarchy of parameters and components [@brossier2009b] and, with noise, $\ell_1$
+  [@brossier2010]; ocean-bottom field studies stage $v_p$ from $v_z$ before $v_s$ from PS
+  waves [@sears2008; @sears2010], or mute the Scholte waves [@warner2013; @prieux2013b];
+  surface waves are tapered out [@yuan2014], fitted by envelope first [@yuan2015], or
+  stripped by offset and frequency [@masoni2016].
+- *Memory of the proposed comparisons*: our survey on the capped model is `central.toml`'s
+  grid and pins, 4.41 GiB (2.44 rebuilt); Köhn et al.'s streamer survey at 20 m ($535
+  \times 41 \times 175$ nodes, 3,750 steps, 100 shots) 19 GiB (11 rebuilt), Sun & Demanet's
+  ocean-bottom one (50 shots) 18 GiB (10 rebuilt), about 11 minutes per shot and iteration
+  on four cores; the whole section 48 GiB (22 rebuilt).
+
+**Decision.** The published elastic Marmousi2 successes are on a model with roughly
+doubled shallow $v_s$ and no slow seafloor waves, at frequencies ten times ours, so they
+are not yet comparable with our results. First comparison: our central and western parts
+with the cap applied to truth and start (start capped before smoothing), everything else
+as `central.toml`: five L2 iterations, with and without the mute, error ratio and cosine by
+band. If $v_s$ then moves towards the truth below 750 m, the soft seabed is what separates
+us from the literature, and the soft-seabed studies above say what to try next; if not,
+the band or the iterations do. It needs a cap in `extrude` (applied to the fine samples
+before averaging) or a script; no solver change. Then the literature's band on our survey
+(the capped model holds about 7.9 Hz at 25 m), Pan et al.'s $E_p$ over all free nodes at
+5–40 iterations, and Cao et al.'s residual measure on `whole.toml`'s results. Nothing was
+run; this commit changes only `docs/`.
+
+**Reproduce:** the cap's effect, in numpy (run here with a plain-Python `.npy` reader, the
+host having no numpy): `vs_hard = np.where(vs > 0, np.maximum(vs, vp / np.sqrt(3)), 0)` on
+`examples/marmousi2/25m-central/{vp,vs}.npy` and the others, then the share of solid nodes
+changed and the mean of `vs_hard / vs - 1` by depth band (row × 25 m). The memory:
+`vibe-rations memory <config> --invert` on the configurations the note describes.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2949,7 +3015,10 @@ nothing next to a step.
   L2 with the wavefields rebuilt (`l2_rebuilt`). Not written: the phase misfit with the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
-  which stacks and f-k spectra within 1 km couldn't do; and a better shallow start.
+  which stacks and f-k spectra within 1 km couldn't do; and a better shallow start. Nor
+  the comparison with the literature (2026-11-23, "Marmousi2 in the literature"): the same
+  survey with Poisson's ratio capped at 0.25, as every published elastic Marmousi2
+  inversion read in full did, first.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Measured on Lamb's problem
