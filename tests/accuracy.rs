@@ -366,3 +366,234 @@ fn optimised_coefficients() {
         }
     }
 }
+
+/// Does the free surface's amplitude excess on Lamb's problem come from the kink of the
+/// evenly mirrored vz? Above the surface vz is mirrored evenly, so continued across it vz has
+/// a kink, and interpolating vz onto the surface reads it as if from c·h below (c, the mean
+/// depth of the receiver's weights over h, is 0.34 at order 8). A force on the surface, the
+/// receiver's transpose, acts from the same depth. A Rayleigh wave's vz grows with depth near
+/// the surface (∂z w / w = 0.227 k for ν = ¼), so each end on the surface over-reads by about
+/// 0.227 k c h: at a fixed h, in proportion to frequency. vz itself lives at h/2, so a source
+/// and receivers there interpolate nothing along z and should show none of it.
+///
+/// At h = 5 m, at several frequencies: (a) source and receivers on the surface, as in the
+/// Lamb test; (b) the source on the surface, the receivers at h/2; (c) both at h/2. The exact
+/// answers at h/2 are Pekeris's surface traces taken down by the Rayleigh wave's depth
+/// dependence for ν = ¼, once per end below the surface: exact for the Rayleigh wave, which
+/// carries the swing, an approximation for the much weaker body waves. Each end's own excess
+/// comes from pairs of runs that differ in it alone, receiver by receiver, so whatever else
+/// the free surface gets wrong cancels: the receiver's, (a) - (b); the source's, (b) - (c).
+#[test]
+#[ignore = "a study, not a check: run with `just accuracy`"]
+fn the_free_surface_excess_by_frequency_and_depth() {
+    use common::lamb::{Lamb, gamma, survey};
+    use common::stokes::Ricker;
+    use std::f64::consts::PI;
+    use vibe_rations::solver::Field;
+
+    let h = 5.0;
+    let vs = survey::vs();
+    let c_r = vs / gamma();
+    // The Rayleigh wave's vertical motion at depth z over that at the surface, for k z = x:
+    // (q e^(-q x) - a e^(-s x)) / (q - a), q and s its P and S decay rates over k; its slope
+    // at the surface, over k.
+    let q = (1.0 - (c_r / survey::VP).powi(2)).sqrt();
+    let s = (1.0 - (c_r / vs).powi(2)).sqrt();
+    let a = 2.0 * q / (1.0 + s * s);
+    let rayleigh = |x: f64| (q * (-q * x).exp() - a * (-s * x).exp()) / (q - a);
+    let slope = (a * s - q * q) / (q - a);
+    // A trace taken down to each of `depths` in turn, frequency by frequency (a DFT, zero
+    // padded to twice the length).
+    let deepen = |x: &[f64], dt: f64, depths: &[f64]| -> Vec<f64> {
+        let (n, m) = (x.len(), 2 * x.len());
+        let twiddle: Vec<(f64, f64)> = (0..m)
+            .map(|j| {
+                let angle = -2.0 * PI * j as f64 / m as f64;
+                (angle.cos(), angle.sin())
+            })
+            .collect();
+        let spectrum: Vec<(f64, f64)> = (0..m)
+            .map(|k| {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (t, &v) in x.iter().enumerate() {
+                    let (c, s) = twiddle[(k * t) % m];
+                    re += v * c;
+                    im += v * s;
+                }
+                let f = k.min(m - k) as f64 / (m as f64 * dt);
+                let gain: f64 = depths
+                    .iter()
+                    .map(|&z| rayleigh(2.0 * PI * f / c_r * z))
+                    .product();
+                (re * gain, im * gain)
+            })
+            .collect();
+        (0..n)
+            .map(|t| {
+                let sum: f64 = spectrum
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &(re, im))| {
+                        let (c, s) = twiddle[(k * t) % m];
+                        re * c + im * s
+                    })
+                    .sum();
+                sum / m as f64
+            })
+            .collect()
+    };
+    let peak = |v: &[f64]| {
+        let k = (1..v.len() - 1)
+            .max_by(|&a, &b| v[a].abs().total_cmp(&v[b].abs()))
+            .unwrap();
+        let (a, b, c) = (v[k - 1].abs(), v[k].abs(), v[k + 1].abs());
+        let d = 0.5 * (a - c) / (a - 2.0 * b + c);
+        b - 0.25 * (a - c) * d
+    };
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let range = |v: &[f64]| {
+        let lo = v.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        format!("{:+6.2} to {:+6.2}%", 100.0 * lo, 100.0 * hi)
+    };
+
+    println!(
+        "\nThe free surface's excess on Lamb's problem at h = {h} m, the four receivers' range: \
+         the largest swing's size and the amplitude ⟨v, e⟩/⟨e, e⟩ against the exact answer e, \
+         and the misfit"
+    );
+    println!(
+        "  f0   kh_R  case                         swing              amplitude          misfit"
+    );
+    let mut ends = Vec::new();
+    for f0 in [7.5, 10.0, 15.0, 20.0, 30.0] {
+        let lamb = Lamb {
+            vs,
+            rho: survey::RHO,
+            force: 1e9,
+            wavelet: Ricker {
+                f0,
+                t0: 1.2 / f0,
+                amplitude: 1.0,
+                level: 0,
+            },
+        };
+        let kh = 2.0 * PI * f0 / c_r * h;
+        // The Rayleigh wave past the farthest receiver, and the wavelet's length.
+        let duration = 330.0 / c_r + 2.4 / f0 + 0.03;
+        // [swing, amplitude] excess per receiver, per case; the surface receiver's c.
+        let mut cases: Vec<Vec<[f64; 2]>> = Vec::new();
+        let mut c = 0.0;
+        for (label, source_z, receiver_z) in [
+            ("(a) both on the surface", 0.0, 0.0),
+            ("(b) receivers at h/2", 0.0, 0.5 * h),
+            ("(c) both at h/2", 0.5 * h, 0.5 * h),
+        ] {
+            let n = |metres: f64| (metres / h).round() as usize + 1;
+            let at = |p: [f64; 3], z: f64| [p[0], p[1], z];
+            let receivers: String = survey::RECEIVERS
+                .iter()
+                .map(|&p| format!("[[receivers.point]]\nposition = {:?}\n", at(p, receiver_z)))
+                .collect();
+            let toml = format!(
+                r#"
+                [grid]
+                points = [{}, {}, {}]
+                spacing = {h}
+                [time]
+                duration = {duration}
+                [boundary]
+                pml_width = {}
+                free_surface = true
+                [[model.layer]]
+                top = 0.0
+                vp = {}
+                vs = {vs}
+                rho = {}
+                [[source]]
+                position = {:?}
+                force = [0.0, 0.0, 1e9]
+                wavelet = {{ kind = "ricker", frequency = {f0} }}
+                [receivers]
+                components = ["vz"]
+                {receivers}
+                "#,
+                n(750.0),
+                n(630.0),
+                n(360.0),
+                (120.0 / h).round() as usize,
+                survey::VP,
+                survey::RHO,
+                at(survey::SOURCE, source_z),
+            );
+            let (sim, _) = simulate_timed(&toml);
+            if receiver_z == 0.0 {
+                // The mean depth, over h, of the vz values a surface receiver reads (vz lives
+                // at (k + ½) h; values above the surface fold onto those below).
+                let g = sim.solver.grid;
+                c = sim.receivers.ops[0][0]
+                    .terms
+                    .iter()
+                    .filter(|t| t.0 == Field::Vz)
+                    .map(|&(_, i, w)| {
+                        let k = (i / g.plane_len()) as f64 - g.halo as f64;
+                        w as f64 * (k + 0.5)
+                    })
+                    .sum::<f64>();
+            }
+            let times = sim.sample_times();
+            let dt = times[1] - times[0];
+            let mut excess = Vec::new();
+            let mut misfits = Vec::new();
+            for (i, p) in survey::RECEIVERS.iter().enumerate() {
+                let r = norm(sub(*p, survey::SOURCE));
+                let surface: Vec<f64> = times.iter().map(|&t| lamb.velocity(r, t)).collect();
+                let exact = deepen(&surface, dt, &[source_z, receiver_z]);
+                let v = trace(&sim, Component::Vz, i);
+                excess.push([
+                    peak(&v) / peak(&exact) - 1.0,
+                    dot(&v, &exact) / dot(&exact, &exact) - 1.0,
+                ]);
+                misfits.push(misfit(&v, &exact));
+            }
+            let column = |j: usize| excess.iter().map(|e| e[j]).collect::<Vec<_>>();
+            println!(
+                "{f0:5} {kh:5.3}  {label:26}  {}  {}  {:5.1}–{:4.1}%",
+                range(&column(0)),
+                range(&column(1)),
+                100.0 * misfits.iter().copied().fold(f64::INFINITY, f64::min),
+                100.0 * misfits.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            );
+            cases.push(excess);
+        }
+        ends.push((f0, kh, c, cases));
+    }
+    println!(
+        "\nEach end's own excess, receiver by receiver: the receiver's (a) - (b), the source's \
+         (b) - (c); per unit kh_R; and 0.227 c kh_R at f0, the first-order estimate"
+    );
+    println!(
+        "  f0   kh_R   end        swing             per kh   amplitude          per kh   estimate"
+    );
+    for (f0, kh, c, cases) in ends {
+        for (label, x, y) in [("receiver", 0, 1), ("source", 1, 2)] {
+            let diff = |j: usize| {
+                cases[x]
+                    .iter()
+                    .zip(&cases[y])
+                    .map(|(p, q)| p[j] - q[j])
+                    .collect::<Vec<_>>()
+            };
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+            let (swing, amplitude) = (diff(0), diff(1));
+            println!(
+                "{f0:5} {kh:5.3}  {label:9} {}  {:5.1}   {}  {:5.1}   {:+5.2}%",
+                range(&swing),
+                100.0 * mean(&swing) / kh,
+                range(&amplitude),
+                100.0 * mean(&amplitude) / kh,
+                100.0 * slope * c * kh,
+            );
+        }
+    }
+}

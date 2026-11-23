@@ -3117,6 +3117,89 @@ host having no numpy): `vs_hard = np.where(vs > 0, np.maximum(vs, vp / np.sqrt(3
 changed and the mean of `vs_hard / vs - 1` by depth band (row × 25 m). The memory:
 `vibe-rations memory <config> --invert` on the configurations the note describes.
 
+## 2026-11-23 — The free surface's amplitude excess is the mirrored $v_z$'s kink
+
+**Question.** Lamb's problem found the Rayleigh wave's largest swing 3–6% too large and left
+a hypothesis untested (2026-11-22, "The free surface against Lamb's problem"): the free
+surface mirrors $v_z$ evenly, so $v_z$ continued above the surface has a kink, and
+interpolating $v_z$ onto the surface reads it as if from $c\,h$ below, $c = 0.340$ at order 8
+(the mean depth of a surface receiver's weights over $h$, from the solver's own operator). A
+surface force, the receiver's transpose, acts from the same depth. A Rayleigh wave's $v_z$
+grows with depth at the surface, $\partial_z w / w = 0.227\,k$ for $\nu = \frac14$, so each end
+should over-read by about $0.227\,k\,c\,h$: in proportion to frequency at a fixed $h$. And
+$v_z$ itself lives at $h/2$, so a source and receivers there, which interpolate nothing along
+$z$, should show none of it. (The earlier entry's "2.3% at 5 m together" is that estimate for
+one end; both together are 4.6%.)
+
+**Method.** Lamb's survey (`tests/common/lamb.rs`) at a fixed $h = 5$ m and $f_0$ = 7.5, 10, 15,
+20 and 30 Hz ($kh$ = 0.15–0.59 for the Rayleigh wave at $f_0$): (a) source and receivers on the
+surface, as before; (b) the source on the surface, the receivers at $h/2$; (c) both at $h/2$,
+where the exact positions (2026-11-22, "Sources and receivers between nodes") put them on
+$v_z$'s own points. The exact answers at $h/2$ are Pekeris's surface traces taken down by the
+Rayleigh wave's depth dependence, $(q\,e^{-qkz} - a\,e^{-skz})/(q - a)$ with $q = 0.8475$,
+$s = 0.3933$, $a = 2q/(1 + s^2)$, once per end at $h/2$, frequency by frequency: exact for the
+Rayleigh wave, which carries the swing, an approximation for the much weaker body waves. Each
+end's own excess comes from pairs of runs that differ in that end alone, receiver by receiver:
+the receiver's (a) − (b), the source's (b) − (c), so whatever else the free surface gets wrong
+cancels. Measured: the largest swing's size and the amplitude $\langle v, e\rangle/\langle e, e
+\rangle$ against the exact answer $e$ (`the_free_surface_excess_by_frequency_and_depth` in
+`tests/accuracy.rs`).
+
+**Results.** The largest swing's excess (the four receivers' range):
+
+| $f_0$ (Hz) | $kh_R$ | (a) both on the surface | (b) receivers at $h/2$ | (c) both at $h/2$ |
+|---|---|---|---|---|
+| 7.5 | 0.148 | +3.2 to +4.0% | +1.5 to +2.5% | −0.2 to +0.9% |
+| 10 | 0.197 | +4.0 to +4.8% | +1.8 to +2.7% | −0.5 to +0.6% |
+| 15 | 0.296 | +5.2 to +5.4% | +1.9 to +2.1% | −1.3 to −1.1% |
+| 20 | 0.395 | +5.6 to +6.3% | +1.4 to +2.1% | −2.6 to −1.9% |
+| 30 | 0.592 | +4.9 to +6.1% | −0.6 to +0.6% | −5.7 to −4.6% |
+
+Each end's own excess, the same at every receiver to within 0.2 point:
+
+| $f_0$ (Hz) | receiver's end | source's end | per unit $kh_R$ | $0.227\,c\,kh_R$ at $f_0$ |
+|---|---|---|---|---|
+| 7.5 | +1.55 to +1.71% | +1.54 to +1.68% | 11.1 / 11.0% | 1.15% |
+| 10 | +2.12 to +2.26% | +2.08 to +2.21% | 11.3 / 11.0% | 1.53% |
+| 15 | +3.27 to +3.29% | +3.17 to +3.19% | 11.1 / 10.8% | 2.29% |
+| 20 | +4.17 to +4.20% | +4.01 to +4.04% | 10.6 / 10.2% | 3.04% |
+| 30 | +5.44 to +5.49% | +5.15 to +5.20% | 9.3 / 8.8% | 4.52% |
+
+The amplitude measure gives about half a point less per unit $kh_R$ (10.2–10.8% to
+20 Hz, 7.8–8.2% at 30 Hz).
+
+- *The hypothesis holds.* Each end on the surface over-reads by the same amount, source and
+  receiver alike as reciprocity requires, in proportion to frequency at a fixed $h$: about
+  11% per unit $kh_R$, flat to $kh_R = 0.4$ and slightly less at 0.6. With both ends at $h/2$
+  the excess is gone at low frequency (+0.4% and +0.1% at 7.5 and 10 Hz, within the body
+  waves' approximation). At 15 Hz and 5 m the two ends make +6.5% of Lamb's +5.3%.
+- *Its size is about 1.45 times the first-order estimate at $f_0$ up to 20 Hz* (1.2 at
+  30 Hz), as if the swing were read at about $1.45 f_0$. That is plausible, since the swing of
+  a velocity trace weighs frequencies above $f_0$, but not traced.
+- *What is left is another error, negative and growing about as $f^2$:* in (c) $-1.2$%,
+  $-2.3$% and $-5.2$% at 15, 20 and 30 Hz. With the kink's excess it partly cancels, which is
+  why the total in (a) stopped growing with frequency and why Lamb's excess looked smaller
+  than first order at the coarse end. From 15 Hz up, the misfit in (c) is within 1.5 points of
+  (a)'s (5.0–8.5% against 6.4–9.5% at 15 Hz): there the Rayleigh wave's speed error, not the
+  kink, sets it. At 7.5 and 10 Hz the kink is half the misfit (1.0–1.6% in (c) against
+  3.2–3.8% in (a)).
+
+**Decision.** The amplitude excess is not a propagation error: it is how sources and
+receivers on the surface read and act on $v_z$ across the even mirror. A better free surface
+has two separate things to fix. (1) The surface's sampling of $v_z$: continue $v_z$ above the
+surface with the slope the boundary condition gives, $\partial_z v_z =
+-\frac{\lambda}{\lambda + 2\mu}(\partial_x v_x + \partial_y v_y)$ from $\sigma_{zz} = 0$,
+either in the point operators alone (read $v_z(0) \approx v_z(h/2) - \frac h2\,\partial_z v_z$,
+a linear functional whose transpose is the source, so the adjoint stays exact), or in the
+mirror itself (the image method, which must then pass the reciprocity and long-run tests).
+The point operators are the smaller change and would remove an error of 11% per unit $kh_R$
+per end. (2) The Rayleigh wave's speed, about 1% fast at 10 m (second order), and the smaller
+negative amplitude error of case (c), which a free surface of higher order must address
+[@mittet2002; @kristek2002; @oreilly2017].
+
+**Reproduce:** `just accuracy the_free_surface_excess_by_frequency_and_depth` (about four
+minutes on four cores).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -3165,10 +3248,12 @@ changed and the mean of `vs_hard / vs - 1` by depth band (row × 25 m). The memo
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Measured on Lamb's problem
   (2026-11-22, "The free surface against Lamb's problem"): the Rayleigh wave misfits by
-  15–28% at the default's sampling, about 1% fast (second order) and 3–6% too large (first
-  order at the fine end, partly the evenly mirrored $v_z$'s kink, not tested further). The
-  horizontal component (Pekeris's eq. 66, elliptic integrals) and a buried source are not
-  measured.
+  15–28% at the default's sampling, about 1% fast (second order) and 3–6% too large. The
+  excess is the evenly mirrored $v_z$'s kink, read by sources and receivers on the surface
+  (2026-11-23): about 11% per unit $kh_R$ per end, none with both at $h/2$. Next: continue
+  $v_z$ above the surface with the boundary condition's slope in the surface point operators,
+  and measure what is left. The horizontal component (Pekeris's eq. 66, elliptic integrals)
+  is not measured.
 - **Interfaces.** At normal incidence, measured (2026-11-21, "A planar interface"):
   node-sampled layers put an interface midway between nodes (first-order error),
   band-limiting density and compliances [@mittet2017] makes it second order wherever it
