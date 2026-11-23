@@ -98,6 +98,23 @@ mac:
     rm -f out/mac/vibe-rations
     cp "${CARGO_TARGET_DIR:-target}/aarch64-apple-darwin/release/vibe-rations" out/mac/
 
+# Builds an integration test (tests/<test>.rs) for macOS on Apple silicon into out/mac/<test>,
+# to run natively on the host from the repository's root, where its relative paths lead:
+# `out/mac/marmousi2_study west_l2 --ignored --exact --nocapture --test-threads 1` (all cores and
+# memory). Not cli, examples or remote, which find files by the container's paths.
+[group("build")]
+mac-test test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exe=$(MACOSX_DEPLOYMENT_TARGET=11.0 cargo zigbuild --release --target aarch64-apple-darwin \
+        --test {{ test }} --message-format json-render-diagnostics \
+        | jq -r 'select(.reason == "compiler-artifact" and .target.name == "{{ test }}") | .executable // empty' | tail -1)
+    [ -n "$exe" ] || { echo "no test binary for {{ test }}" >&2; exit 1; }
+    mkdir -p out/mac
+    rm -f "out/mac/{{ test }}"   # a new file, as in `mac`
+    cp "$exe" "out/mac/{{ test }}"
+    echo "out/mac/{{ test }}"
+
 # rustfmt and clippy with -D warnings
 [group("check")]
 lint:

@@ -33,6 +33,7 @@ opens a shell there instead.
 | `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
 | `just marmousi2` | Fetch Marmousi2 (467 MB, once) and make its model files, for `examples/marmousi2*` | ~2 min |
 | `just marmousi2-bench` | Time forward and gradient runs on it at orders 4 and 8, with their memory | ~10 min |
+| `just mac-test <test>` | Build an integration test for macOS into `out/mac/<test>`; run it on the host from the repository (`out/mac/marmousi2_study west_l2 --ignored --exact --nocapture --test-threads 1`). Not `cli`, `examples` or `remote` | ~30 s |
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just mac` | Cross-compile the command line for macOS on Apple silicon into `out/mac/vibe-rations`, to run on the host | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |

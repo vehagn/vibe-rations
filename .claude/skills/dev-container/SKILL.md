@@ -78,4 +78,8 @@ docker compose -f .devcontainer/compose.yaml up --detach --build --wait
   the host and open http://localhost:8088. The command line is the other: `just in mac`
   cross-compiles it for macOS on Apple silicon into `out/mac/vibe-rations`, which the host
   runs natively, e.g. `out/mac/vibe-rations invert <config>` (all cores and memory, not the
-  VM's 8 and 24 GiB; 193 Mcells/s for the same example). A Linux binary from the container won't run on macOS.
+  VM's 8 and 24 GiB; 193 Mcells/s for the same example). `just in mac-test <test>` does the
+  same for an integration test (`out/mac/<test>`, run from the repository's root with the
+  test's name and `--ignored --exact --nocapture --test-threads 1`): the studies, for runs
+  that need more than the VM's memory or its cores. `cli`, `examples` and `remote` find files
+  by the container's paths and run only there. A Linux binary from the container won't run on macOS.
