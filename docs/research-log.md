@@ -2913,6 +2913,137 @@ nothing next to a step.
 **Reproduce:** `just unit fd::tests::interpolates_from_any_offset`; `just physics between`
 (the force, reciprocity, dot-product and gradient checks between nodes).
 
+## 2026-11-23 — Marmousi2: the held-out western part
+
+**Question.** Every Marmousi2 ranking so far came from the central 6 km, judged against its
+own truth (2026-11-21, "Marmousi2: the mute line without the truth, and a held-out part").
+Do the rankings hold on the western 6 km, which none of the choices saw?
+
+**Method** (`tests/marmousi2_study.rs`: `west_l2`, `west_muted_l2`,
+`west_stages_muted_after_the_first`, `seafloor_speeds`, `west_misfit_by_mute`). The same
+survey, start (smoothed over 250 m) and numerics on $x$ = 0–6 km (`Case::part("west", …)`),
+three of the central part's variants:
+- L2 for five iterations;
+- L2 with the slow waves muted, before the line that `slow_waves_mute` works out from the
+  west's own start (690 m/s from 0.87 s, taper 0.42 s);
+- the stages with that mute from the second stage on.
+
+The central part's runs used 600 m/s, chosen with its truth in view; the rule gives 616 there.
+Every source and receiver lies on a node and the models are files, not layers, so the
+defaults changed since those runs (band-limited layers, exact positions) don't apply.
+Two diagnostics followed:
+- `seafloor_speeds`, which uses the truth, compares the start's S speeds under the seafloor
+  with the truth's in both parts.
+- `west_misfit_by_mute` splits the west's starting misfit and gradient by its mute, as
+  "Marmousi2: what the mute removes" did on the central part.
+
+The inversions ran in the dev container with 8 CPUs, and the split ran natively on the Mac
+(`just mac-test`).
+
+**Results.** After five iterations, error ratio and cosine with the true update on the
+western part:
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| L2 | 17.3% | $v_p$ | 1.227, +0.05 | 0.988, +0.26 | 0.986, +0.19 | 0.999, +0.06 | 1.004, −0.33 |
+| | | $v_s$ | 0.714, +0.70 | 1.018, +0.31 | 0.935, +0.36 | 1.000, +0.05 | 0.998, +0.28 |
+| L2, muted | 41.3% | $v_p$ | 1.167, +0.13 | 1.055, +0.20 | 1.013, +0.17 | 0.997, +0.10 | 1.001, −0.20 |
+| | | $v_s$ | 0.791, +0.61 | 0.978, +0.26 | 0.999, +0.04 | 1.001, −0.17 | 0.999, +0.29 |
+| stages, muted after 0.6 Hz | 64.0% | $v_p$ | 1.006, +0.09 | 0.987, +0.24 | 0.992, +0.25 | 1.000, +0.01 | 1.003, −0.39 |
+| | | $v_s$ | 0.911, +0.48 | 0.993, +0.13 | 0.983, +0.18 | 1.000, +0.06 | 0.998, +0.38 |
+
+Next to the central part ($v_p$ / $v_s$ error ratio):
+
+| | part | L2 left | 500–750 m | 750–1000 m | 1000–1500 m |
+|---|---|---|---|---|---|
+| L2 | central | 57.9% | 0.900 / 0.973 | 0.994 / 1.095 | 1.020 / 1.070 |
+| | west | 17.3% | 1.227 / 0.714 | 0.988 / 1.018 | 0.986 / 0.935 |
+| L2, muted | central | 85.7% | 0.916 / 0.970 | 0.971 / 1.004 | 0.999 / 1.001 |
+| | west | 41.3% | 1.167 / 0.791 | 1.055 / 0.978 | 1.013 / 0.999 |
+| stages, muted after 0.6 Hz | central | 91.3% | 0.973 / 0.947 | 0.995 / 0.991 | 1.017 / 1.031 |
+| | west | 64.0% | 1.006 / 0.911 | 0.987 / 0.993 | 0.992 / 0.983 |
+
+The west's balanced L2 misfit at the start is 0.234, against the central part's 0.660. The
+three runs took 2,027, 2,095 and 2,676 s; the central ones took 2,634, 2,769 and 3,608 s on
+4 CPUs.
+
+Under the seafloor (`seafloor_speeds`):
+
+| | $v_s$ at 475 m, true / start | 250 m below, harmonic mean, true / start | delay over 1 km, mean (largest) |
+|---|---|---|---|
+| central | 345 / 407–684 m/s | 414 / 490 m/s | 0.37 s (0.80) |
+| west | 345 / 438–448 m/s | 431 / 448 m/s | 0.09 s (0.13) |
+
+Half a period of the 1.2 Hz Ricker is 0.42 s.
+
+- *The central ranking doesn't hold.*
+  - In the west, L2 alone recovers $v_s$ best at every depth down to 1.5 km (0.714 with a
+    cosine of +0.70 at the top, 0.935 with +0.36 at 1–1.5 km). In the centre it was the one
+    variant that turned $v_s$ away below 750 m.
+  - Muted L2, the centre's safest, makes $v_p$ worse in the west: 1.167 at 500–750 m and 1.055
+    at 750–1000 m.
+  - The stages muted after 0.6 Hz are the only variant that makes nothing worse in the west:
+    the worst is $v_p$'s 1.006 at the top. In the centre they made $v_s$ worse at 1–1.5 km
+    (1.031).
+  - No variant is best, or harmless, on both parts.
+- *Why: in the west the start predicts the slow waves within half a cycle.*
+  - There the start's $v_s$ in the 250 m under the seafloor is within 4% of the truth's.
+    Waves at the truth's speeds fall 0.09 s behind the start's over 1 km, and 0.13 s at most.
+  - In the centre the start is 18% fast. Smoothing over 250 m has mixed faster rock into the
+    soft sediments: the start has 407–684 m/s where the truth has 345 m/s all along the
+    seafloor. There the slow waves fall 0.37 s behind per km, and up to 0.80 s, so they pass
+    half a cycle within about a kilometre.
+  - The slow waves are the same kind of data in both parts. Within half a cycle (the west,
+    and the centre's 0.6 Hz stage) their gradient points towards the truth; beyond it (the
+    centre at full band) it points away.
+- *The split agrees* (`west_misfit_by_mute`). The mute removes about as much of the west's
+  misfit as of the centre's (73.7% against 64.6%), but what it removes points the other way.
+  Raw cosines with the true update, west / central (the centre's from "Marmousi2: what the
+  mute removes"):
+
+  | | 500–750 m | 750–1000 m | 1000–1500 m |
+  |---|---|---|---|
+  | $v_p$, removed | +0.05 / +0.02 | +0.12 / −0.28 | −0.02 / −0.20 |
+  | $v_s$, removed | +0.58 / −0.01 | +0.00 / −0.12 | +0.24 / −0.18 |
+  | $v_p$, kept | +0.13 / +0.45 | +0.32 / +0.31 | +0.14 / +0.02 |
+  | $v_s$, kept | +0.48 / +0.20 | −0.20 / +0.08 | +0.04 / −0.10 |
+
+  - *The removed part holds almost all of $v_s$'s gradient below 750 m*, as in the centre:
+    the kept part is 8% as large at 750–1000 m and 3% at 1–1.5 km. That is why muted $v_s$
+    barely moves there (0.978, 0.999).
+  - *What the mute keeps points away at 750–1000 m* ($-0.20$).
+  - *$v_p$'s whole gradient at 500–750 m is only weakly aligned* (+0.09, against the centre's
+    +0.37), so the L2 runs' $v_p$ there drifts away over the iterations rather than starting
+    off wrong.
+  - $v_x$ carries 94.4% of the west's misfit.
+  - The run took 1,060 s natively on the Mac, with the container's CI sharing the cores for
+    part of it, so it isn't a benchmark.
+- *Fitting more of the data recovers more here.* L2 leaves 17.3% of the west's misfit and
+  is its best variant for $v_s$. The central part's "L2 fits the most data and recovers the
+  least" held only for that part.
+- *$v_p$ at 500–750 m moves away in both L2 runs*, with cosines near zero (+0.05, +0.13): its
+  update there is mostly not the true one. The stages, at low frequencies for four of their
+  five iterations, leave it alone (1.006).
+
+**Decision.** Whether to mute the slow waves depends on whether the start predicts them
+within half a cycle, and the mute rule doesn't ask that. `slow_waves_mute` places the line
+ahead of the start's slowest S waves, which is the same in both parts. So no mute becomes a
+default, and no ranking from either part is general.
+
+What the decision needs is a test, from the data, of whether the slow waves are
+cycle-skipped. One option is the lag between observed and synthetic traces after the line,
+offset by offset, measured once at each stage's start and held through the stage, so that
+the misfit stays smooth within it. A better shallow start would make the test pass more often.
+Neither is written.
+
+The whole-section inversion (`examples/marmousi2/whole.toml`) mutes at 600 m/s throughout.
+It covers both parts, so its result should be judged region by region, not only by depth.
+
+**Reproduce:** `just in marmousi2-study west_l2`, `west_muted_l2` and
+`west_stages_muted_after_the_first` (35–45 minutes each on 8 CPUs), `seafloor_speeds`
+(seconds), `west_misfit_by_mute` (18 minutes natively on the Mac); or natively, `just in mac-test
+marmousi2_study`, then `out/mac/marmousi2_study <name> --ignored --exact --nocapture`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -2940,13 +3071,17 @@ nothing next to a step.
   go too; kept at 0.6 Hz and muted above, they help $v_s$ above 1 km and hurt it below
   (2026-11-21, "Marmousi2: the slow waves kept at 0.6 Hz, muted above"). What the mute leaves
   of $v_s$'s gradient at 1–1.5 km points slightly away on both components, from arrivals before
-  the line, not split further ("Marmousi2: what the mute removes"). Every ranking so far is the
-  central part's against its own truth. Written but not run (`tests/marmousi2_study.rs`):
-  the held-out western part (`west_l2`, `west_muted_l2` with its own 690 m/s line,
-  `west_stages_muted_after_the_first`), muted L2 with the receivers' side
+  the line, not split further ("Marmousi2: what the mute removes"). On the held-out western
+  part the ranking reverses (2026-11-23, "Marmousi2: the held-out western part"). Its start
+  predicts the slow waves within half a cycle, so L2 alone recovers $v_s$ best and the mute
+  makes $v_p$ worse near the seafloor. Whether to mute depends on cycle skipping, which
+  nothing yet tests from the data. Written but not run (`tests/marmousi2_study.rs`): muted
+  L2 with the receivers' side
   (`muted_l2_with_receivers_side`), time shifts in a window around the early arrivals, then L2
   (`windowed_time_shifts_then_l2`), muted L2 for twenty iterations (`muted_l2_longer`), and
-  L2 with the wavefields rebuilt (`l2_rebuilt`). Not written: the phase misfit with the mute; a
+  L2 with the wavefields rebuilt (`l2_rebuilt`). Not written: a test from the data of whether
+  the slow waves are within half a cycle, measured at each stage's start, to decide the mute
+  offset by offset; the phase misfit with the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
   which stacks and f-k spectra within 1 km couldn't do; and a better shallow start.
