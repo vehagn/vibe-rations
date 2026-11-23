@@ -7,7 +7,8 @@ could be made. Gathered 2026-11-23 from the local paper library, web searches an
 Each study says how deeply it was read: *in full* (the paper itself), *full text, read by an
 agent* (an HTML copy read by a reading agent, whose notes are summarised here), or *abstract
 only*. Every work cited is in `docs/references.bib`, its fields checked against Crossref.
-The research log's 2026-11-23 entry records the decision this note led to.
+The research log's 2026-11-23 entry, "Marmousi2 in the literature", records the decision
+this note led to.
 
 ## Where our setup sits
 
@@ -200,8 +201,8 @@ Acoustic studies of Marmousi or Marmousi2 are many; few report numbers for the m
 
 ## Keep or mute the slow waves
 
-The held-out runs on the western 6 km (2026-11-23, the research log on branch
-`marmousi2-held-out`) reversed the central part's ranking: there plain L2 recovers $v_s$
+The held-out runs on the western 6 km (the research log's 2026-11-23 entry, "Marmousi2: the
+held-out western part") reversed the central part's ranking: there plain L2 recovers $v_s$
 best, and muting the slow waves makes $v_p$ near the seafloor worse. The starts differ. In
 the west the start's $v_s$ in the top 250 m below the seafloor is within 4% of the truth,
 so the slow waves drift about 0.09 s per km against the observed ones; in the centre,

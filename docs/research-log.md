@@ -3104,6 +3104,13 @@ before averaging) or a script; no solver change. Then the literature's band on o
 5–40 iterations, and Cao et al.'s residual measure on `whole.toml`'s results. Nothing was
 run; this commit changes only `docs/`.
 
+*Revised after the held-out part* (previous entry). The note's "Keep or mute the slow
+waves" now puts a check from the data first, and this control second. The check is the
+phase of the slow waves against the start's synthetics, offset by offset at 0.6 and
+1.2 Hz [@fichtner2011; @shah2012], the latter read as an abstract only. It needs only
+forward runs, about 80 s per part. The mute then goes beyond the offset where that phase
+stops being continuous.
+
 **Reproduce:** the cap's effect, in numpy (run here with a plain-Python `.npy` reader, the
 host having no numpy): `vs_hard = np.where(vs > 0, np.maximum(vs, vp / np.sqrt(3)), 0)` on
 `examples/marmousi2/25m-central/{vp,vs}.npy` and the others, then the share of solid nodes
@@ -3151,9 +3158,9 @@ changed and the mean of `vs_hard / vs - 1` by depth band (row × 25 m). The memo
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
   which stacks and f-k spectra within 1 km couldn't do; and a better shallow start. Nor
-  the comparison with the literature (2026-11-23, "Marmousi2 in the literature"): the same
-  survey with Poisson's ratio capped at 0.25, as every published elastic Marmousi2
-  inversion read in full did, first.
+  the comparison with the literature (2026-11-23, "Marmousi2 in the literature"): after the
+  phase check, the same survey with Poisson's ratio capped at 0.25, as every published
+  elastic Marmousi2 inversion read in full did.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Measured on Lamb's problem
