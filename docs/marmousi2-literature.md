@@ -51,13 +51,15 @@ The research log's 2026-11-23 entry records the decision this note led to.
   Wang et al. (2016) invert it too. Cao et al. fix a smoothed density, the same in the
   data and the inversion. Holding the true $\rho$ makes our problem easier there, which a
   comparison should say.
-- **For the slow seafloor waves, our mute is field practice.** On ocean-bottom field data
-  Warner et al. (2013) muted the Scholte waves and Prieux et al. (2013b) left them
-  unmodelled; Yuan & Simons (2014) tapered surface waves out of their elastic Marmousi
-  data. Studies that use such waves fit envelopes first (Yuan, Simons & Bozdağ 2015) or
-  strip layers by offset and frequency (Masoni et al. 2016). On a soft-seabed synthetic
-  (Valhall), Brossier, Operto & Virieux (2009b, 2010) needed low frequencies, a hierarchy of
-  parameters and components, and, with noisy data, an $\ell_1$ misfit to get $v_s$.
+- **Muting the slow seafloor waves is field practice, but nobody decides it by the start.**
+  On ocean-bottom field data Warner et al. (2013) muted the Scholte waves and Prieux et al.
+  (2013b) left them unmodelled, with acoustic modelling or a mesh too coarse for them, and
+  neither says the start decided it. Our held-out runs say the choice depends on the start:
+  where it predicts the slow waves within half a period (the western part), keeping them
+  helps; where it doesn't (the central part), muting does. The literature's tools for that
+  decision are a phase check of the start against the observed data (Shah et al. 2012) and
+  stages that widen offsets and lower frequencies as the model improves; and for the start
+  itself, Scholte-wave dispersion inverted first. See "Keep or mute the slow waves".
 
 ## Our setup
 
@@ -90,6 +92,7 @@ The western 6 km, held out, has not been run yet.
 | Jeong, Lee & Min (2012) | full text, read by an agent | 9.2 × 3.04 km, water and the sides removed; low $v_s$ replaced so Poisson's ratio is 0.25; 20 m | receivers at every surface node, 219 shots 40 m apart; 5 s | first derivative of a Gaussian, to 10 Hz; overlapping bands 0.2–2 … 0.2–10 Hz | linear increase with depth | stage 1 $v_p$, $v_s$ with $\rho$ fixed; stage 2 $\lambda$, $\mu$, $\rho$ | L2 (frequency domain); Fletcher–Reeves conjugate gradient scaled by the pseudo-Hessian; 800 + 500 iterations |
 | Wang, Dong, Liu & Yang (2016) | abstract | elastic Marmousi2 | not in the abstract | frequency domain | not in the abstract | $v_p$, $v_s$, $\rho$ | nonlinear conjugate gradient preconditioned by a block-diagonal pseudo-Hessian |
 | Pan, Liang & Habashy (2016) | abstract | a truncated Marmousi extended into 3D (version not stated) | not in the abstract | frequency domain | several | elastic velocities | Gauss–Newton and preconditioned nonlinear conjugate gradient |
+| Guasch et al. (2012) | abstract | a 3D version of Marmousi | hydrophones only, in the synthetic test | not in the abstract | not in the abstract | $v_p$, $v_s$ | elastic 3D FWI |
 | Pan, Geng & Innanen (2018) | in full | a 3.4 × 1.2 km Marmousi section ($v_p$, $v_s$, $\rho$; which version and part not stated) | 33 sources 100 m apart, 330 receivers 10 m apart, along the top surface | Ricker 6 Hz; bands 3–5 then 3–8 Hz | not described | $v_p$, $v_s$, $\rho$ | L-BFGS, 20 iterations per band; Hessian diagonals as preconditioners |
 | Cao et al. (2022) | full text, read by an agent | 3D: Marmousi-II extended along $y$ at 45°, an uneven seabed; Poisson's ratio about 0.25; spectral elements of 60 m | streamer (38 shots, 9 streamers, offsets to 5.8 km) or two ocean-bottom cables of 38 four-component receivers (pressure, 3C) | Ricker 10 Hz; bands 0–5, 0–10, 0–20 Hz | smoothed truth (length not stated) | $v_p$, $v_s$; $\rho$ fixed to a smoothed model | L2 scaled per shot and component; L-BFGS; 60 iterations per band |
 | Sun & Demanet (2022) | full text, read by an agent | 500 × 174 nodes at 20 m (about 10 × 3.5 km, the size of Köhn et al.'s grid); 440 m of water; changes to $v_s$ not stated | 50 shots 40 m deep from 0.8 to 8.64 km; 400 receivers ($v_x$, $v_z$) at 460 m, just below the seafloor; free surface; 6 s | Ricker 10 Hz; 2–4 Hz (true or extrapolated by a network), then 4–6, 4–10, 4–20 Hz | "crude", not described | $v_p$, $v_s$, $\rho$ | L2 (time domain, DENISE); L-BFGS; 30 + 30 + 30 + 20 iterations |
@@ -118,6 +121,9 @@ The western 6 km, held out, has not been run yet.
   and inverted $v_p$, $v_s$, $\rho$ errors; not seen.
 - *Pan, Liang & Habashy (2016)*: a 3D frequency-domain elastic inversion of Marmousi
   extended along $y$, as ours is, which gave good velocity images from several starts.
+- *Guasch et al. (2012)*: elastic 3D FWI of a 3D Marmousi recovers $v_p$ and $v_s$ from
+  hydrophone data alone; then of North Sea ocean-bottom data, for the shallow channels'
+  $v_p$ and $v_s$.
 - *Pan, Geng & Innanen (2018)*: $v_s$ perturbations leak strongly into $\rho$ and, with
   reversed phase, into $v_p$, but receive little leakage themselves. Simultaneous inversion
   reached $E_{v_p}$ = 0.83, $E_{v_s}$ = 0.72, $E_\rho$ = 1.04 after 40 iterations;
@@ -174,9 +180,13 @@ Acoustic studies of Marmousi or Marmousi2 are many; few report numbers for the m
   components to reach acceptable models. *Brossier, Operto & Virieux (2010)*, abstract:
   with noise, $\ell_1$ (and the Huber and hybrid criteria) recovers $v_s$ in that
   soft-seabed setting where $\ell_2$ does not.
-- *Warner et al. (2013)* muted Scholte waves at short offsets in field ocean-bottom data;
-  *Prieux et al. (2013b)* saw Scholte waves slower than 350 m/s at Valhall and left them
-  out of the modelling (both read earlier; the log's "Mutes and windows").
+- *Warner et al. (2013)* muted Scholte waves at short offsets in field ocean-bottom data
+  (read earlier; the log's "Mutes and windows"). *Prieux et al. (2013b)*, full text read by
+  an agent: at Valhall, Scholte waves slower than 350 m/s on every component were not
+  modelled, because the mesh was designed for 400 m/s and faster; no mute, filter or time
+  damping is described, offsets to 13 km. Their $v_s$ start came from anisotropic
+  reflection traveltime tomography and was too fast in the gas, and inversion did not
+  correct $v_s$'s long wavelengths there.
 - *Kugler et al. (2007)*, record only: Scholte waves themselves as data, for the shear
   velocity of shallow-water sediments, a possible shallow start.
 - *Yuan & Simons (2014)*, abstract: elastic two-component inversion of the 2D Marmousi
@@ -187,6 +197,91 @@ Acoustic studies of Marmousi or Marmousi2 are many; few report numbers for the m
   everything, on an industry synthetic model.
 - *Masoni et al. (2016)*, abstract: layer stripping for surface waves, low-passing from
   high to low corners with offsets widening, so that each step updates deeper $v_s$.
+
+## Keep or mute the slow waves
+
+The held-out runs on the western 6 km (2026-11-23, the research log on branch
+`marmousi2-held-out`) reversed the central part's ranking: there plain L2 recovers $v_s$
+best, and muting the slow waves makes $v_p$ near the seafloor worse. The starts differ. In
+the west the start's $v_s$ in the top 250 m below the seafloor is within 4% of the truth,
+so the slow waves drift about 0.09 s per km against the observed ones; in the centre,
+where smoothing mixed faster rock into the soft sediments, it is 18% fast and they drift
+0.37 s per km, up to 0.80 s. Half a period at 1.2 Hz is 0.42 s. So the mute looks like a
+matter of cycle skipping, to be decided from the start and the data rather than fixed.
+
+**The criterion.** A gradient method needs the start in the global minimum's valley: the
+waveforms it predicts must match most observations within half a period $T_0/2$ at the
+lowest frequency inverted, a phase error under $\pm\pi$ (Fichtner 2011, §14.5). Its SAFOD
+example applies it per offset: the start's RMS traveltime residual, 40 ms, is $T_0/8$ at 3
+Hz, but at long offsets, with no low frequencies and ~100 ms picking error, $T_0/2$ at the
+dominant 8 Hz (62.5 ms) is not met, and that part of the model is not expected to resolve.
+
+**Diagnostics in use.**
+
+- *Phase continuity* (Shah et al. 2012), abstract: the phase difference between predicted
+  and observed data at a single low frequency, after a time window around the early
+  arrivals, mapped over the sources and receivers. Where it varies smoothly the start is
+  adequate; where it jumps by $2\pi$ between neighbouring traces, it is cycle-skipped. The
+  same map, redrawn during the inversion, shows whether it heads for the global minimum.
+  This needs observed data and the start's synthetics only, not the truth.
+- *Cross-correlation time shifts per trace* (Luo & Schuster 1991), the measurement our
+  time-shift misfit already makes: kept where they grow continuously from zero offset and
+  stay under half a period. A shift past half a period is itself unreliable (the
+  correlation's peak may be the wrong cycle), so continuity along offset, as in Shah et
+  al., is the test rather than the value.
+- *A probabilistic QC* (Martinez-Sansigre & Ratcliffe 2014), record only.
+- When the start fails the check, misfits built for kinematic mismatch (adaptive waveform
+  inversion, envelopes, normalised integration, optimal transport) are compared by Pladys
+  et al. (2021), abstract only.
+
+**What ocean-bottom studies did with Scholte waves.** Muted (Warner et al. 2013, whose
+modelling was acoustic), left out (Prieux et al. 2013b, a mesh for 400 m/s and faster),
+removed with the model (Köhn et al. 2012; Jeong et al. 2012; Cao et al. 2022), or inverted
+first as dispersion (below). None of those read ties the choice to its start. The
+start-dependent practice is generic: offset and time windows widened stage by stage (Shipp
+& Singh 2002); time damping from the first arrivals, which limits how far surface waves
+are seen (Brossier, Operto & Virieux 2009), relaxed over the stages to bring them back in
+(Romdhane et al. 2011; Prieux et al. 2013a on their synthetic, damping over 1, 3 and 10
+s); and for surface waves, layer stripping, offsets widening as frequencies fall (Masoni
+et al. 2016). Prieux et al. (2013a) dropped time damping on their field data, where it
+amplified artefacts.
+
+**Shallow starting models.**
+
+- *Smoothing below the seafloor only*, the water and seafloor kept sharp: ours (each
+  property's values, a Gaussian of $\sigma$ = 250 m over the solid nodes); Métivier et al.
+  (2013) held the water fixed; Prieux et al. (2013a) smoothed their synthetic truth over
+  250 m at the sea surface growing to 500 m at the bottom. Averaging velocities over a
+  thin slow layer and the faster rock below makes it fast, which is what the centre shows;
+  averaging slowness instead would keep vertical traveltimes (our suggestion, untested).
+- *Scholte-wave dispersion first*: local dispersion curves from a moving offset window and
+  a slant stack, inverted for 1D $v_s$ profiles and assembled into a section (Bohlen et
+  al. 2004, abstract), and its tomography (Kugler et al. 2007, record only); on North Sea
+  ocean-bottom nodes, picked by machine learning and inverted by wave-equation dispersion
+  inversion, proposed for an early stage of elastic model building (Gao et al. 2021,
+  abstract); on land, initial $v_s$ and $v_p$ from dispersion for 3D elastic FWI,
+  laterally varying starts doing better, with time windows and a single-parameter first
+  stage (Teodor et al. 2021, abstract). Dispersion is picked from the data as a phase
+  velocity per frequency, so it needs no start within half a cycle.
+- *Reflection traveltime tomography* for $v_s$ (Prieux et al. 2013b), needing converted
+  waves to pick.
+- *Empirical trends* for marine sediments: $v_p/v_s$ from about 13 at the seafloor to 2.6
+  at 1000 m in terrigenous sediments (Hamilton 1979, abstract), a prior that uses no
+  truth; Marmousi2's sediments have $v_p/v_s \approx 4$–5, so how a synthetic's sediments
+  compare with such a trend is worth checking before using it.
+
+**A test for both parts.** For each part and stage frequency (0.6 and 1.2 Hz), the phase
+difference between the start's synthetics and the observed traces in a window after the
+600 m/s line, by shot and offset: forward runs of the start only, about 80 s per part on
+four cores (the observed traces exist). Keep the slow waves out to the offset where the
+difference stops being continuous or reaches $\pm\pi$, and mute beyond. From the drifts
+above, taken as linear, about 1.1 km in the centre at 1.2 Hz (2.2 km at 0.6 Hz) and every
+recorded offset in the west, where a 3.5 s record holds 300–500 m/s waves only to 0.8–1.3
+km; the QC should find that from the data. Then one inversion per part with those mutes
+(45–60 minutes each, 4.41 GiB): if one rule gives the better variant on both parts, the
+choice no longer depends on the part. A mute that ends at an offset per stage needs an
+offset limit on `[[inversion.stage.mute]]` (a misfit change, not a solver one); the QC
+itself is study code.
 
 ## Benchmarks for held-out checks
 
@@ -261,12 +356,13 @@ Their remedies are the next things to try on our soft seabed, once the control h
 much of the gap it accounts for: $v_p$ first with $v_s$ held, then $v_s$; the vertical
 component before the horizontal; $\ell_1$ for noisy data.
 
-**First:** the hard-seabed control (1), on the central part and the western one. It is the
-cheapest (45 minutes and 4.41 GiB each), it makes the one change to the model that every
-elastic Marmousi2 inversion read in full that describes its model made, on our own survey
-and grid, and its outcome
-says which of the literature applies to us: the hard-seabed studies above, or the
-soft-seabed ones.
+**First:** the phase check of the slow waves, then its mutes (the test in "Keep or mute the
+slow waves"), on the central and western parts. It is the cheapest (minutes for the check,
+45–60 minutes and 4.41 GiB per inversion), it bears on the choice that decides our results
+on both parts, and it takes that choice from the data and the start as the literature's QC
+does, not from the truth. **Second:** the hard-seabed control (1), which says how far the
+soft seabed separates our results from the published ones and which of the literature
+applies to us.
 
 ## Not read
 
@@ -275,4 +371,5 @@ reading agent): Choi, Min & Shin (2008a, b), for their Marmousi-2 acquisition an
 Wang et al. (2016), for their table of errors; Yuan, Simons & Bozdağ (2015), to confirm
 which model; Pan, Liang & Habashy (2016), for the 3D extension; and the soft-seabed papers
 (Brossier et al. 2009b, 2010; Sears et al. 2008, 2010), for how soft their seabed is and
-what they muted. Downloading any of them waits for the maintainer's word.
+what they muted; Shah et al. (2012), for how they window and display the phase difference.
+Downloading any of them waits for the maintainer's word.
