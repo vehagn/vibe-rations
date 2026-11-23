@@ -356,18 +356,22 @@ doesn't show.
   sediments under the seafloor ($v_s$ from 303 m/s at 25 m) set the grid and hold most of the
   late energy and the gradient. The whole section's gradient needs 15 GiB, so gradients use
   the central 6 km (4.3 GiB). **Inverting it** (`tests/marmousi2_study.rs`, `just
-  marmousi2-study <name>`; the log's Marmousi2 entries of 2026-11-21): from the start smoothed
-  over 250 m, the slow seafloor waves carry most of the misfit and turn $v_s$'s gradient the
-  wrong way below 750 m; of the tools on main, only muting them (`[[inversion.mute]]` keeping
-  what arrives before a 600 m/s line) stops that, and it also removes the low-frequency slow
-  waves through which the stages improved $v_s$ (`misfit_by_mute` splits it; the per-stage
-  mute is in the log). Judge a variant by the
-  error ratio and the cosine with the true update by depth band, not by the misfit: L2 fits
-  the most data and recovers the least. **Beware of tuning to one dataset:** the line, the
-  stage corners and the ranking were all chosen on the central 6 km against its own truth.
-  Work settings out from the observed data, the start and the source (`slow_waves_mute`
-  derives the line from the start's slowest seafloor $v_s$: 616 m/s there, 690 in the west),
-  and check a winner on the held-out western 6 km (`Case::part("west", …)`). Picking the slow
+  marmousi2-study <name>`; the log's Marmousi2 entries of 2026-11-21 and 23). From the start
+  smoothed over 250 m, the slow seafloor waves carry most of the central 6 km's misfit and
+  turn $v_s$'s gradient the wrong way below 750 m. Muting them (`[[inversion.mute]]`, keeping
+  what arrives before a 600 m/s line) stops that there.
+  **On the held-out western 6 km the ranking reverses** (`Case::part("west", …)`). There the
+  start's $v_s$ under the seafloor is within 4% of the truth's, against 18% fast in the centre
+  (`seafloor_speeds`), so the slow waves stay within half a cycle. L2 alone recovers $v_s$
+  best, and the mute makes $v_p$ worse near the seafloor. The slow waves help where they
+  aren't cycle-skipped and hurt where they are. So a mute is a per-dataset decision, and
+  nothing tests it from the data yet: don't make one a default.
+  Judge a variant by the error ratio and the cosine with the true update by depth band, not by
+  the misfit, and on both parts. **Beware of tuning to one dataset:** the line, the stage
+  corners and the central ranking were chosen on the central 6 km against its own truth, and
+  the held-out part overturned them. Work settings out from the observed data, the start and
+  the source (`slow_waves_mute` derives the line from the start's slowest seafloor $v_s$:
+  616 m/s there, 690 in the west). Picking the slow
   waves' speed from the gathers failed (stacks and f-k within 1 km: the direct wave holds the
   energy, the slow waves the misfit). Each variant is 45–65 minutes and 4.4 GiB, so run
   them one at a time. Without the files, `tests/examples.rs` only parses the
