@@ -178,8 +178,8 @@ doesn't show.
   put its time shift's lag change at the start, which the shift's kink makes no gradient
   check can pass.
 - **Run natively on the host** (`just mac`, 2026-11-22). The dev container is a Linux VM
-  limited to 4 CPUs and 8 GiB of the maintainer's 10-core Mac, so long runs, gradients and
-  inversions are faster on the host. `just in mac` cross-compiles the CLI for
+  limited to 8 CPUs and 24 GiB of the maintainer's 10-core Mac (4 and 8 GiB until
+  2026-11-23), so long runs, gradients and inversions are faster on the host. `just in mac` cross-compiles the CLI for
   `aarch64-apple-darwin` in the container with `cargo zigbuild` (zig as the linker, pinned in
   `.devcontainer/Containerfile` from PyPI's `ziglang` by version and wheel hashes, since no
   Apple SDK is needed for a pure-Rust binary that links only libSystem), with
@@ -634,7 +634,9 @@ doesn't show.
   eight points 1.0%). Reciprocity rose from $1.5$ to $1.9 \times 10^{-6}$: more terms of
   single-precision round-off, not a loss of the transpose.
 - **Performance** on the container's 4 cores (Apple Silicon, Colima VM with 8 GiB): order 4
-  about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105. Memory is 17 padded f32
+  about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105. With 8 CPUs and 24 GiB
+  (2026-11-23) order 8 runs `examples/layered.toml` at 176 against 156: memory bandwidth,
+  not cores, limits it. Memory is 17 padded f32
   arrays plus CPML memory: the examples need 0.1–0.2 GiB. The work splits by $z$-plane, each
   plane a row at a time through nine scratch rows.
 - **Next:** elastic FWI; the README's roadmap lists the steps.

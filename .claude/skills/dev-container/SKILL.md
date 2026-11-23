@@ -59,8 +59,11 @@ docker compose -f .devcontainer/compose.yaml up --detach --build --wait
 
 ## Resources and trouble
 
-- The Colima VM has 4 CPUs and 8 GiB. `just check <config>` prints a run's memory; keep it
-  well under 8 GiB. Expect about 200 Mcell updates/s.
+- The Colima VM has 8 CPUs and 24 GiB of the Mac's 10 and 32 (`colima start --cpu 8
+  --memory 24`, since 2026-11-23; it had 4 and 8). `just check <config>` prints a run's
+  memory; keep it well under 23 GiB. Order 8 runs `examples/layered.toml` at 176 Mcells/s
+  (156 on 4 CPUs: the solver is limited by memory bandwidth, so more CPUs gain little; the
+  memory is what grew).
 - Working in a git worktree under the repository (e.g. `.claude/worktrees/<name>`): don't run
   `just in` there. Its compose file mounts `..`, the worktree, and `up` under the shared
   project name would recreate the one container with the worktree mounted. Use the main
@@ -75,4 +78,4 @@ docker compose -f .devcontainer/compose.yaml up --detach --build --wait
   the host and open http://localhost:8088. The command line is the other: `just in mac`
   cross-compiles it for macOS on Apple silicon into `out/mac/vibe-rations`, which the host
   runs natively, e.g. `out/mac/vibe-rations invert <config>` (all cores and memory, not the
-  VM's 4 and 8 GiB). A Linux binary from the container won't run on macOS.
+  VM's 8 and 24 GiB; 193 Mcells/s for the same example). A Linux binary from the container won't run on macOS.

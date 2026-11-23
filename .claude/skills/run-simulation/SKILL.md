@@ -50,10 +50,9 @@ Check these before running; `just in check <config>` prints all of them:
   and a replayed segment, about $42\sqrt N$ bytes per padded node for $N$ steps; `--invert`
   for an inversion, which adds L-BFGS's memory), and `run`/`check`/`gradient`/`invert`
   refuse runs larger than the memory available (the container
-  has about 7 GiB). Roughly $4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
+  has about 23 GiB). Roughly $4 \cdot 17 \cdot (n_x + 2L)(n_y + 2L)(n_z + 2L)$ bytes plus the
   model, the layers and the traces, with $L$ the stencil half-length (4 at order 8). Time
-  $\approx$ nodes $\times$ steps $/\, 1.6 \times 10^8$ seconds on the container's 4 cores at
-  order 8.
+  $\approx$ nodes $\times$ steps $/\, 1.7 \times 10^8$ seconds in the container at order 8.
 
 ## 3. Sources and wavelets
 
