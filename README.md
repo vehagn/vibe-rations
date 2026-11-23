@@ -704,7 +704,11 @@ What higher orders don't fix, from the literature and our measurements:
   default's 4.6 points per shortest S wavelength, 10.6 per Rayleigh wavelength at $f_0$: the
   Rayleigh wave runs about 1% fast and its swing is about 5% too large. It takes some 40
   points per Rayleigh wavelength to get within 4%, and the stencil's order doesn't help: the
-  free surface, not the stencil, is the error for surface waves. (The P-doubling test's 2.5%
+  free surface, not the stencil, is the error for surface waves. The excess is how sources
+  and receivers on the surface read $v_z$: mirrored evenly, it has a kink at the surface, so
+  each end reads it as if from $0.34\,h$ below and over-reads by about 11% per unit $kh$ of
+  the Rayleigh wave (`just accuracy the_free_surface_excess_by_frequency_and_depth`); at
+  $h/2$, where $v_z$ lives, there is none. (The P-doubling test's 2.5%
   is mostly its reference, which doubles the P wave as if it were plane.)
 - **Absorbing layers.** Longer stencils reach further across the layers' inner edge:
   with the time error kept, reflection rises from $1.5 \times 10^{-4}$ of the peak at

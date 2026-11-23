@@ -18,7 +18,7 @@ opens a shell there instead.
 | `just unit` | Module unit tests, the CLI tests and the examples check | seconds |
 | `just physics` | Whole simulations against analytic answers, misfits printed | ~3 min |
 | `just test` | Everything | ~3 min |
-| `just accuracy [name]` | The stencil order and time step study, and Lamb's problem on finer grids (prints tables) | ~4 min |
+| `just accuracy [name]` | The stencil order and time step study, Lamb's problem on finer grids, and the free surface's excess by frequency and depth (prints tables) | ~8 min |
 | `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
@@ -102,8 +102,8 @@ deploy/simulation-host/  setup.sh for a Debian machine that runs simulations, an
 .github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
-  accuracy.rs    the stencil-order study and Lamb's problem on finer grids (ignored; `just
-                 accuracy`)
+  accuracy.rs    the stencil-order study, Lamb's problem on finer grids and the free surface's
+                 excess by frequency and depth (ignored; `just accuracy`)
   interfaces.rs  plane waves at a planar interface, by position, sampling and order (ignored;
                  `just interfaces`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
@@ -498,9 +498,15 @@ doesn't show.
   vertical force on a Poisson solid, the surface's $v_z$ misfits by 15–28% at the default's
   4.6 points per shortest S wavelength (10.6 per Rayleigh wavelength at $f_0$), and 3.3–3.8%
   only at 42: the Rayleigh wave runs about 1% fast (second order) and its swing is 3–6% too
-  large (first order at the fine end; the evenly mirrored $v_z$'s kink, which interpolation
-  reads at $0.342\,h$ per unit slope, accounts for part, not tested further). The order and
-  the time error change nothing. The P-doubling test's 2.5% is mostly its own reference
+  large. The order and the time error change nothing. **The excess is the evenly mirrored
+  $v_z$'s kink** (`the_free_surface_excess_by_frequency_and_depth`; the log's 2026-11-23
+  entry): interpolating $v_z$ onto the surface reads it as if from $0.34\,h$ below, and a
+  surface force acts from there, so each end on the surface over-reads the Rayleigh wave by
+  about 11% per unit $kh_R$, in proportion to frequency at a fixed $h$, source and receiver
+  alike; with both at $h/2$, on $v_z$'s own points, there is none. Check such a hypothesis
+  with pairs of runs that differ in one end alone: the free surface's other errors cancel in
+  the difference. What is left with no kink is a negative error growing about as $f^2$
+  ($-1.2$% at 15 Hz and 5 m) and the speed error, which sets the misfit from 15 Hz up. The P-doubling test's 2.5% is mostly its own reference
   (doubling is exact only for a plane wave; on finer grids it tends to about 2.2%), so it
   can't show this. Pekeris's formulas came from the article's scanned pages (PMC528118); his
   eq. 66 gives the horizontal component, not implemented.

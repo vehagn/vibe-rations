@@ -55,8 +55,9 @@ physics *args:
     cargo test --release --test physics {{ args }} -- --nocapture --test-threads 1
 
 # The accuracy study: misfits against exact solutions for every stencil order and time step,
-# and Lamb's problem on finer grids (about 4 minutes; a test's name runs that one alone, e.g.
-# `just accuracy lambs_problem_on_finer_grids`). The README's "Accuracy" section summarises it.
+# Lamb's problem on finer grids, and the free surface's excess by frequency and depth (about 8
+# minutes; a test's name runs that one alone, e.g. `just accuracy lambs_problem_on_finer_grids`).
+# The README's "Accuracy" section summarises it.
 [group("check")]
 accuracy *name:
     cargo test --release --test accuracy {{ name }} -- --ignored --nocapture --test-threads 1
