@@ -383,6 +383,8 @@ fn optimised_coefficients() {
 /// carries the swing, an approximation for the much weaker body waves. Each end's own excess
 /// comes from pairs of runs that differ in it alone, receiver by receiver, so whatever else
 /// the free surface gets wrong cancels: the receiver's, (a) - (b); the source's, (b) - (c).
+/// (a′) and (b′) are (a) and (b) with `[boundary] surface_slope`, which continues the mirrored
+/// fields with their slope instead: the same ends again, primed.
 #[test]
 #[ignore = "a study, not a check: run with `just accuracy`"]
 fn the_free_surface_excess_by_frequency_and_depth() {
@@ -484,10 +486,12 @@ fn the_free_surface_excess_by_frequency_and_depth() {
         // [swing, amplitude] excess per receiver, per case; the surface receiver's c.
         let mut cases: Vec<Vec<[f64; 2]>> = Vec::new();
         let mut c = 0.0;
-        for (label, source_z, receiver_z) in [
-            ("(a) both on the surface", 0.0, 0.0),
-            ("(b) receivers at h/2", 0.0, 0.5 * h),
-            ("(c) both at h/2", 0.5 * h, 0.5 * h),
+        for (label, source_z, receiver_z, slope) in [
+            ("(a) both on the surface", 0.0, 0.0, false),
+            ("(b) receivers at h/2", 0.0, 0.5 * h, false),
+            ("(c) both at h/2", 0.5 * h, 0.5 * h, false),
+            ("(a′) (a), surface slope", 0.0, 0.0, true),
+            ("(b′) (b), surface slope", 0.0, 0.5 * h, true),
         ] {
             let n = |metres: f64| (metres / h).round() as usize + 1;
             let at = |p: [f64; 3], z: f64| [p[0], p[1], z];
@@ -505,6 +509,7 @@ fn the_free_surface_excess_by_frequency_and_depth() {
                 [boundary]
                 pml_width = {}
                 free_surface = true
+                surface_slope = {slope}
                 [[model.layer]]
                 top = 0.0
                 vp = {}
@@ -527,7 +532,7 @@ fn the_free_surface_excess_by_frequency_and_depth() {
                 at(survey::SOURCE, source_z),
             );
             let (sim, _) = simulate_timed(&toml);
-            if receiver_z == 0.0 {
+            if receiver_z == 0.0 && !slope {
                 // The mean depth, over h, of the vz values a surface receiver reads (vz lives
                 // at (k + ½) h; values above the surface fold onto those below).
                 let g = sim.solver.grid;
@@ -576,7 +581,12 @@ fn the_free_surface_excess_by_frequency_and_depth() {
         "  f0   kh_R   end        swing             per kh   amplitude          per kh   estimate"
     );
     for (f0, kh, c, cases) in ends {
-        for (label, x, y) in [("receiver", 0, 1), ("source", 1, 2)] {
+        for (label, x, y) in [
+            ("receiver", 0, 1),
+            ("source", 1, 2),
+            ("receiver′", 3, 4),
+            ("source′", 4, 2),
+        ] {
             let diff = |j: usize| {
                 cases[x]
                     .iter()
