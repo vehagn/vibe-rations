@@ -13,9 +13,10 @@
 //!   misfit and of its gradient, by component, by depth band.
 //! - `l2_rebuilt`: `l2` with the forward wavefields rebuilt backwards instead of replayed
 //!   from checkpoints, and how far its model lies from `l2`'s.
-//! - `mute_lines`, `west_l2`, `west_muted_l2`, `west_stages_muted_after_the_first`: the
-//!   western 6 km (`Case::part`), held out from the choices made on the central part, with
-//!   the slow waves' mute worked out from its own start (`slow_waves_mute`).
+//! - `mute_lines`, `west_l2`, `west_muted_l2`, `west_stages_muted_after_the_first`,
+//!   `west_misfit_by_mute`: the western 6 km (`Case::part`), held out from the choices made
+//!   on the central part, with the slow waves' mute worked out from its own start
+//!   (`slow_waves_mute`).
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
 //!   `stages_with_receivers_side`, and `muted_l2`, `muted_stages`, `down_weighted_l2` and
 //!   `down_weighted_stages` with the seafloor's slow waves muted or down-weighted: inversions
@@ -1049,6 +1050,73 @@ fn west_stages_muted_after_the_first() {
         "west-stages-muted-after-the-first",
         &Case::part("west", stages_muted_after_the_first_with(&mute)),
     );
+}
+
+/// `misfit_by_mute` on the western part, with the mute `slow_waves_mute` works out for it:
+/// on the central part the gradient's removed part pointed away from the truth below 750 m,
+/// and there the mute helped; here L2 unmuted moved vs towards the truth.
+#[test]
+#[ignore = "a study: `just marmousi2-study west_misfit_by_mute` (about 20 minutes)"]
+fn west_misfit_by_mute() {
+    let (velocity, mute) = slow_waves_mute(&Case::part("west", L2), 425.0);
+    println!("the mute line: {velocity:.0} m/s");
+    split_by_mute(
+        &Case::part("west", ("iterations = 0", "")),
+        &[
+            ("all", Vec::new()),
+            (
+                "muted",
+                mutes_of(muted_with("iterations = 0", false, &mute)),
+            ),
+        ],
+    );
+}
+
+/// The start's S speeds under the seafloor against the truth's, for each part: what decides
+/// whether the start predicts the slow waves within half a cycle. Over the columns inside the
+/// side layers, on the receivers' plane: vs on the seafloor's first solid node (the
+/// receivers'), the harmonic mean of vs over the 250 m below it (ten nodes), and the delay a
+/// wave at the truth's speeds gathers over 1 km behind one at the start's, 1 km times the
+/// difference of those mean slownesses, averaged over the columns and at its largest. Uses
+/// the truth: a diagnosis, not a rule an inversion could follow.
+#[test]
+#[ignore = "a study: `just marmousi2-study seafloor_speeds` (seconds)"]
+fn seafloor_speeds() {
+    for part in ["central", "west"] {
+        let case = Case::part(part, L2);
+        let (start, truth) = (case.model(&case.start), case.model(&case.truth));
+        let g = start.grid;
+        let receiver = case.start.receivers.positions().unwrap()[0];
+        let [_, j, top] = g.nearest_node(receiver).unwrap();
+        let w = case.start.boundary.pml_width;
+        let columns: Vec<usize> = (w..g.n[0] - w).collect();
+        let vs = |m: &Model, i: usize, k: usize| m.vs[g.interior_idx(i, j, k)] as f64;
+        let slowness =
+            |m: &Model, i: usize| (top..top + 10).map(|k| 1.0 / vs(m, i, k)).sum::<f64>() / 10.0;
+        let range = |m: &Model| {
+            columns
+                .iter()
+                .map(|&i| vs(m, i, top))
+                .fold((f64::INFINITY, 0.0f64), |(lo, hi), v| {
+                    (lo.min(v), hi.max(v))
+                })
+        };
+        let mean = |f: &dyn Fn(usize) -> f64| {
+            columns.iter().map(|&i| f(i)).sum::<f64>() / columns.len() as f64
+        };
+        let delay = |i: usize| 1000.0 * (slowness(&truth, i) - slowness(&start, i));
+        let largest = columns.iter().map(|&i| delay(i)).fold(0.0f64, f64::max);
+        let ((tl, th), (sl, sh)) = (range(&truth), range(&start));
+        println!(
+            "{part}: vs at {:.0} m, true {tl:.0}–{th:.0} m/s, start {sl:.0}–{sh:.0}; over the \
+             250 m below, harmonic means true {:.0}, start {:.0} m/s; delay over 1 km {:.2} s \
+             on average, {largest:.2} s at most",
+            top as f64 * g.h[2],
+            1.0 / mean(&|i| slowness(&truth, i)),
+            1.0 / mean(&|i| slowness(&start, i)),
+            mean(&delay),
+        );
+    }
 }
 
 /// The slow waves' mute lines `slow_waves_mute` works out for each part, at once.
