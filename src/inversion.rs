@@ -338,6 +338,20 @@ pub struct Shot {
     interval: f64,
 }
 
+impl Shot {
+    /// This shot's misfit as `measure` takes it.
+    fn measured(&self, measure: Measure) -> Result<Misfit> {
+        shot_misfit(
+            measure,
+            &self.config,
+            &self.observed,
+            &self.components,
+            self.samples,
+            self.interval,
+        )
+    }
+}
+
 /// The misfit, its gradient with respect to the unknowns, and the forward wavefields' energy
 /// at every interior node, all summed over the shots.
 pub struct Evaluation {
@@ -516,15 +530,7 @@ impl Inversion {
         }
         // Every stage's filter must suit the traces before the first one starts.
         for stage in &stages[1..] {
-            let shot = &shots[0];
-            shot_misfit(
-                Measure::of(stage, settings, source_frequency),
-                &shot.config,
-                &shot.observed,
-                &shot.components,
-                shot.samples,
-                shot.interval,
-            )?;
+            shots[0].measured(Measure::of(stage, settings, source_frequency))?;
         }
 
         // The nodes each parameter may change at.
@@ -656,13 +662,7 @@ impl Inversion {
             settings.water_level > 0.0,
             "the water level must be positive"
         );
-        inversion.illuminate_from_receivers(0)?;
-        let e = inversion.evaluate(&inversion.model)?;
-        inversion.memory_bytes = inversion.memory_bytes.max(e.memory_bytes);
-        inversion.misfit = e.misfit;
-        inversion.g = e.gradient;
-        inversion.preconditioner = inversion.preconditioner_for(&e.illumination);
-        inversion.stage_misfits.push(e.misfit);
+        inversion.start_stage()?;
         Ok(inversion)
     }
 
@@ -686,17 +686,17 @@ impl Inversion {
         );
         let measure = Measure::of(&self.stages[s], &self.settings, self.source_frequency);
         for shot in &mut self.shots {
-            shot.misfit = shot_misfit(
-                measure.clone(),
-                &shot.config,
-                &shot.observed,
-                &shot.components,
-                shot.samples,
-                shot.interval,
-            )?;
+            shot.misfit = shot.measured(measure.clone())?;
         }
         self.stage = s;
         self.lbfgs.clear();
+        self.start_stage()
+    }
+
+    /// The misfit, gradient and preconditioner the stage under way starts from, at the model
+    /// as it stands.
+    fn start_stage(&mut self) -> Result<()> {
+        let s = self.stage;
         self.illuminate_from_receivers(s as u64)?;
         let e = self.evaluate(&self.model)?;
         self.memory_bytes = self.memory_bytes.max(e.memory_bytes);
@@ -1086,6 +1086,42 @@ impl Inversion {
         };
         self.history.push(it.clone());
         Ok(Some(it))
+    }
+
+    /// What `invert` writes after each iteration, into `out`: the model as it stands
+    /// ([`Model::write`]) and `inversion.json`, with the settings, every stage begun and the
+    /// misfit it started from, every iteration, the most memory held so far, and why the
+    /// inversion stopped early (`stopped`), if it did.
+    pub fn write_outputs(&self, out: &Path, stopped: Option<&str>) -> Result<()> {
+        std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+        self.model.write(out)?;
+        let stages: Vec<serde_json::Value> = self
+            .stages
+            .iter()
+            .zip(&self.stage_misfits)
+            .map(|(stage, misfit)| {
+                serde_json::json!({
+                    "max_frequency": stage.max_frequency,
+                    "misfit": stage.misfit,
+                    "iterations": stage.iterations,
+                    "starting_misfit": misfit,
+                })
+            })
+            .collect();
+        let summary = serde_json::json!({
+            "settings": self.settings,
+            "unknowns": self.unknowns(),
+            "starting_misfit": self.stage_misfits[0],
+            "stages": stages,
+            "iterations": self.history,
+            "memory_bytes": self.memory_bytes,
+            "stopped": stopped,
+        });
+        std::fs::write(
+            out.join("inversion.json"),
+            serde_json::to_string_pretty(&summary)? + "\n",
+        )?;
+        Ok(())
     }
 }
 

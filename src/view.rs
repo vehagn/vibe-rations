@@ -634,29 +634,13 @@ impl InversionView {
         self.inversion.as_ref().map_or(0, |i| i.memory_bytes) + self.pictures.memory_bytes()
     }
 
-    /// What `invert` writes after each iteration: the model as `vp.npy`, `vs.npy` and
-    /// `rho.npy`, and `inversion.json` with the settings and every iteration's misfit.
+    /// What `invert` writes after each iteration ([`Inversion::write_outputs`]), once the
+    /// inversion has started; nothing before.
     pub fn write_outputs(&self, out: &Path) -> Result<()> {
-        std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-        let m = &self.pictures.model;
-        let shape = [m.grid.n[2], m.grid.n[1], m.grid.n[0]];
-        for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
-            npy::write(&out.join(format!("{name}.npy")), &shape, values)?;
+        match &self.inversion {
+            Some(inversion) => inversion.write_outputs(out, self.stopped.as_deref()),
+            None => Ok(()),
         }
-        let inv = self.inversion.as_ref();
-        let summary = json!({
-            "settings": self.settings,
-            "unknowns": inv.map(Inversion::unknowns),
-            "starting_misfit": self.first_misfit,
-            "iterations": inv.map_or(json!([]), |i| json!(i.history)),
-            "memory_bytes": inv.map(|i| i.memory_bytes),
-            "stopped": self.stopped,
-        });
-        std::fs::write(
-            out.join("inversion.json"),
-            serde_json::to_string_pretty(&summary)? + "\n",
-        )?;
-        Ok(())
     }
 }
 

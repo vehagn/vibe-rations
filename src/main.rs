@@ -517,10 +517,6 @@ fn run() -> Result<()> {
         }
         Command::Invert { config, out } => {
             let (cfg, sim, planned) = load(&config, Kind::Invert)?;
-            let settings = cfg
-                .inversion
-                .clone()
-                .context("the configuration has no [inversion] section")?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
             eprintln!(
@@ -536,23 +532,24 @@ fn run() -> Result<()> {
                 );
             }
             drop(sim);
-            let base = config.parent().unwrap_or(Path::new("."));
             eprintln!(
                 "the starting misfit and gradient, {} shot(s)",
                 cfg.sources.len()
             );
-            let mut inversion = Inversion::from_config(&cfg, base)?;
-            let first = inversion.misfit();
-            eprintln!("{} unknowns; misfit {first:.6e}", inversion.unknowns());
-            std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
-            save(&out, &inversion, &settings, first)?;
+            let mut inversion = Inversion::from_config(&cfg, base(&config))?;
+            eprintln!(
+                "{} unknowns; misfit {:.6e}",
+                inversion.unknowns(),
+                inversion.misfit()
+            );
+            inversion.write_outputs(&out, None)?;
             let stages = inversion.stages().to_vec();
             for (s, stage) in stages.iter().enumerate() {
                 if s > 0 {
                     inversion.begin_stage(s)?;
                     // So that inversion.json lists every stage begun, even one that takes no
                     // step.
-                    save(&out, &inversion, &settings, first)?;
+                    inversion.write_outputs(&out, None)?;
                 }
                 let start = inversion.misfit();
                 if stages.len() > 1 {
@@ -582,7 +579,7 @@ fn run() -> Result<()> {
                         100.0 * it.largest_change,
                         if it.restarted { ", restarted" } else { "" }
                     );
-                    save(&out, &inversion, &settings, first)?;
+                    inversion.write_outputs(&out, None)?;
                 }
             }
             eprintln!("wrote {}", out.display());
@@ -737,43 +734,6 @@ fn load(path: &Path, kind: Kind) -> Result<(Config, Simulation, memory::Memory)>
     let sim = Simulation::new(&cfg, base(path))
         .with_context(|| format!("setting up {}", path.display()))?;
     Ok((cfg, sim, m))
-}
-
-/// Writes the model as it stands and the history so far.
-fn save(
-    out: &Path,
-    inversion: &Inversion,
-    settings: &vibe_rations::config::InversionConfig,
-    first: f64,
-) -> Result<()> {
-    let m = &inversion.model;
-    let shape = [m.grid.n[2], m.grid.n[1], m.grid.n[0]];
-    for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
-        npy::write(&out.join(format!("{name}.npy")), &shape, values)?;
-    }
-    let summary = serde_json::json!({
-        "settings": settings,
-        "unknowns": inversion.unknowns(),
-        "starting_misfit": first,
-        "stages": inversion
-            .stages()
-            .iter()
-            .zip(&inversion.stage_misfits)
-            .map(|(stage, misfit)| serde_json::json!({
-                "max_frequency": stage.max_frequency,
-                "misfit": stage.misfit,
-                "iterations": stage.iterations,
-                "starting_misfit": misfit,
-            }))
-            .collect::<Vec<_>>(),
-        "iterations": inversion.history,
-        "memory_bytes": inversion.memory_bytes,
-    });
-    std::fs::write(
-        out.join("inversion.json"),
-        serde_json::to_string_pretty(&summary)? + "\n",
-    )?;
-    Ok(())
 }
 
 fn report(sim: &Simulation) {
