@@ -20,7 +20,7 @@ use crate::model::{Files, Model};
 use crate::npy;
 use crate::receiver::{Component, Receivers};
 use crate::snapshot::Snapshot;
-use crate::solver::{Band, Field, Solver};
+use crate::solver::{Band, Fields, Solver};
 use crate::source::{Mechanism, Source, Wavelet};
 use crate::tdt::Warp;
 
@@ -311,13 +311,6 @@ impl Simulation {
         let solver = Solver::new(model, dt, w, b.free_surface, &pml)
             .with_stencil(stencil)
             .with_surface_slope(b.surface_slope);
-        // Whether the node nearest a point is in an absorbing layer.
-        let in_pml = |point: [f64; 3]| {
-            point
-                .iter()
-                .zip(&solver.cpml)
-                .any(|(&x, c)| c.slab(x.round() as usize).is_some())
-        };
 
         let mut sources = Vec::new();
         let mut source_info = Vec::new();
@@ -325,7 +318,7 @@ impl Simulation {
             let point = grid
                 .coordinates(s.position)
                 .with_context(|| format!("source at {:?} is off the grid", s.position))?;
-            if in_pml(point) {
+            if solver.in_layers(point) {
                 warnings.push(format!(
                     "source at {:?} is inside an absorbing layer",
                     s.position
@@ -357,7 +350,7 @@ impl Simulation {
                 .with_context(|| format!("receiver at {p:?} is off the grid"))?;
             points.push(point);
         }
-        let in_layers = points.iter().filter(|&&p| in_pml(p)).count();
+        let in_layers = points.iter().filter(|&&p| solver.in_layers(p)).count();
         if in_layers > 0 {
             warnings.push(format!(
                 "{in_layers} receiver(s) inside the absorbing layers will record damped waves"
@@ -465,11 +458,6 @@ impl Simulation {
     /// and gradients are no longer exact: a node further in, they are.
     pub fn receivers_next_to_layers(&self) -> usize {
         let s = &self.solver;
-        let in_layers = |p: &[f64; 3]| {
-            p.iter()
-                .zip(&s.cpml)
-                .any(|(&x, c)| c.slab(x.round() as usize).is_some())
-        };
         let damped = |axis: usize, m: usize, shift: f64| {
             let c = &s.cpml[axis];
             let stagger = if shift == 0.0 {
@@ -482,16 +470,10 @@ impl Simulation {
         let r = &self.receivers;
         r.points
             .iter()
-            .filter(|p| !in_layers(p))
+            .filter(|&&p| !s.in_layers(p))
             .filter(|p| {
                 r.components.iter().any(|c| {
-                    let fields: &[Field] = match c {
-                        Component::Vx => &[Field::Vx],
-                        Component::Vy => &[Field::Vy],
-                        Component::Vz => &[Field::Vz],
-                        Component::P => &[Field::Sxx, Field::Syy, Field::Szz],
-                    };
-                    fields.iter().any(|&f| {
+                    c.fields().iter().any(|&f| {
                         let (shift, parity) = f.lattice();
                         (0..3).any(|a| {
                             let parity = if a == 2 { parity } else { 1.0 };
@@ -520,44 +502,15 @@ impl Simulation {
     /// Takes the last step back ([`Solver::step_back_with`]), withdrawing what the sources
     /// added during it; `before` is `band`'s record of the state before that step.
     pub fn step_back(&mut self, band: &Band, before: &[f32]) {
-        let sources = &self.sources;
         let n = self.solver.step.saturating_sub(1);
-        self.solver.step_back_with(
-            band,
-            before,
-            |f, t| {
-                sources
-                    .iter()
-                    .filter(|s| s.is_force())
-                    .for_each(|s| s.withdraw(f, n, t))
-            },
-            |f, t| {
-                sources
-                    .iter()
-                    .filter(|s| !s.is_force())
-                    .for_each(|s| s.withdraw(f, n, t))
-            },
-        );
+        let [force, moment] = acting(&self.sources, n, Source::withdraw);
+        self.solver.step_back_with(band, before, force, moment);
     }
 
     /// Advances the wavefield one step, with the sources, without recording anything.
     pub fn step(&mut self) {
-        let sources = &self.sources;
-        let n = self.solver.step;
-        self.solver.step_with(
-            |f, t| {
-                sources
-                    .iter()
-                    .filter(|s| s.is_force())
-                    .for_each(|s| s.inject(f, n, t))
-            },
-            |f, t| {
-                sources
-                    .iter()
-                    .filter(|s| !s.is_force())
-                    .for_each(|s| s.inject(f, n, t))
-            },
-        );
+        let [force, moment] = acting(&self.sources, self.solver.step, Source::inject);
+        self.solver.step_with(force, moment);
     }
 
     /// Advances one step and records the receivers if this step is one to record.
@@ -620,17 +573,9 @@ impl Simulation {
         let samples = self.receivers.samples;
         let components = self.receivers.components.clone();
         for (c, data) in components.into_iter().zip(0..) {
-            let Some(warp) = self.trace_warp(c) else {
-                continue;
-            };
-            self.receivers.traces[data]
-                .par_chunks_mut(samples)
-                .for_each(|trace| {
-                    let x: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
-                    for (t, y) in trace.iter_mut().zip(warp.apply(&x)) {
-                        *t = y as f32;
-                    }
-                });
+            if let Some(warp) = self.trace_warp(c) {
+                map_traces(&mut self.receivers.traces[data], samples, |x| warp.apply(x));
+            }
         }
     }
 
@@ -668,12 +613,7 @@ impl Simulation {
             .zip(residuals)
             .map(|(&c, mut r)| {
                 if let Some(warp) = self.trace_warp(c) {
-                    r.par_chunks_mut(samples).for_each(|trace| {
-                        let y: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
-                        for (t, x) in trace.iter_mut().zip(warp.apply_transpose(&y)) {
-                            *t = x as f32;
-                        }
-                    });
+                    map_traces(&mut r, samples, |y| warp.apply_transpose(y));
                 }
                 r
             })
@@ -854,6 +794,33 @@ impl RunInfo {
     }
 }
 
+/// What `sources` do during step `n`, as [`Solver::step_with`] and
+/// [`Solver::step_back_with`] take it: `act` ([`Source::inject`] or [`Source::withdraw`]) for
+/// the forces, with the velocities, and for the moment tensors, with the stresses.
+fn acting(
+    sources: &[Source],
+    n: usize,
+    act: fn(&Source, &mut Fields, usize, f64),
+) -> [impl FnOnce(&mut Fields, f64) + '_; 2] {
+    [true, false].map(|forces| {
+        move |f: &mut Fields, t: f64| {
+            for s in sources.iter().filter(|s| s.is_force() == forces) {
+                act(s, f, n, t);
+            }
+        }
+    })
+}
+
+/// Replaces each trace of `samples` values in `data` by `f` of it, taken in double precision.
+fn map_traces(data: &mut [f32], samples: usize, f: impl Fn(&[f64]) -> Vec<f64> + Sync) {
+    data.par_chunks_mut(samples).for_each(|trace| {
+        let x: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
+        for (t, y) in trace.iter_mut().zip(f(&x)) {
+            *t = y as f32;
+        }
+    });
+}
+
 /// A duration for people: 12s, 3m05s, 1h02m.
 pub fn human_time(seconds: f64) -> String {
     let s = seconds.round() as u64;
@@ -926,17 +893,12 @@ mod tests {
     fn interior_error(
         g: &Grid,
         interior: &[std::ops::Range<usize>; 3],
-        a: &crate::solver::Fields,
-        b: &crate::solver::Fields,
+        a: &Fields,
+        b: &Fields,
         scale: &[f32; 9],
     ) -> f64 {
-        use crate::solver::Field::*;
         let mut worst = 0.0f64;
-        for (c, f) in [Vx, Vy, Vz, Sxx, Syy, Szz, Sxy, Sxz, Syz]
-            .into_iter()
-            .enumerate()
-        {
-            let (a, b) = (a.get(f), b.get(f));
+        for (c, (a, b)) in a.arrays().into_iter().zip(b.arrays()).enumerate() {
             for k in interior[2].clone() {
                 for j in interior[1].clone() {
                     for i in interior[0].clone() {
@@ -988,12 +950,8 @@ mod tests {
             }
             let mut scale = [0.0f32; 9];
             for f in &states {
-                use crate::solver::Field::*;
-                for (c, a) in [Vx, Vy, Vz, Sxx, Syy, Szz, Sxy, Sxz, Syz]
-                    .into_iter()
-                    .enumerate()
-                {
-                    scale[c] = f.get(a).iter().fold(scale[c], |m, v| m.max(v.abs()));
+                for (s, a) in scale.iter_mut().zip(f.arrays()) {
+                    *s = a.iter().fold(*s, |m, v| m.max(v.abs()));
                 }
             }
             let mut worst = 0.0f64;

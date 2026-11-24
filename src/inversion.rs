@@ -26,7 +26,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
-use crate::gradient::{Strategy, gradient_with};
+use crate::gradient::{Strategy, gradient_with, illuminate};
 use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
@@ -530,7 +530,6 @@ impl Inversion {
         // The nodes each parameter may change at.
         let g = start.grid;
         let [nx, ny, nz] = g.n;
-        let layers = first.solver.cpml.each_ref().map(|c| c.clone());
         let fixed_depth = settings.fixed_above.unwrap_or(f64::NEG_INFINITY);
         let mut free = Vec::new();
         for &p in &settings.parameters {
@@ -541,12 +540,10 @@ impl Inversion {
                 }
                 for j in 0..ny {
                     for i in 0..nx {
-                        let in_layers = [i, j, k]
-                            .iter()
-                            .zip(&layers)
-                            .any(|(&n, c)| c.slab(n).is_some());
                         let n = g.interior_idx(i, j, k);
-                        if !in_layers && !(p == Parameter::Vs && start.vs[n] == 0.0) {
+                        if !first.solver.in_layers([i, j, k])
+                            && !(p == Parameter::Vs && start.vs[n] == 0.0)
+                        {
                             nodes.push(n);
                         }
                     }
@@ -1014,7 +1011,11 @@ impl Inversion {
                 };
                 sim.solver
                     .step_with(|f, t| send(&forces, f, t), |f, t| send(&stresses, f, t));
-                add_energy(&sim.solver, &mut energy);
+                illuminate(
+                    &sim.solver.grid,
+                    &mut energy,
+                    sim.solver.fields.velocities(),
+                );
             }
         }
         energy.iter_mut().for_each(|e| *e /= runs.max(1) as f64);
@@ -1104,26 +1105,6 @@ fn shot_misfit(
         crate::misfit::offsets(config)?
     };
     Misfit::new(measure, observed, components, samples, interval, &offsets)
-}
-
-/// Adds |v|² at every interior node, each component taken where it is stored.
-fn add_energy(solver: &crate::solver::Solver, energy: &mut [f64]) {
-    use rayon::prelude::*;
-    let g = solver.grid;
-    let [nx, ny, _] = g.n;
-    let v = [&solver.fields.vx, &solver.fields.vy, &solver.fields.vz];
-    energy
-        .par_chunks_mut(nx * ny)
-        .enumerate()
-        .for_each(|(k, plane)| {
-            for j in 0..ny {
-                let row = g.idx(0, j, k);
-                for i in 0..nx {
-                    let p = row + i;
-                    plane[j * nx + i] += v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>();
-                }
-            }
-        });
 }
 
 /// The next number of a SplitMix64 sequence (Steele, Lea & Flood 2014): reproducible signs
