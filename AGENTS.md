@@ -111,6 +111,8 @@ tests/
   reconstruction.rs  the rebuilt wavefield's drift (ignored; `just drift`)
   gradient_accuracy.rs  gradients against the exact kernels (studies ignored; `just
                  gradient-accuracy`), and a baseline at the coarsest grid
+  analytic_inversion.rs  the inversion against Born's Gauss–Newton solution in a full space:
+                 J from Stokes's solution, checked against the kernels; studies ignored
   common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
                  force's field with its gradient for any time function, and the exact kernels;
                  plane.rs: plane waves at normal incidence on an interface, kept exactly 1D,
