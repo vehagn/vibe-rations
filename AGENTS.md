@@ -341,12 +341,12 @@ doesn't show.
   The drift is single-precision round-off, $10^{-7}$–$10^{-6}$ of the gradient, set by the
   loudest stretch of the field in a segment; the layers and the free surface add nothing
   (rigid walls drift the same), water five times more (not traced). Inside the layers the
-  rebuilt field and gradient mean nothing. **Checkpoints stay the default**, also in the
-  inversion, which rebuilds only with `[inversion] reconstruct = true` (its plan exact, 2.44
-  against 4.41 GiB on `examples/marmousi2/central.toml`). Five iterations there rebuilt and
-  checkpointed reach the same model to about $10^{-5}$ of the update and the same misfits to
-  every printed digit, about 16% slower (the log's 2026-11-24 entry), so use it wherever
-  memory binds; whether to make it the default is the maintainer's call. When `gradient` gains an array, add it to
+  rebuilt field and gradient mean nothing. **An inversion rebuilds by default** since
+  2026-11-24 (`[inversion] reconstruct`, `false` to replay checkpoints, bit for bit; its plan
+  exact, 2.44 against 4.41 GiB on `examples/marmousi2/central.toml`): five iterations there
+  rebuilt and checkpointed reach the same model to about $10^{-5}$ of the update and the same
+  misfits to every printed digit, about 16% slower (the log's 2026-11-24 entries).
+  `gradient` still replays checkpoints unless given `--reconstruct`, so it stays exact. When `gradient` gains an array, add it to
   both `Plan::gradient_memory` and `Plan::reconstruction_memory`; when the step gains an
   operation, `step_back_with` must undo it in reverse order (`steps_back_inside_the_band`
   and `the_rebuilt_wavefield_follows_the_run` catch a miss).
@@ -373,7 +373,7 @@ doesn't show.
   Judge a variant by the error ratio and the cosine with the true update by depth band, not by
   the misfit, and on both parts, within four nodes of the receivers' plane (`ACROSS`: over the
   whole section's 5 km across, which one line of shots barely sees, every number is within 1%
-  of 1). The whole section (`whole.toml`, 25 hours and 48 GiB on gauss; `whole_by_region`)
+  of 1). The whole section (`whole.toml`, 25 hours and 48 GiB on gauss with checkpoints, 22 GiB rebuilt; `whole_by_region`)
   shows both parts' behaviour in one survey: with one mute, $v_s$ improves where the start
   is within half a cycle and drifts away at 10.5–14.5 km, where it isn't. **Beware of tuning to one dataset:** the line, the stage
   corners and the central ranking were chosen on the central 6 km against its own truth, and
@@ -381,7 +381,7 @@ doesn't show.
   the source (`slow_waves_mute` derives the line from the start's slowest seafloor $v_s$:
   616 m/s there, 690 in the west). Picking the slow
   waves' speed from the gathers failed (stacks and f-k within 1 km: the direct wave holds the
-  energy, the slow waves the misfit). Each variant is 45–65 minutes and 4.4 GiB, so run
+  energy, the slow waves the misfit). Each variant is 45–65 minutes and 2.4 GiB rebuilt (4.4 with checkpoints), so run
   them one at a time. Without the files, `tests/examples.rs` only parses the
   configurations and `web/build.sh` leaves them out; the web image's `marmousi2` stage fetches
   and converts them itself, so the hosted page has them.

@@ -725,8 +725,10 @@ pub struct InversionConfig {
     /// from the band around the absorbing layers, as `gradient --reconstruct` does
     /// ([`crate::gradient::Strategy::Reconstruct`], segments of the length that needs least
     /// memory), instead of replaying it from checkpoints: exact only up to single-precision
-    /// round-off.
-    #[serde(default)]
+    /// round-off. On by default: on Marmousi2's central part five iterations reach the
+    /// checkpointed model to about 10⁻⁵ of the update in 45% less memory and about 16% more
+    /// time (the research log, 2026-11-24); `false` replays checkpoints, bit for bit.
+    #[serde(default = "default_true")]
     pub reconstruct: bool,
     /// Bounds on the inverted values; by default half the smallest (non-zero, for vs) and twice
     /// the largest of the starting model's, and for vp no faster than the time step allows.

@@ -1,8 +1,10 @@
 # The whole Marmousi2 section, 17 km by 3.5 km, extruded 5 km along y: an elastic FWI sized
-# to use about 48 GiB on gauss (`vibe-rations memory --invert`). Starts from the section
-# smoothed over 250 m (25m-smooth, made with `vibe-rations extrude ... --smooth 250`), with
-# the true density; inverts vp and vs from nine shots' vx and vz on the seafloor, by L2 with
-# the slow seafloor waves muted (the central part's study, tests/marmousi2_study.rs).
+# to use about 48 GiB on gauss with checkpoints (`vibe-rations memory --invert`); 22 GiB
+# with the wavefields rebuilt, the default since 2026-11-24 (`reconstruct = false` for 48).
+# Starts from the section smoothed over 250 m (25m-smooth, made with `vibe-rations extrude
+# ... --smooth 250`), with the true density; inverts vp and vs from nine shots' vx and vz
+# on the seafloor, by L2 with the slow seafloor waves muted (the central part's study,
+# tests/marmousi2_study.rs).
 [grid]
 points = [681, 201, 141]
 spacing = 25.0
