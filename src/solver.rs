@@ -40,6 +40,7 @@ use crate::fd::Stencil;
 use crate::grid::{AsPoint, Grid};
 use crate::model::Model;
 use crate::receiver::Component;
+use crate::simd::Kernels;
 
 /// How many values below a free surface estimate a field's slope there, one-sidedly
 /// ([`Solver::continue_with_slope`]): fifth order. Four points misread a vertically incident P
@@ -317,6 +318,8 @@ pub struct Solver {
     pub surface_slope: bool,
     /// Steps taken.
     pub step: usize,
+    /// The compiled update loops it runs, which this CPU can ([`Solver::set_kernels`]).
+    kernels: Kernels,
 }
 
 impl Solver {
@@ -362,7 +365,21 @@ impl Solver {
             stencil: Stencil::taylor(4).expect("order 4 exists"),
             surface_slope: false,
             step: 0,
+            kernels: Kernels::chosen(),
         }
+    }
+
+    /// The compiled update loops it runs (crate::simd).
+    pub fn kernels(&self) -> Kernels {
+        self.kernels
+    }
+
+    /// Runs the update loops compiled as `kernels` say where this CPU can, else the plain
+    /// ones; returns those it will run. Both give the same results bit for bit.
+    pub fn set_kernels(&mut self, kernels: Kernels) -> Kernels {
+        // Only a CPU that has them may run the AVX2 loops: `sweep` relies on it.
+        self.kernels = kernels.or_plain();
+        self.kernels
     }
 
     /// Reads and spreads fields mirrored evenly above a free surface continued with their
@@ -404,6 +421,7 @@ impl Solver {
             sponge: self.sponge.clone(),
             surface_slope: self.surface_slope,
             step: 0,
+            kernels: self.kernels,
         }
     }
 
@@ -534,10 +552,6 @@ impl Solver {
     /// Adds `sign` times the velocity increment; with `layers` false, without the CPML.
     fn update_velocity(&mut self, sign: f32, layers: bool) {
         let g = self.grid;
-        let [nx, ny, _] = g.n;
-        let [_, sy, sz] = g.strides();
-        let nxt = g.padded()[0];
-        let ih = g.h.map(|h| (1.0 / h) as f32);
         let Fields {
             vx,
             vy,
@@ -549,76 +563,27 @@ impl Solver {
             sxz,
             syz,
         } = &mut self.fields;
-        let (sxx, syy, szz, sxy, sxz, syz) =
-            (&sxx[..], &syy[..], &szz[..], &sxy[..], &sxz[..], &syz[..]);
-        let m = &self.material;
-        let st = &self.stencil;
-        let halo = g.halo;
-        let [cx, cy, cz] = &self.cpml;
-        let wx = cx.width();
+        let update = VelocityUpdate {
+            g,
+            sign,
+            ih: g.h.map(|h| (1.0 / h) as f32),
+            stress: [&sxx[..], &syy[..], &szz[..], &sxy[..], &sxz[..], &syz[..]],
+            m: &self.material,
+            st: &self.stencil,
+            cpml: &self.cpml,
+        };
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
         let psi = if layers { &mut self.psi_v } else { &mut none };
-        planes(&g, [vx, vy, vz], psi, &self.cpml)
-            .into_par_iter()
-            .for_each_init(
-                || Rows::new(nx),
-                |rows, plane| {
-                    let Plane {
-                        kz,
-                        out: [vx, vy, vz],
-                        mut psi_x,
-                        mut psi_y,
-                        mut psi_z,
-                    } = plane;
-                    let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-                    for j in 0..ny {
-                        let r = g.idx(0, j, kz);
-                        st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
-                        st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
-                        st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
-                        st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
-                        st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
-                        st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
-                        st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
-                        st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
-                        st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
-
-                        if let Some(p) = psi_x.as_deref_mut() {
-                            let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
-                            cx.apply_along(d0, p0, Stagger::Half);
-                            cx.apply_along(d3, p1, Stagger::Node);
-                            cx.apply_along(d6, p2, Stagger::Node);
-                        }
-                        if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
-                            let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
-                            cy.apply_across(s, d1, p0, Stagger::Node);
-                            cy.apply_across(s, d4, p1, Stagger::Half);
-                            cy.apply_across(s, d7, p2, Stagger::Node);
-                        }
-                        if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
-                            let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
-                            cz.apply_across(s, d2, p0, Stagger::Node);
-                            cz.apply_across(s, d5, p1, Stagger::Node);
-                            cz.apply_across(s, d8, p2, Stagger::Half);
-                        }
-
-                        let o = (j + halo) * nxt + halo;
-                        add_sum(&mut vx[o..o + nx], sign, &m.bx[r..r + nx], d0, d1, d2);
-                        add_sum(&mut vy[o..o + nx], sign, &m.by[r..r + nx], d3, d4, d5);
-                        add_sum(&mut vz[o..o + nx], sign, &m.bz[r..r + nx], d6, d7, d8);
-                    }
-                },
-            );
+        sweep(
+            self.kernels,
+            &update,
+            planes(&g, [vx, vy, vz], psi, &self.cpml),
+        );
     }
 
     /// Adds `sign` times the stress increment; with `layers` false, without the CPML.
     fn update_stress(&mut self, sign: f32, layers: bool) {
         let g = self.grid;
-        let [nx, ny, _] = g.n;
-        let [_, sy, sz] = g.strides();
-        let nxt = g.padded()[0];
-        let ih = g.h.map(|h| (1.0 / h) as f32);
-        let free_surface = self.free_surface;
         let Fields {
             vx,
             vy,
@@ -630,95 +595,23 @@ impl Solver {
             sxz,
             syz,
         } = &mut self.fields;
-        let (vx, vy, vz) = (&vx[..], &vy[..], &vz[..]);
-        let m = &self.material;
-        let st = &self.stencil;
-        let halo = g.halo;
-        let [cx, cy, cz] = &self.cpml;
-        let wx = cx.width();
+        let update = StressUpdate {
+            g,
+            sign,
+            ih: g.h.map(|h| (1.0 / h) as f32),
+            free_surface: self.free_surface,
+            v: [&vx[..], &vy[..], &vz[..]],
+            m: &self.material,
+            st: &self.stencil,
+            cpml: &self.cpml,
+        };
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
         let psi = if layers { &mut self.psi_s } else { &mut none };
-        planes(&g, [sxx, syy, szz, sxy, sxz, syz], psi, &self.cpml)
-            .into_par_iter()
-            .for_each_init(
-                || Rows::new(nx),
-                |rows, plane| {
-                    let Plane {
-                        kz,
-                        out: [sxx, syy, szz, sxy, sxz, syz],
-                        mut psi_x,
-                        mut psi_y,
-                        mut psi_z,
-                    } = plane;
-                    let surface = free_surface && kz == 0;
-                    let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-                    for j in 0..ny {
-                        let r = g.idx(0, j, kz);
-                        st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
-                        st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
-                        if surface {
-                            d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
-                        } else {
-                            st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
-                        }
-                        st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
-                        st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
-                        st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
-                        st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
-                        st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
-                        st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
-
-                        if let Some(p) = psi_x.as_deref_mut() {
-                            let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
-                            cx.apply_along(d0, p0, Stagger::Node);
-                            cx.apply_along(d4, p1, Stagger::Half);
-                            cx.apply_along(d6, p2, Stagger::Half);
-                        }
-                        if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
-                            let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
-                            cy.apply_across(s, d1, p0, Stagger::Node);
-                            cy.apply_across(s, d3, p1, Stagger::Half);
-                            cy.apply_across(s, d8, p2, Stagger::Half);
-                        }
-                        if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
-                            let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
-                            cz.apply_across(s, d2, p0, Stagger::Node);
-                            cz.apply_across(s, d5, p1, Stagger::Half);
-                            cz.apply_across(s, d7, p2, Stagger::Half);
-                        }
-
-                        let o = (j + halo) * nxt + halo;
-                        let lam = &m.lam[r..r + nx];
-                        let l2m = &m.l2m[r..r + nx];
-                        let (sxx, syy, szz) = (
-                            &mut sxx[o..o + nx],
-                            &mut syy[o..o + nx],
-                            &mut szz[o..o + nx],
-                        );
-                        if surface {
-                            for i in 0..nx {
-                                // With σzz = 0, ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy).
-                                let (l, l2) = (lam[i], l2m[i]);
-                                let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
-                                let (a, b) = (l2 - q, l - q);
-                                sxx[i] += sign * (a * d0[i] + b * d1[i]);
-                                syy[i] += sign * (b * d0[i] + a * d1[i]);
-                                szz[i] = 0.0;
-                            }
-                        } else {
-                            for i in 0..nx {
-                                let (l, l2) = (lam[i], l2m[i]);
-                                sxx[i] += sign * (l2 * d0[i] + l * (d1[i] + d2[i]));
-                                syy[i] += sign * (l2 * d1[i] + l * (d0[i] + d2[i]));
-                                szz[i] += sign * (l2 * d2[i] + l * (d0[i] + d1[i]));
-                            }
-                        }
-                        add_sum2(&mut sxy[o..o + nx], sign, &m.mxy[r..r + nx], d3, d4);
-                        add_sum2(&mut sxz[o..o + nx], sign, &m.mxz[r..r + nx], d5, d6);
-                        add_sum2(&mut syz[o..o + nx], sign, &m.myz[r..r + nx], d7, d8);
-                    }
-                },
-            );
+        sweep(
+            self.kernels,
+            &update,
+            planes(&g, [sxx, syy, szz, sxy, sxz, syz], psi, &self.cpml),
+        );
     }
 
     /// The strain rates the stress update applies the stiffness to, from the velocities
@@ -729,51 +622,20 @@ impl Solver {
     /// layers these are not what the update uses.
     pub fn strain_rate(&self, v: [&[f32]; 3], out: &mut [Vec<f32>; 6]) {
         let g = self.grid;
-        let [nx, ny, _] = g.n;
-        let [_, sy, sz] = g.strides();
-        let nxt = g.padded()[0];
-        let ih = g.h.map(|h| (1.0 / h) as f32);
-        let [vx, vy, vz] = v;
-        let st = &self.stencil;
-        let halo = g.halo;
-        let free_surface = self.free_surface;
+        let update = StrainRate {
+            g,
+            ih: g.h.map(|h| (1.0 / h) as f32),
+            free_surface: self.free_surface,
+            v,
+            st: &self.stencil,
+        };
         let [exx, eyy, ezz, exy, exz, eyz] = out;
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
-        planes(&g, [exx, eyy, ezz, exy, exz, eyz], &mut none, &self.cpml)
-            .into_par_iter()
-            .for_each_init(
-                || Rows::new(nx),
-                |rows, plane| {
-                    let kz = plane.kz;
-                    let [exx, eyy, ezz, exy, exz, eyz] = plane.out;
-                    let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-                    for j in 0..ny {
-                        let r = g.idx(0, j, kz);
-                        let o = (j + halo) * nxt + halo;
-                        st.backward(d0, vx, r, 1, ih[0]);
-                        st.backward(d1, vy, r, sy, ih[1]);
-                        if free_surface && kz == 0 {
-                            d2.fill(0.0);
-                        } else {
-                            st.backward(d2, vz, r, sz, ih[2]);
-                        }
-                        st.forward(d3, vx, r, sy, ih[1]);
-                        st.forward(d4, vy, r, 1, ih[0]);
-                        st.forward(d5, vx, r, sz, ih[2]);
-                        st.forward(d6, vz, r, 1, ih[0]);
-                        st.forward(d7, vy, r, sz, ih[2]);
-                        st.forward(d8, vz, r, sy, ih[1]);
-                        exx[o..o + nx].copy_from_slice(d0);
-                        eyy[o..o + nx].copy_from_slice(d1);
-                        ezz[o..o + nx].copy_from_slice(d2);
-                        for i in 0..nx {
-                            exy[o + i] = d3[i] + d4[i];
-                            exz[o + i] = d5[i] + d6[i];
-                            eyz[o + i] = d7[i] + d8[i];
-                        }
-                    }
-                },
-            );
+        sweep(
+            self.kernels,
+            &update,
+            planes(&g, [exx, eyy, ezz, exy, exz, eyz], &mut none, &self.cpml),
+        );
     }
 
     /// Damps every field inside the side layers by the sponge factors.
@@ -1367,7 +1229,7 @@ fn mirror_plane(v: &mut [f32], len: usize, dst: usize, src: usize, sign: f32) {
 
 /// out += sign · b · (x + y + z). A sign of ±1 changes nothing but the sign, so taking a
 /// step back subtracts exactly what the step added.
-#[inline]
+#[inline(always)]
 fn add_sum(out: &mut [f32], sign: f32, b: &[f32], x: &[f32], y: &[f32], z: &[f32]) {
     let n = out.len();
     let (b, x, y, z) = (&b[..n], &x[..n], &y[..n], &z[..n]);
@@ -1377,7 +1239,7 @@ fn add_sum(out: &mut [f32], sign: f32, b: &[f32], x: &[f32], y: &[f32], z: &[f32
 }
 
 /// out += sign · m · (x + y)
-#[inline]
+#[inline(always)]
 fn add_sum2(out: &mut [f32], sign: f32, m: &[f32], x: &[f32], y: &[f32]) {
     let n = out.len();
     let (m, x, y) = (&m[..n], &x[..n], &y[..n]);
@@ -1386,6 +1248,7 @@ fn add_sum2(out: &mut [f32], sign: f32, m: &[f32], x: &[f32], y: &[f32]) {
     }
 }
 
+#[inline(always)]
 fn split3(v: &mut [f32]) -> [&mut [f32]; 3] {
     let n = v.len() / 3;
     let (a, rest) = v.split_at_mut(n);
@@ -1409,6 +1272,8 @@ impl Rows {
 /// What one thread may write while it updates interior z-plane `kz`.
 struct Plane<'a, const N: usize> {
     kz: usize,
+    /// Interior nodes along x: the length of a row.
+    nx: usize,
     /// The plane of each output field, padded.
     out: [&'a mut [f32]; N],
     /// CPML memory for the plane: along x, rows j of [3 terms][slab]; along y, slab rows of
@@ -1436,6 +1301,7 @@ fn planes<'a, const N: usize>(
     (0..nz)
         .map(|kz| Plane {
             kz,
+            nx,
             out: std::array::from_fn(|f| out[f].next().expect("one chunk per plane")),
             psi_x: px.as_mut().and_then(Iterator::next),
             psi_y: py.as_mut().and_then(Iterator::next),
@@ -1444,6 +1310,290 @@ fn planes<'a, const N: usize>(
                 .and_then(|_| pz.as_mut().and_then(Iterator::next)),
         })
         .collect()
+}
+
+/// One update's arithmetic on a z-plane. [`sweep`] compiles it once for each instruction set
+/// (crate::simd), inlining it, so it and everything it calls in its loops must be
+/// `#[inline(always)]`: a call left out of line would run the plain loops.
+trait PlaneUpdate<const N: usize>: Sync {
+    fn plane(&self, rows: &mut Rows, plane: Plane<'_, N>);
+}
+
+/// Runs `update` on every plane, in parallel, with the loops `kernels` names.
+fn sweep<const N: usize>(
+    kernels: Kernels,
+    update: &impl PlaneUpdate<N>,
+    planes: Vec<Plane<'_, N>>,
+) {
+    let nx = planes.first().map_or(0, |p| p.nx);
+    planes.into_par_iter().for_each_init(
+        || Rows::new(nx),
+        |rows, plane| {
+            #[cfg(target_arch = "x86_64")]
+            if kernels == Kernels::Avx2 {
+                // SAFETY: a solver holds Kernels::Avx2 only where the CPU has AVX2
+                // (Solver::set_kernels, Kernels::chosen).
+                return unsafe { plane_avx2(update, rows, plane) };
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            debug_assert_eq!(kernels, Kernels::Plain);
+            plane_plain(update, rows, plane)
+        },
+    );
+}
+
+fn plane_plain<const N: usize>(update: &impl PlaneUpdate<N>, rows: &mut Rows, plane: Plane<'_, N>) {
+    update.plane(rows, plane);
+}
+
+/// [`plane_plain`] compiled with AVX2, without FMA: the same operations, eight values at a time.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn plane_avx2<const N: usize>(update: &impl PlaneUpdate<N>, rows: &mut Rows, plane: Plane<'_, N>) {
+    update.plane(rows, plane);
+}
+
+/// What the velocity update reads.
+struct VelocityUpdate<'a> {
+    g: Grid,
+    sign: f32,
+    /// 1/h along x, y and z.
+    ih: [f32; 3],
+    /// σxx, σyy, σzz, σxy, σxz, σyz.
+    stress: [&'a [f32]; 6],
+    m: &'a Material,
+    st: &'a Stencil,
+    cpml: &'a [CpmlAxis; 3],
+}
+
+impl PlaneUpdate<3> for VelocityUpdate<'_> {
+    #[inline(always)]
+    fn plane(&self, rows: &mut Rows, plane: Plane<'_, 3>) {
+        let Self {
+            g,
+            sign,
+            ih,
+            stress: [sxx, syy, szz, sxy, sxz, syz],
+            m,
+            st,
+            cpml: [cx, cy, cz],
+        } = self;
+        let [nx, ny, _] = g.n;
+        let [_, sy, sz] = g.strides();
+        let nxt = g.padded()[0];
+        let halo = g.halo;
+        let wx = cx.width();
+        let Plane {
+            kz,
+            out: [vx, vy, vz],
+            mut psi_x,
+            mut psi_y,
+            mut psi_z,
+            ..
+        } = plane;
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
+        for j in 0..ny {
+            let r = g.idx(0, j, kz);
+            st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
+            st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
+            st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
+            st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
+            st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
+            st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
+            st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
+            st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
+            st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
+
+            if let Some(p) = psi_x.as_deref_mut() {
+                let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
+                cx.apply_along(d0, p0, Stagger::Half);
+                cx.apply_along(d3, p1, Stagger::Node);
+                cx.apply_along(d6, p2, Stagger::Node);
+            }
+            if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
+                let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
+                cy.apply_across(s, d1, p0, Stagger::Node);
+                cy.apply_across(s, d4, p1, Stagger::Half);
+                cy.apply_across(s, d7, p2, Stagger::Node);
+            }
+            if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
+                let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
+                cz.apply_across(s, d2, p0, Stagger::Node);
+                cz.apply_across(s, d5, p1, Stagger::Node);
+                cz.apply_across(s, d8, p2, Stagger::Half);
+            }
+
+            let o = (j + halo) * nxt + halo;
+            add_sum(&mut vx[o..o + nx], *sign, &m.bx[r..r + nx], d0, d1, d2);
+            add_sum(&mut vy[o..o + nx], *sign, &m.by[r..r + nx], d3, d4, d5);
+            add_sum(&mut vz[o..o + nx], *sign, &m.bz[r..r + nx], d6, d7, d8);
+        }
+    }
+}
+
+/// What the stress update reads.
+struct StressUpdate<'a> {
+    g: Grid,
+    sign: f32,
+    ih: [f32; 3],
+    free_surface: bool,
+    /// vx, vy, vz.
+    v: [&'a [f32]; 3],
+    m: &'a Material,
+    st: &'a Stencil,
+    cpml: &'a [CpmlAxis; 3],
+}
+
+impl PlaneUpdate<6> for StressUpdate<'_> {
+    #[inline(always)]
+    fn plane(&self, rows: &mut Rows, plane: Plane<'_, 6>) {
+        let Self {
+            g,
+            sign,
+            ih,
+            free_surface,
+            v: [vx, vy, vz],
+            m,
+            st,
+            cpml: [cx, cy, cz],
+        } = self;
+        let sign = *sign;
+        let [nx, ny, _] = g.n;
+        let [_, sy, sz] = g.strides();
+        let nxt = g.padded()[0];
+        let halo = g.halo;
+        let wx = cx.width();
+        let Plane {
+            kz,
+            out: [sxx, syy, szz, sxy, sxz, syz],
+            mut psi_x,
+            mut psi_y,
+            mut psi_z,
+            ..
+        } = plane;
+        let surface = *free_surface && kz == 0;
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
+        for j in 0..ny {
+            let r = g.idx(0, j, kz);
+            st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
+            st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
+            if surface {
+                d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
+            } else {
+                st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
+            }
+            st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
+            st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
+            st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
+            st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
+            st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
+            st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+
+            if let Some(p) = psi_x.as_deref_mut() {
+                let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
+                cx.apply_along(d0, p0, Stagger::Node);
+                cx.apply_along(d4, p1, Stagger::Half);
+                cx.apply_along(d6, p2, Stagger::Half);
+            }
+            if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
+                let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
+                cy.apply_across(s, d1, p0, Stagger::Node);
+                cy.apply_across(s, d3, p1, Stagger::Half);
+                cy.apply_across(s, d8, p2, Stagger::Half);
+            }
+            if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
+                let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
+                cz.apply_across(s, d2, p0, Stagger::Node);
+                cz.apply_across(s, d5, p1, Stagger::Half);
+                cz.apply_across(s, d7, p2, Stagger::Half);
+            }
+
+            let o = (j + halo) * nxt + halo;
+            let lam = &m.lam[r..r + nx];
+            let l2m = &m.l2m[r..r + nx];
+            let (sxx, syy, szz) = (
+                &mut sxx[o..o + nx],
+                &mut syy[o..o + nx],
+                &mut szz[o..o + nx],
+            );
+            if surface {
+                for i in 0..nx {
+                    // With σzz = 0, ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy).
+                    let (l, l2) = (lam[i], l2m[i]);
+                    let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
+                    let (a, b) = (l2 - q, l - q);
+                    sxx[i] += sign * (a * d0[i] + b * d1[i]);
+                    syy[i] += sign * (b * d0[i] + a * d1[i]);
+                    szz[i] = 0.0;
+                }
+            } else {
+                for i in 0..nx {
+                    let (l, l2) = (lam[i], l2m[i]);
+                    sxx[i] += sign * (l2 * d0[i] + l * (d1[i] + d2[i]));
+                    syy[i] += sign * (l2 * d1[i] + l * (d0[i] + d2[i]));
+                    szz[i] += sign * (l2 * d2[i] + l * (d0[i] + d1[i]));
+                }
+            }
+            add_sum2(&mut sxy[o..o + nx], sign, &m.mxy[r..r + nx], d3, d4);
+            add_sum2(&mut sxz[o..o + nx], sign, &m.mxz[r..r + nx], d5, d6);
+            add_sum2(&mut syz[o..o + nx], sign, &m.myz[r..r + nx], d7, d8);
+        }
+    }
+}
+
+/// What the strain rates read.
+struct StrainRate<'a> {
+    g: Grid,
+    ih: [f32; 3],
+    free_surface: bool,
+    /// vx, vy, vz.
+    v: [&'a [f32]; 3],
+    st: &'a Stencil,
+}
+
+impl PlaneUpdate<6> for StrainRate<'_> {
+    #[inline(always)]
+    fn plane(&self, rows: &mut Rows, plane: Plane<'_, 6>) {
+        let Self {
+            g,
+            ih,
+            free_surface,
+            v: [vx, vy, vz],
+            st,
+        } = self;
+        let [nx, ny, _] = g.n;
+        let [_, sy, sz] = g.strides();
+        let nxt = g.padded()[0];
+        let halo = g.halo;
+        let kz = plane.kz;
+        let [exx, eyy, ezz, exy, exz, eyz] = plane.out;
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
+        for j in 0..ny {
+            let r = g.idx(0, j, kz);
+            let o = (j + halo) * nxt + halo;
+            st.backward(d0, vx, r, 1, ih[0]);
+            st.backward(d1, vy, r, sy, ih[1]);
+            if *free_surface && kz == 0 {
+                d2.fill(0.0);
+            } else {
+                st.backward(d2, vz, r, sz, ih[2]);
+            }
+            st.forward(d3, vx, r, sy, ih[1]);
+            st.forward(d4, vy, r, 1, ih[0]);
+            st.forward(d5, vx, r, sz, ih[2]);
+            st.forward(d6, vz, r, 1, ih[0]);
+            st.forward(d7, vy, r, sz, ih[2]);
+            st.forward(d8, vz, r, sy, ih[1]);
+            exx[o..o + nx].copy_from_slice(d0);
+            eyy[o..o + nx].copy_from_slice(d1);
+            ezz[o..o + nx].copy_from_slice(d2);
+            for i in 0..nx {
+                exy[o + i] = d3[i] + d4[i];
+                exz[o + i] = d5[i] + d6[i];
+                eyz[o + i] = d7[i] + d8[i];
+            }
+        }
+    }
 }
 
 /// What the unit tests across the crate make solvers with.
@@ -1771,6 +1921,74 @@ mod tests {
         assert_eq!(s.psi_s, first.psi_s);
         assert!(s.peak_velocity() > 0.0);
         assert_eq!(s.at_rest().peak_velocity(), 0.0);
+    }
+
+    /// The AVX2 loops do the plain loops' arithmetic eight values at a time (crate::simd), so
+    /// a run with a free surface, layers with their sponge, a force and a moment between nodes,
+    /// its strain rates and its steps back all come out the same bit for bit. Rows of 21 nodes
+    /// leave a remainder after the vectors. Without AVX2 there is nothing to compare, and the
+    /// plain loops run alone.
+    #[test]
+    fn the_avx2_loops_step_as_the_plain_ones_bit_for_bit() {
+        let g = Grid::new([21, 19, 17], [10.0; 3]).with_halo(4);
+        let mut model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+        for n in 9 * 21 * 19..g.interior_len() {
+            (model.vp[n], model.vs[n], model.rho[n]) = (3600.0, 2000.0, 2600.0);
+        }
+        let pml = PmlSettings {
+            sponge: 0.2,
+            ..pml()
+        };
+        let steps = 40;
+        let run = |kernels: Kernels| {
+            let mut s = Solver::new(model.clone(), 5e-4, 5, true, &pml)
+                .with_stencil(Stencil::taylor(8).unwrap());
+            assert_eq!(s.set_kernels(kernels), kernels);
+            let force = s.receiver_op(Component::Vz, [10.3, 9.0, 2.6]);
+            let moment = s.receiver_op(Component::P, [9.0, 8.5, 0.0]);
+            let wavelet = |t: f64| (t * 400.0).sin() as f32 * 1e3;
+            let band = Band::new(&g, &s.interior(), true, s.stencil.half_length());
+            let len = band.len();
+            let mut records = vec![0.0; steps * len];
+            for n in 0..steps {
+                band.save(&s.fields, &mut records[n * len..(n + 1) * len]);
+                s.step_with(
+                    |f, t| force.inject(f, wavelet(t)),
+                    |f, t| moment.inject(f, wavelet(t)),
+                );
+            }
+            let state = s.state();
+            let mut strain: [Vec<f32>; 6] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
+            s.strain_rate(s.fields.velocities(), &mut strain);
+            for n in (0..steps).rev() {
+                s.step_back_with(
+                    &band,
+                    &records[n * len..(n + 1) * len],
+                    |f, t| force.inject(f, -wavelet(t)),
+                    |f, t| moment.inject(f, -wavelet(t)),
+                );
+            }
+            let arrays = state.fields.arrays().into_iter().chain(&state.psi_v);
+            let arrays = arrays.chain(&state.psi_s).chain(&strain);
+            let bits: Vec<Vec<u32>> = arrays
+                .chain(s.fields.arrays())
+                .map(|a| a.iter().map(|x| x.to_bits()).collect())
+                .collect();
+            (
+                bits,
+                state.fields.vz.iter().fold(0.0f32, |m, v| m.max(v.abs())),
+            )
+        };
+        let (plain, peak) = run(Kernels::Plain);
+        assert!(peak > 0.0);
+        if !Kernels::Avx2.available() {
+            return;
+        }
+        let (avx2, _) = run(Kernels::Avx2);
+        assert_eq!(plain.len(), avx2.len());
+        for (a, (p, v)) in plain.iter().zip(&avx2).enumerate() {
+            assert!(p == v, "array {a} differs");
+        }
     }
 
     /// A linear velocity field has the same strain rate everywhere the stencil stays inside

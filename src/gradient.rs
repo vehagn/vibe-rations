@@ -719,6 +719,7 @@ fn to_nodes(s: &Solver, sums: &Sums) -> Gradient {
 mod tests {
     use super::*;
     use crate::grid::Grid;
+    use crate::simd::Kernels;
 
     #[test]
     fn the_l2_misfit_and_its_residuals() {
@@ -844,7 +845,13 @@ mod tests {
     /// A gradient of a small run with two layers, a force and three components, against
     /// silent observed traces.
     fn small_gradient(strategy: Strategy) -> (usize, Run) {
+        small_gradient_with(strategy, Kernels::chosen()).0
+    }
+
+    /// [`small_gradient`] with the update loops `kernels` names, and the traces it recorded.
+    fn small_gradient_with(strategy: Strategy, kernels: Kernels) -> ((usize, Run), Vec<Vec<f32>>) {
         let mut sim = Simulation::new(&small_config(), std::path::Path::new(".")).unwrap();
+        assert_eq!(sim.solver.set_kernels(kernels), kernels);
         let steps = sim.steps;
         let zeros: Vec<Vec<f32>> = sim
             .receivers
@@ -859,7 +866,42 @@ mod tests {
             strategy,
         )
         .unwrap();
-        (steps, r)
+        ((steps, r), sim.receivers.traces)
+    }
+
+    /// The AVX2 loops give the plain loops' traces and gradients bit for bit (crate::simd),
+    /// replayed from checkpoints or rebuilt backwards. Without AVX2 the plain loops run alone.
+    #[test]
+    fn the_avx2_loops_give_the_plain_gradient_bit_for_bit() {
+        for strategy in [
+            Strategy::Checkpoints { every: None },
+            Strategy::Reconstruct { segment: None },
+        ] {
+            let ((_, plain), plain_traces) = small_gradient_with(strategy, Kernels::Plain);
+            assert!(plain.gradient.mu.iter().any(|&g| g != 0.0));
+            if !Kernels::Avx2.available() {
+                continue;
+            }
+            let ((_, avx2), avx2_traces) = small_gradient_with(strategy, Kernels::Avx2);
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            for (p, a) in plain_traces.iter().zip(&avx2_traces) {
+                assert_eq!(bits(p), bits(a), "{strategy:?}: traces");
+            }
+            assert_eq!(
+                plain.misfit.to_bits(),
+                avx2.misfit.to_bits(),
+                "{strategy:?}"
+            );
+            for (name, p, a) in [
+                ("rho", &plain.gradient.rho, &avx2.gradient.rho),
+                ("lambda", &plain.gradient.lambda, &avx2.gradient.lambda),
+                ("mu", &plain.gradient.mu, &avx2.gradient.mu),
+            ] {
+                let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert!(bits(p) == bits(a), "{strategy:?}: {name}");
+            }
+            assert!(plain.illumination == avx2.illumination, "{strategy:?}");
+        }
     }
 
     #[test]

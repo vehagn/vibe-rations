@@ -263,8 +263,9 @@ impl Stencil {
         self.coefficients.iter().map(|c| c.abs()).sum()
     }
 
-    /// The derivative half a node forward of each node, at p + s/2.
-    #[inline]
+    /// The derivative half a node forward of each node, at p + s/2. Always inlined, so the
+    /// solver's AVX2 sweep (crate::simd) compiles it with AVX2.
+    #[inline(always)]
     pub fn forward(&self, out: &mut [f32], f: &[f32], start: usize, stride: usize, inv_h: f32) {
         let len = out.len();
         for (k, &c) in self.single.iter().enumerate() {
@@ -276,7 +277,7 @@ impl Stencil {
     }
 
     /// The derivative half a node backward of each node, at p - s/2.
-    #[inline]
+    #[inline(always)]
     pub fn backward(&self, out: &mut [f32], f: &[f32], start: usize, stride: usize, inv_h: f32) {
         let len = out.len();
         for (k, &c) in self.single.iter().enumerate() {
@@ -563,7 +564,7 @@ fn weighted_least_squares(rows: &[Row], weights: &[f64]) -> Vec<f64> {
 }
 
 /// out = a (hi - lo), or out += a (hi - lo) after the first term.
-#[inline]
+#[inline(always)]
 fn accumulate(out: &mut [f32], a: f32, hi: &[f32], lo: &[f32], first: bool) {
     let n = out.len();
     let (hi, lo) = (&hi[..n], &lo[..n]);

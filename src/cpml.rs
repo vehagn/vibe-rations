@@ -129,7 +129,7 @@ impl CpmlAxis {
     }
 
     /// The slab index of node `p` along the axis, or None if it is not in a layer.
-    #[inline]
+    #[inline(always)]
     pub fn slab(&self, p: usize) -> Option<usize> {
         if p < self.lo {
             Some(p)
@@ -140,6 +140,7 @@ impl CpmlAxis {
         }
     }
 
+    #[inline(always)]
     pub fn profile(&self, at: Stagger) -> &Profile {
         match at {
             Stagger::Node => &self.node,
@@ -148,8 +149,9 @@ impl CpmlAxis {
     }
 
     /// Damps a row of derivatives taken along this axis: `d` holds all `n` nodes of the row
-    /// and `psi` the memory for its slab.
-    #[inline]
+    /// and `psi` the memory for its slab. Always inlined, like the rest of the update loops
+    /// (crate::simd).
+    #[inline(always)]
     pub fn apply_along(&self, d: &mut [f32], psi: &mut [f32], at: Stagger) {
         let p = self.profile(at);
         let (lo, start) = (self.lo, self.n - self.hi);
@@ -171,7 +173,7 @@ impl CpmlAxis {
 
     /// Damps a row of derivatives taken along this axis while the row runs across it, so the
     /// whole row sits at slab index `slab`.
-    #[inline]
+    #[inline(always)]
     pub fn apply_across(&self, slab: usize, d: &mut [f32], psi: &mut [f32], at: Stagger) {
         let p = self.profile(at);
         let (a, b, k) = (p.a[slab], p.b[slab], p.inv_kappa[slab]);
@@ -182,7 +184,7 @@ impl CpmlAxis {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn update(d: &mut [f32], psi: &mut [f32], a: &[f32], b: &[f32], inv_kappa: &[f32]) {
     for ((((d, psi), a), b), k) in d.iter_mut().zip(psi).zip(a).zip(b).zip(inv_kappa) {
         *psi = b * *psi + a * *d;
