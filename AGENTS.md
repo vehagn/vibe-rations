@@ -343,8 +343,10 @@ doesn't show.
   (rigid walls drift the same), water five times more (not traced). Inside the layers the
   rebuilt field and gradient mean nothing. **Checkpoints stay the default**, also in the
   inversion, which rebuilds only with `[inversion] reconstruct = true` (its plan exact, 2.44
-  against 4.41 GiB on `examples/marmousi2/central.toml`; not yet compared with checkpoints on
-  an inversion that long, see the log). When `gradient` gains an array, add it to
+  against 4.41 GiB on `examples/marmousi2/central.toml`). Five iterations there rebuilt and
+  checkpointed reach the same model to about $10^{-5}$ of the update and the same misfits to
+  every printed digit, about 16% slower (the log's 2026-11-24 entry), so use it wherever
+  memory binds; whether to make it the default is the maintainer's call. When `gradient` gains an array, add it to
   both `Plan::gradient_memory` and `Plan::reconstruction_memory`; when the step gains an
   operation, `step_back_with` must undo it in reverse order (`steps_back_inside_the_band`
   and `the_rebuilt_wavefield_follows_the_run` catch a miss).

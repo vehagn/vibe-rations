@@ -2628,7 +2628,8 @@ both ways.
   first step by $5.5 \times 10^{-6}$ of it, and $v_s$ by at most $9.4 \times 10^{-8}$.
 - *Not run:* the same comparison on Marmousi2's central part over five iterations
   (`l2_rebuilt`, against `l2`'s model), where 425 m of water would drift five times more than
-  rock. Open questions.
+  rock. Open questions. (Run 2026-11-24: the models agree to about $10^{-5}$ of the update;
+  "Marmousi2: an inversion with its wavefields rebuilt, against checkpoints".)
 
 **Decision.** An option, off by default: checkpoints stay the default until an inversion of
 that size has been compared both ways.
@@ -3550,6 +3551,66 @@ parametrisation (a basis, or a region), not yet a decision.
 --test-threads 1`: `born_and_gauss_newton` (7 minutes on gauss's six cores, $J$ in about
 a minute) and `lbfgs_against_gauss_newton` (23 minutes); the check, in `just test`.
 
+## 2026-11-24 — Marmousi2: an inversion with its wavefields rebuilt, against checkpoints
+
+**Question.** An inversion can rebuild each gradient run's forward wavefield backwards
+instead of replaying it from checkpoints (`[inversion] reconstruct = true`; 2026-11-21, "An
+inversion with its forward wavefields rebuilt"). On a small survey the two agreed to
+$10^{-7}$–$10^{-6}$, but checkpoints stayed the default until an inversion of a realistic size
+had been compared both ways, since water drifts five times more than rock. Over five
+iterations on Marmousi2's central part, does the rebuilt run reach the same model?
+
+**Method** (`tests/marmousi2_study.rs`: `l2`, then `l2_rebuilt`, which compares its model
+with `l2`'s in `compare_variants`). Five L2 iterations on the central 6 km from the start
+smoothed over 250 m, as the 2026-11-21 `l2`, once with checkpoints and once with the
+wavefields rebuilt, everything else equal. Built from main at `ecadcb4` (`just mac-test
+marmousi2_study`) and run natively on the maintainer's Mac (M1 Max, 32 GiB), one after the
+other, single test thread, with desktop apps running alongside.
+
+**Results.**
+
+| | checkpoints (`l2`) | rebuilt (`l2_rebuilt`) |
+|---|---|---|
+| Misfit as the stage measures it, iterations 1–5 | 0.64184, 0.55273, 0.48380, 0.42256, 0.38212 | the same, to every printed digit |
+| Largest change per step | 2.0, 10.1, 11.2, 11.9, 12.8% | the same |
+| L2 left after the stage | 57.9% | 57.9% |
+| Error ratio and cosine by band | 0.900 / 0.973 at 500–750 m, 0.994 / 1.095, 1.020 / 1.070 ($v_p$ / $v_s$) | the same, to every printed digit |
+| Memory (the plan) | 4.41 GiB | 2.44 GiB |
+| Wall time | 1,748 s | 2,032 s (+16%) |
+
+The rebuilt model against the checkpointed one, by depth band, $\lVert m_b - m_a\rVert /
+\lVert m_a - m_0\rVert$ and the largest $\lvert m_b - m_a\rvert / m_a$:
+
+| | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|
+| $v_p$ | $6.6 \times 10^{-6}$, $3.1 \times 10^{-6}$ | $1.1 \times 10^{-5}$, $1.2 \times 10^{-6}$ | $9.2 \times 10^{-6}$, $8.1 \times 10^{-7}$ | $9.9 \times 10^{-6}$, $2.0 \times 10^{-7}$ | $3.0 \times 10^{-4}$, $1.1 \times 10^{-4}$ |
+| $v_s$ | $3.6 \times 10^{-6}$, $2.6 \times 10^{-6}$ | $3.2 \times 10^{-6}$, $1.8 \times 10^{-6}$ | $2.7 \times 10^{-6}$, $1.2 \times 10^{-6}$ | $4.0 \times 10^{-6}$, $3.1 \times 10^{-7}$ | $7.4 \times 10^{-5}$, $1.8 \times 10^{-5}$ |
+
+- *The rebuilt inversion is the checkpointed one* to about $10^{-5}$ of the update down to
+  2.5 km, and pointwise to $3.1 \times 10^{-6}$ of the model: single-precision drift, as on
+  the small survey, and far below anything the error ratios resolve. The water's larger drift
+  doesn't accumulate over five iterations.
+- *The deepest band differs most* ($3.0 \times 10^{-4}$ of an update that is itself tiny
+  there, error ratios 1.003 and 0.999; pointwise $1.1 \times 10^{-4}$). It lies just above
+  the bottom absorbing layer, so drift from the band around the layers is the likely cause;
+  not traced.
+- *The `l2` run reproduces the 2026-11-21 one to every printed digit*, so neither the defaults
+  changed since (band-limited layers and exact positions, which don't apply to models from
+  files with sources and receivers on nodes) nor macOS against Linux moves this case.
+- It took 16% longer, one run each on a desktop with other work, so indicative only.
+
+**Decision.** For inversions, rebuilding the wavefields is as good as checkpoints at this
+size: use `reconstruct = true` wherever memory binds. The whole section, for example, needs
+22 GiB rebuilt against 48 with checkpoints, so it fits two at once on gauss, or on a 64 GiB
+machine. Making it the default trades roughly 16% more time for 45% less memory. That is the
+maintainer's call, not made here. The open question is closed for the central part; the
+whole section rebuilt (22 GiB) wasn't run, since the Mac had 13 GiB free.
+
+**Reproduce:** `just in marmousi2-study l2` and then `l2_rebuilt` (about 40 minutes each in
+the dev container; 29 and 34 natively on the Mac: `just in mac-test marmousi2_study`, then
+`out/mac/marmousi2_study l2 --ignored --exact --nocapture --test-threads 1` and the same for
+`l2_rebuilt`).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -3587,8 +3648,9 @@ a minute) and `lbfgs_against_gauss_newton` (23 minutes); the check, in `just tes
   L2"). Written but not run (`tests/marmousi2_study.rs`): muted
   L2 with the receivers' side
   (`muted_l2_with_receivers_side`), time shifts in a window around the early arrivals, then L2
-  (`windowed_time_shifts_then_l2`), muted L2 for twenty iterations (`muted_l2_longer`), and
-  L2 with the wavefields rebuilt (`l2_rebuilt`). Not written: a test from the data of whether
+  (`windowed_time_shifts_then_l2`) and muted L2 for twenty iterations (`muted_l2_longer`);
+  L2 with the wavefields rebuilt (`l2_rebuilt`) has since matched L2 with checkpoints
+  (2026-11-24). Not written: a test from the data of whether
   the slow waves are within half a cycle, measured at each stage's start, to decide the mute
   offset by offset; the phase misfit with the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
