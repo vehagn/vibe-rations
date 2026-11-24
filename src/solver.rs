@@ -1446,11 +1446,13 @@ fn planes<'a, const N: usize>(
         .collect()
 }
 
+/// What the unit tests across the crate make solvers with.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
 
-    fn pml() -> PmlSettings {
+    /// Layers with a quadratic profile set for 3000 m/s, and no sponge.
+    pub fn pml() -> PmlSettings {
         PmlSettings {
             power: 2.0,
             reflection: None,
@@ -1461,6 +1463,19 @@ mod tests {
         }
     }
 
+    /// A solver at rest in a homogeneous solid (vp 3000 m/s, vs 1700 m/s, ρ 2500 kg/m³) on
+    /// `grid`, stepping 1 ms, with layers `pml_width` nodes thick ([`pml`]).
+    pub fn solver(grid: Grid, pml_width: usize, free_surface: bool) -> Solver {
+        let model = Model::homogeneous(grid, 3000.0, 1700.0, 2500.0);
+        Solver::new(model, 1e-3, pml_width, free_surface, &pml())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{pml, solver};
+    use super::*;
+
     #[test]
     fn harmonic_mean_vanishes_next_to_a_fluid() {
         assert_eq!(harmonic_mean([1.0, 1.0, 1.0, 0.0]), 0.0);
@@ -1470,13 +1485,7 @@ mod tests {
     #[test]
     fn a_wavefield_at_rest_stays_at_rest() {
         let g = Grid::new([16, 14, 12], [10.0; 3]);
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            4,
-            true,
-            &pml(),
-        );
+        let mut s = solver(g, 4, true);
         for _ in 0..5 {
             s.step();
         }
@@ -1488,13 +1497,7 @@ mod tests {
     #[test]
     fn mirrors_stress_across_the_free_surface() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            true,
-            &pml(),
-        );
+        let mut s = solver(g, 3, true);
         let p = g.plane_len();
         for (n, v) in s.fields.szz.iter_mut().enumerate() {
             *v = n as f32;
@@ -1522,13 +1525,7 @@ mod tests {
     #[test]
     fn mirrors_velocity_across_the_free_surface() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            true,
-            &pml(),
-        );
+        let mut s = solver(g, 3, true);
         let p = g.plane_len();
         for (n, v) in s.fields.vx.iter_mut().enumerate() {
             *v = n as f32;
@@ -1546,9 +1543,7 @@ mod tests {
     #[test]
     fn interpolation_weights_sum_to_one_and_fold_at_the_free_surface() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
-        let open = Solver::new(model.clone(), 1e-3, 3, false, &pml());
-        let free = Solver::new(model, 1e-3, 3, true, &pml());
+        let (open, free) = (solver(g, 3, false), solver(g, 3, true));
         let sum = |w: &[(usize, f32)]| w.iter().map(|&(_, w)| w).sum::<f32>();
         for at in 0..10 {
             for s in [&open, &free] {
@@ -1582,15 +1577,9 @@ mod tests {
         let f = |z: f64| 2.0 + 3.0 * z - 0.7 * z * z;
         for order in [4, 8] {
             let g = Grid::new([12, 12, 12], [10.0; 3]).with_halo(order / 2);
-            let s = Solver::new(
-                Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-                1e-3,
-                0,
-                true,
-                &pml(),
-            )
-            .with_stencil(Stencil::taylor(order).unwrap())
-            .with_surface_slope(true);
+            let s = solver(g, 0, true)
+                .with_stencil(Stencil::taylor(order).unwrap())
+                .with_surface_slope(true);
             for (shift, x) in [
                 (0.5, 0.0),
                 (0.5, 0.3),
@@ -1620,14 +1609,7 @@ mod tests {
     #[test]
     fn interpolation_matches_the_stencil() {
         let g = Grid::new([20, 20, 20], [10.0; 3]).with_halo(4);
-        let s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            false,
-            &pml(),
-        )
-        .with_stencil(Stencil::taylor(8).unwrap());
+        let s = solver(g, 3, false).with_stencil(Stencil::taylor(8).unwrap());
         let eighth: Vec<(usize, f32)> = [-5.0, 49.0, -245.0, 1225.0, 1225.0, -245.0, 49.0, -5.0]
             .iter()
             .enumerate()
@@ -1705,13 +1687,7 @@ mod tests {
     #[test]
     fn point_ops_inject_the_transpose_of_what_they_sample() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            true,
-            &pml(),
-        );
+        let s = solver(g, 3, true);
         let mut probe = Fields::zeros(g.padded_len());
         for (n, v) in probe.vz.iter_mut().enumerate() {
             *v = ((n * 7919) % 1000) as f32 / 1000.0 - 0.5;
@@ -1747,9 +1723,7 @@ mod tests {
     #[test]
     fn values_on_the_free_surface_stand_for_half_a_cell() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
-        let free = Solver::new(model.clone(), 1e-3, 3, true, &pml());
-        let open = Solver::new(model, 1e-3, 3, false, &pml());
+        let (free, open) = (solver(g, 3, true), solver(g, 3, false));
         for f in [
             Field::Vx,
             Field::Vy,
@@ -1845,14 +1819,8 @@ mod tests {
     #[test]
     fn pressure_reads_the_mean_normal_stress() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            false,
-            &pml(),
-        );
-        let op = s.receiver_op(crate::receiver::Component::P, [4, 5, 6]);
+        let s = solver(g, 3, false);
+        let op = s.receiver_op(Component::P, [4, 5, 6]);
         let p = g.idx(4, 5, 6);
         assert_eq!(
             op.terms,

@@ -263,28 +263,12 @@ mod tests {
         );
     }
 
-    use crate::cpml::PmlSettings;
     use crate::grid::Grid;
-    use crate::model::Model;
     use crate::receiver::Component;
+    use crate::solver::testing;
 
     fn solver(free_surface: bool) -> Solver {
-        let g = Grid::new([12, 12, 12], [10.0; 3]);
-        let pml = PmlSettings {
-            power: 2.0,
-            reflection: None,
-            kappa_max: 1.0,
-            alpha_max: 30.0,
-            vp_max: 3000.0,
-            sponge: 0.0,
-        };
-        Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            free_surface,
-            &pml,
-        )
+        testing::solver(Grid::new([12, 12, 12], [10.0; 3]), 3, free_surface)
     }
 
     fn total(s: &Source) -> f32 {

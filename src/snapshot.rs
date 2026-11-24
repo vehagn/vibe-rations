@@ -181,9 +181,8 @@ mod tests {
         assert_eq!(robust_clip(&w), 2e-4);
     }
 
-    use crate::cpml::PmlSettings;
     use crate::grid::Grid;
-    use crate::model::Model;
+    use crate::solver::testing;
 
     fn snapshot(plane: PlaneKind, index: usize) -> Snapshot {
         Snapshot {
@@ -211,21 +210,7 @@ mod tests {
     #[test]
     fn sections_are_row_major_from_the_top() {
         let g = Grid::new([8, 7, 6], [10.0; 3]);
-        let pml = PmlSettings {
-            power: 2.0,
-            reflection: None,
-            kappa_max: 1.0,
-            alpha_max: 30.0,
-            vp_max: 3000.0,
-            sponge: 0.0,
-        };
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            0,
-            false,
-            &pml,
-        );
+        let mut s = testing::solver(g, 0, false);
         // p = k at every node.
         for k in 0..6 {
             for j in 0..7 {
