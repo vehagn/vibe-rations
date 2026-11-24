@@ -252,6 +252,15 @@ pub struct ModelConfig {
     pub interfaces: Interfaces,
 }
 
+impl ModelConfig {
+    /// The files it names, vp, vs and rho, if it is read from files.
+    pub fn file_paths(&self) -> impl Iterator<Item = &Path> {
+        self.files
+            .iter()
+            .flat_map(|f| [f.vp.as_path(), f.vs.as_path(), f.rho.as_path()])
+    }
+}
+
 /// How the interfaces between `[[model.layer]]`s are put onto the nodes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]

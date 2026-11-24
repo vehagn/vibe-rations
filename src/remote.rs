@@ -161,20 +161,18 @@ impl Remote {
             .map_or("run.toml".into(), |n| n.to_string_lossy());
         let status: Status = self.post(&format!("/api/runs?name={}", encode(&name)), &text)?;
         let base = path.parent().unwrap_or(Path::new("."));
-        if let Some(files) = &cfg.model.files {
-            for f in [&files.vp, &files.vs, &files.rho] {
-                let local = base.join(f);
-                let file =
-                    File::open(&local).with_context(|| format!("opening {}", local.display()))?;
-                let size = file.metadata()?.len();
-                eprintln!("uploading {} ({})", f.display(), human(size));
-                let url = self.url(&format!(
-                    "/api/runs/{}/files/{}",
-                    encode(&status.id),
-                    encode(&f.to_string_lossy())
-                ));
-                self.check(self.agent.put(&url).send(file))?;
-            }
+        for f in cfg.model.file_paths() {
+            let local = base.join(f);
+            let file =
+                File::open(&local).with_context(|| format!("opening {}", local.display()))?;
+            let size = file.metadata()?.len();
+            eprintln!("uploading {} ({})", f.display(), human(size));
+            let url = self.url(&format!(
+                "/api/runs/{}/files/{}",
+                encode(&status.id),
+                encode(&f.to_string_lossy())
+            ));
+            self.check(self.agent.put(&url).send(file))?;
         }
         self.post(&format!("/api/runs/{}/start", encode(&status.id)), "")
     }
