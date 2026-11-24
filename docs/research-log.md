@@ -3420,6 +3420,136 @@ examples/marmousi2/whole.toml` (25 hours on gauss), then `just in marmousi2-stud
 whole_by_region`, which reads `out/marmousi2/whole` and any `out/marmousi2/whole-it<n>` kept
 beside it (copies of the model after each iteration, which the inversion overwrites).
 
+## 2026-11-24 — The inversion against Born's Gauss–Newton solution
+
+**Question.** The gradient matches the exact kernels (2026-11-21, "The gradient against the
+exact kernels"), but does an inversion's *model* follow? FWI has no closed form; its
+linearisation about a homogeneous full space has. How does our L-BFGS inversion compare with
+the analytic Born / Gauss–Newton solution of the same problem [@tarantola1984; @pratt1998;
+@fichtner2011], and which of the nonlinearity, the solver's error and the parametrisation
+separates them?
+
+**Method** (`tests/analytic_inversion.rs`). A homogeneous full space ($v_p$ = 3000 m/s,
+$v_s$ = 1732 m/s, $\rho$ = 2500 kg/m³) at $h$ = 15 m (4.6 points per shortest S wavelength),
+77³ nodes with 12 of CPML, the default scheme, $\Delta t$ and the coefficients' band pinned at
+the start's, 0.75 s recorded (402 samples of 1.87 ms). Three forces of $10^9$ N (Ricker,
+10 Hz) 300 m from the centre on the $-x$, $-y$ and $-z$ axes, each across its line to the
+centre; eleven three-component velocity receivers, 300 m out on the $+x$, $+y$, $+z$ axes and
+at the corners of a cube ±195 m. The truth is a relative change of $v_s$ alone, a Gaussian
+($\sigma$ = 45 m, a quarter of a dominant S wavelength) sampled at the nodes of a coarse
+lattice 45 m apart, 5³ = 125 of them, and trilinearly interpolated between them (support
+±135 m): the unknowns are those 125 coefficients, which represent the truth exactly.
+
+The Jacobian $J$ (39 798 samples by 125) is built column by column: a node's change of
+$v_s$ ($\delta\mu = 2\rho v_s^2\,\delta$, $\delta\lambda = -2\delta\mu$) scatters as a point
+moment source whose moment is $\delta c_{ijkl}\,\partial_l u_k$ of the forward field, so its
+velocity at a receiver is $h^3 \delta\mu \sum_{ij} \partial_j G_{ni} * S_{ij}$ with
+$S_{ij} = \partial_i u_j + \partial_j u_i - 2\delta_{ij}\nabla\cdot\mathbf u$: Stokes's
+solution and its spatial derivatives (`common::stokes`) for $S_{ij}$ tabulated every 0.25 ms
+with three derivatives and its integral. Each hat's column sums these over the nodes (λ and
+μ's normal part) and the shear positions (μ's shear parts, a quarter of each of four nodes),
+as the staggered grid samples the model (`J_grid`), or over the nodes alone with every term
+there (`J_point`, the continuous Born integral by the nodes' quadrature). Check
+(`the_sensitivities_are_the_exact_kernels`, 2 s): $J^\mathsf T r\,\Delta t$ for a 2% faster
+medium's residual equals the adjoint kernels integrated against a hat
+(`Problem::grid_integral`, `Problem::kernels`), derived the other way round, to
+$6 \times 10^{-10}$. $J^\mathsf T J$'s eigenvalues span $3.8 \times 10^3$ (median
+$10^{-2}$ of the largest), computed by Jacobi rotations; the damped solution is
+$(J^\mathsf T J + \mu\lambda_{\max} I)^{-1} J^\mathsf T \delta d$.
+
+Data: $\delta d$ from Born ($J_\text{grid}$ times the truth) and from the solver (the
+truth's traces less the start's). Runs at $+\varepsilon$ and $-\varepsilon$ split the
+solver's difference into its odd part (Born's plus $O(\varepsilon^3)$, so what differs from
+Born is the solver's own error) and its even part (the nonlinearity's second order). The
+inversions, L2 unbalanced (so all minimise $\tfrac12\lVert d - d_\text{obs}\rVert^2$), from
+the homogeneous start against the solver's data at +3%, 8 iterations each:
+
+- *on the hats*: the library's `Lbfgs` and `line_search` on the 125 coefficients, the
+  solver's gradient (`Inversion::evaluate`) taken onto the hats, no preconditioner;
+- *the inversion*: `Inversion::iterate` as it is, every node outside the layers free,
+  divided by the source side's illumination.
+
+Each model is scored over the 17³ nodes of the support: the error ratio
+$\lVert m - m_\text{true}\rVert / \lVert m_0 - m_\text{true}\rVert$ and the cosine of
+$m - m_0$ with the true change; the misfit left as $\chi/\chi_0$, from solver runs.
+
+**Results.** *Born against the solver's data differences:*
+
+| Peak change | $\lVert\delta d\rVert$ / traces' | Born against the solver's | cosine | odd part against Born | even part / $\lVert\delta d\rVert$ | $J_\text{point}$ against $J_\text{grid}$ |
+|---|---|---|---|---|---|---|
+| +3% | 1.81% | 4.91% | 0.99919 | 0.29% | 5.06% | 0.83% |
+| +10% | 5.67% | 16.3% | 0.99169 | 2.57% | 17.9% | 0.83% |
+
+Born is off by the nonlinearity, about 1.6 times the peak change; the solver's own error in
+the scattered waves is 0.29% (at 10% the odd part's 2.6% is mostly $O(\varepsilon^3)$). The
+grid's sampling of the model moves Born data by 0.83%.
+
+*Gauss–Newton* (error ratio, cosine; $\chi/\chi_0$ left in the solver's runs):
+
+| Data, $J$ | $\mu$ = 0 | $10^{-4}$ | $10^{-3}$ | $10^{-2}$ | $\chi/\chi_0$ at 0 |
+|---|---|---|---|---|---|
+| Born, +3% or +10% | 0.00% | 0.25% | 1.95% | 10.4% (0.9955) | — |
+| solver's, odd part, +3% | 0.76% (0.99997) | 0.84% | 2.32% | 10.7% | — |
+| solver's, +3% | 15.3% (0.98857) | 14.8% | 12.2% | 9.9% (0.99637) | 0.20% |
+| solver's, +3%, $J_\text{point}$ | 14.6% (0.98935) | 14.2% | 11.9% | 10.4% | 0.20% |
+| solver's, odd part, +10% | 7.6% (0.99725) | 7.5% | 7.6% | 13.4% | — |
+| solver's, +10% | 46.4% (0.90665) | 44.9% | 38.2% | 21.8% (0.97669) | 2.05% |
+
+($10^{-8}$ and $10^{-6}$ are as 0.) Born data come back exactly undamped: the problem is well
+posed on these unknowns. The solver's error alone costs 0.76% of the model; the nonlinearity,
+5% of the data at +3%, costs 15%, amplified by the poorly determined directions (damping
+helps only by shrinking them: 9.9% at $10^{-2}$). Whether $J$ samples the model as the grid
+does changes little (14.6 against 15.3%).
+
+*The gradient and the first step.* The solver's gradient at the start against
+$-J^\mathsf T\delta d$ at the support's nodes: 0.01%, cosine 1.00000 (on the hats the same).
+72% of its norm lies in the support; the illumination preconditioner ranges from 189 to 473
+over the support (1000 at the water level) and takes that share to 64%. The inversion's first
+step against $J^\mathsf T\delta d$ in the support: cosine 0.98796; against the
+preconditioned $J^\mathsf T\delta d$, 1.00000. So the first step differs from the analytic
+gradient by the preconditioner alone, which varies by a factor 2.5 across the target.
+Its largest change, 2.00% (`initial_step`), lies 15 m from a source or receiver, where the
+kernels are singular.
+
+*Inversions* (misfit left, error ratio, cosine; on the hats, the error against Gauss–Newton
+on the solver's data, $\mu = 10^{-4}$; the inversion, the error over the whole grid):
+
+| Iteration | On the hats: $\chi/\chi_0$ | error | cosine | against GN | Inversion: $\chi/\chi_0$ | error | cosine | whole grid |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 87.0% | 84.6% | 0.908 | 88.7% | 18.0% | 71.4% | 0.869 | 83.0% |
+| 2 | 2.64% | 34.2% | 0.940 | 41.1% | 5.13% | 62.6% | 0.883 | 79.1% |
+| 3 | 1.19% | 30.7% | 0.955 | 37.7% | 3.02% | 59.0% | 0.893 | 77.3% |
+| 4 | 0.55% | 26.8% | 0.966 | 34.2% | 1.99% | 55.9% | 0.907 | 75.2% |
+| 5 | 0.39% | 23.9% | 0.972 | 31.6% | 1.20% | 51.5% | 0.926 | 72.3% |
+| 6 | 0.23% | 19.2% | 0.982 | 27.8% | 0.99% | 47.2% | 0.942 | 69.8% |
+| 7 | 0.09% | 13.2% | 0.991 | 23.2% | 0.69% | 47.2% | 0.943 | 69.3% |
+| 8 | 0.05% | 8.6% | 0.996 | 19.3% | 0.59% | 46.7% | 0.945 | 68.6% |
+
+Every line search took the full step at its first try. On the hats, the first step is held
+to 2% (`initial_step`) and barely moves the misfit; then L-BFGS passes the Gauss–Newton
+solution (15.3%, $\chi/\chi_0$ 0.20%) by the sixth iteration and reaches 8.6% and 0.05%: it
+minimises the nonlinear misfit, which Gauss–Newton only linearises once, so the truth is
+nearer the nonlinear minimum than Gauss–Newton's step. The inversion with every node free
+fits the data almost as well (0.59%) with the support still 47% wrong and the whole grid
+69%: the extra unknowns let it explain the data by changes outside the target (from the
+first step on: 77% of its norm lay outside the support, its largest change next to a
+source or receiver).
+
+**Decision.** No change to the code. The inversion's gradient is the analytic Born
+sensitivity to $10^{-4}$, and its first step is $J^\mathsf T\delta d$ times the preconditioner,
+exactly; what separates its model from the truth is not the solver (0.3% of the scattered
+data, 0.8% of a Gauss–Newton model) but the nonlinearity, which even at a +3% Gaussian
+costs a single Gauss–Newton step 15% and which iterating removes, and above all the
+parametrisation: on 125 well-posed unknowns L-BFGS recovers the target to 8.6% in 8
+iterations, on every node to 47% with a smaller misfit than Gauss–Newton's. A model's error
+is a question of what the data determine, and a misfit that falls says little about it
+[@fichtner2011resolution]. This is a reason to give the inversion a coarser or regularised
+parametrisation (a basis, or a region), not yet a decision.
+
+**Reproduce:** `cargo test --release --test analytic_inversion -- --ignored --nocapture
+--test-threads 1`: `born_and_gauss_newton` (7 minutes on gauss's six cores, $J$ in about
+a minute) and `lbfgs_against_gauss_newton` (23 minutes); the check, in `just test`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
