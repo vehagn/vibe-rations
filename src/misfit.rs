@@ -389,19 +389,7 @@ impl Misfit {
         } else {
             0
         };
-        let gabor = match measure.kind {
-            MisfitKind::Phase => {
-                let f0 = measure
-                    .dominant_frequency
-                    .context("the phase misfit needs the data's dominant frequency")?;
-                Some(Gabor::new(
-                    f0,
-                    measure.max_frequency.unwrap_or(2.5 * f0),
-                    interval,
-                )?)
-            }
-            _ => None,
-        };
+        let gabor = Gabor::for_measure(measure, interval)?;
         this.weights = weights;
         this.max_lag = max_lag;
         this.gabor = gabor;
@@ -572,15 +560,7 @@ impl Misfit {
             MisfitKind::L2 => components,
             _ => traces,
         };
-        let kernels = match measure.kind {
-            MisfitKind::Phase => {
-                let f0 = measure
-                    .dominant_frequency
-                    .context("the phase misfit needs the data's dominant frequency")?;
-                Gabor::new(f0, measure.max_frequency.unwrap_or(2.5 * f0), interval)?.memory_bytes()
-            }
-            _ => 0,
-        };
+        let kernels = Gabor::for_measure(measure, interval)?.map_or(0, |g| g.memory_bytes());
         Ok(filtered + weights + kernels)
     }
 
@@ -812,6 +792,20 @@ struct Gabor {
 }
 
 impl Gabor {
+    /// The cells the phase misfit compares for `measure`, of traces sampled every `interval`
+    /// seconds: from its dominant frequency to its filter's corner, or to the top of a Ricker
+    /// wavelet's band, 2.5 f₀, without one. None for the other misfits.
+    fn for_measure(measure: &Measure, interval: f64) -> Result<Option<Self>> {
+        if measure.kind != MisfitKind::Phase {
+            return Ok(None);
+        }
+        let f0 = measure
+            .dominant_frequency
+            .context("the phase misfit needs the data's dominant frequency")?;
+        let f_hi = measure.max_frequency.unwrap_or(2.5 * f0);
+        Ok(Some(Self::new(f0, f_hi, interval)?))
+    }
+
     fn new(f0: f64, f_hi: f64, interval: f64) -> Result<Self> {
         use std::f64::consts::PI;
         ensure!(

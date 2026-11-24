@@ -455,27 +455,7 @@ fn weighted(a: Vec<f64>, b: f64, f: f64) -> Row {
 /// weight on the extremal rows (Rice & Usow 1968). Returns the best iterate and its largest
 /// error.
 fn minimax(rows: &[Row]) -> (Vec<f64>, f64) {
-    let mut weights = vec![1.0 / rows.len() as f64; rows.len()];
-    let mut best = (f64::INFINITY, Vec::new());
-    for _ in 0..400 {
-        let x = weighted_least_squares(rows, &weights);
-        let errors: Vec<f64> = rows
-            .iter()
-            .map(|(a, b)| (a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>() - b).abs())
-            .collect();
-        let worst = errors.iter().copied().fold(0.0, f64::max);
-        if worst < best.0 {
-            best = (worst, x);
-        }
-        let total: f64 = weights.iter().zip(&errors).map(|(w, e)| w * e).sum();
-        if total == 0.0 {
-            break;
-        }
-        for (w, e) in weights.iter_mut().zip(&errors) {
-            *w *= e / total;
-        }
-    }
-    (best.1, best.0)
+    lawson(rows, 1)
 }
 
 /// [`minimax`] for a complex error: the rows come in pairs, its real and imaginary parts at
@@ -483,16 +463,29 @@ fn minimax(rows: &[Row]) -> (Vec<f64>, f64) {
 /// Taken part by part, the minimax isn't unique (any imaginary part below the largest real
 /// one would do), and the design could pick weights with a needless phase error.
 fn minimax_complex(rows: &[Row]) -> (Vec<f64>, f64) {
-    let pairs = rows.len() / 2;
-    let mut weights = vec![1.0 / pairs as f64; pairs];
+    lawson(rows, 2)
+}
+
+/// Lawson's algorithm on the errors of the rows in groups of `group`: one row each (their
+/// absolute errors), or two (the moduli of complex errors, real and imaginary part).
+fn lawson(rows: &[Row], group: usize) -> (Vec<f64>, f64) {
+    let groups = rows.len() / group;
+    let mut weights = vec![1.0 / groups as f64; groups];
     let mut best = (f64::INFINITY, Vec::new());
     for _ in 0..400 {
-        let row_weights: Vec<f64> = weights.iter().flat_map(|&w| [w, w]).collect();
+        let row_weights: Vec<f64> = weights
+            .iter()
+            .flat_map(|&w| std::iter::repeat_n(w, group))
+            .collect();
         let x = weighted_least_squares(rows, &row_weights);
         let error = |(a, b): &Row| a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>() - b;
         let errors: Vec<f64> = rows
-            .chunks(2)
-            .map(|pair| error(&pair[0]).hypot(error(&pair[1])))
+            .chunks(group)
+            .map(|g| match g {
+                [row] => error(row).abs(),
+                [re, im] => error(re).hypot(error(im)),
+                _ => unreachable!("groups of one or two rows"),
+            })
             .collect();
         let worst = errors.iter().copied().fold(0.0, f64::max);
         if worst < best.0 {

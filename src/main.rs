@@ -307,9 +307,8 @@ fn run() -> Result<()> {
             if shots {
                 // Each shot sets up its own; this one would only hold memory.
                 drop(sim);
-                let base = config.parent().unwrap_or(Path::new("."));
                 for s in 0..cfg.sources.len() {
-                    let mut shot = Simulation::new(&cfg.shot(s)?, base)?;
+                    let mut shot = Simulation::new(&cfg.shot(s)?, base(&config))?;
                     let dir = out.join(shot_dir(s));
                     if !quiet {
                         eprintln!("shot {} of {}", s + 1, cfg.sources.len());
@@ -421,31 +420,28 @@ fn run() -> Result<()> {
             };
             let m = plan(&cfg, &config, kind)?;
             println!("{}", m.table());
-            if let Some(inversion) = cfg.inversion.as_mut().filter(|_| invert) {
-                // The other way to get the forward fields back, for comparison.
-                inversion.reconstruct = !inversion.reconstruct;
-                let flag = if inversion.reconstruct {
-                    "with reconstruct = true"
-                } else {
-                    "with reconstruct = false"
-                };
-                let o = plan(&cfg, &config, Kind::Invert)?;
-                println!("  {:>10}  at most {flag}", memory::human(o.peak));
-            }
-            if gradient {
-                // The other way to get the forward field back, for comparison.
-                let (other, flag) = if strategy.reconstruct {
-                    (
-                        Strategy::Checkpoints { every: None },
-                        "without --reconstruct",
-                    )
-                } else {
-                    (
-                        Strategy::Reconstruct { segment: None },
-                        "with --reconstruct",
-                    )
-                };
-                let o = plan(&cfg, &config, Kind::Gradient(other))?;
+            // The other way to get the forward fields back, for comparison.
+            let other = match kind {
+                Kind::Run => None,
+                Kind::Gradient(Strategy::Checkpoints { .. }) => Some((
+                    Kind::Gradient(Strategy::Reconstruct { segment: None }),
+                    "with --reconstruct".to_string(),
+                )),
+                Kind::Gradient(Strategy::Reconstruct { .. }) => Some((
+                    Kind::Gradient(Strategy::Checkpoints { every: None }),
+                    "without --reconstruct".to_string(),
+                )),
+                Kind::Invert => {
+                    let inversion = cfg.inversion.as_mut().expect("checked above");
+                    inversion.reconstruct = !inversion.reconstruct;
+                    Some((
+                        Kind::Invert,
+                        format!("with reconstruct = {}", inversion.reconstruct),
+                    ))
+                }
+            };
+            if let Some((kind, flag)) = other {
+                let o = plan(&cfg, &config, kind)?;
                 println!("  {:>10}  at most {flag}", memory::human(o.peak));
             }
             if let Some(free) = memory::available() {
@@ -524,13 +520,7 @@ fn run() -> Result<()> {
                  `vibe-rations memory --invert` itemises it",
                 memory::human(planned.peak)
             );
-            let next_to_layers = sim.receivers_next_to_layers();
-            if next_to_layers > 0 {
-                eprintln!(
-                    "warning: {next_to_layers} receiver(s) next to the absorbing layers read \
-                     velocities inside them, which makes the gradient approximate"
-                );
-            }
+            warn_next_to_layers(&sim);
             drop(sim);
             eprintln!(
                 "the starting misfit and gradient, {} shot(s)",
@@ -604,14 +594,7 @@ fn run() -> Result<()> {
                  `vibe-rations memory --gradient{flag}` itemises it",
                 memory::human(planned.peak)
             );
-            let next_to_layers = sim.receivers_next_to_layers();
-            if next_to_layers > 0 {
-                eprintln!(
-                    "warning: {next_to_layers} receiver(s) next to the absorbing layers read \
-                     velocities inside them, which makes the gradient approximate; move them a \
-                     node further in"
-                );
-            }
+            let next_to_layers = warn_next_to_layers(&sim);
             let r = &sim.receivers;
             let want = [r.points.len(), r.samples];
             let data = r
@@ -697,7 +680,6 @@ fn base(path: &Path) -> &Path {
     path.parent().unwrap_or(Path::new("."))
 }
 
-/// Sets a run up, after making sure it fits in the memory available, if that can be known.
 /// What a configuration is loaded for, which decides the memory it needs.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -741,4 +723,17 @@ fn report(sim: &Simulation) {
     for w in &sim.info.warnings {
         eprintln!("warning: {w}");
     }
+}
+
+/// Warns about receivers whose adjoint sources would reach into the absorbing layers, and
+/// returns how many there are.
+fn warn_next_to_layers(sim: &Simulation) -> usize {
+    let n = sim.receivers_next_to_layers();
+    if n > 0 {
+        eprintln!(
+            "warning: {n} receiver(s) next to the absorbing layers read velocities inside them, \
+             which makes the gradient approximate; move them a node further in"
+        );
+    }
+    n
 }
