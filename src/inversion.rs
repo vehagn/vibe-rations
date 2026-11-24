@@ -594,11 +594,7 @@ impl Inversion {
             } else {
                 hi
             };
-            let values = match p {
-                Parameter::Vp => &start.vp,
-                Parameter::Vs => &start.vs,
-                Parameter::Rho => &start.rho,
-            };
+            let values = start.values(*p);
             // A little slack: the default vp limit sits 0.1% below the stability limit.
             if let Some(&n) = nodes.iter().find(|&&n| {
                 let v = values[n] as f64;
@@ -750,11 +746,7 @@ impl Inversion {
         let mut m = self.model.clone();
         let mut offset = 0;
         for (p, nodes) in &self.free {
-            let (now, start) = match p {
-                Parameter::Vp => (&mut m.vp, &self.start.vp),
-                Parameter::Vs => (&mut m.vs, &self.start.vs),
-                Parameter::Rho => (&mut m.rho, &self.start.rho),
-            };
+            let (now, start) = (m.values_mut(*p), self.start.values(*p));
             for (i, &n) in nodes.iter().enumerate() {
                 now[n] = (start[n] as f64 * (1.0 + x[offset + i])) as f32;
             }
@@ -781,11 +773,7 @@ impl Inversion {
         for f in order {
             let (p, nodes) = &self.free[f];
             let [lo, hi] = self.bounds[f];
-            let start = match p {
-                Parameter::Vp => &self.start.vp,
-                Parameter::Vs => &self.start.vs,
-                Parameter::Rho => &self.start.rho,
-            };
+            let start = self.start.values(*p);
             for (i, &n) in nodes.iter().enumerate() {
                 let m0 = start[n] as f64;
                 let mut v = (m0 * (1.0 + x[offsets[f] + i])).clamp(lo, hi);
@@ -855,14 +843,10 @@ impl Inversion {
                 s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
             }
         }
-        let [vp, vs, rho] = sum;
         let mut g = Vec::with_capacity(self.x.len());
         for (p, nodes) in &self.free {
-            let (grad, start) = match p {
-                Parameter::Vp => (&vp, &self.start.vp),
-                Parameter::Vs => (&vs, &self.start.vs),
-                Parameter::Rho => (&rho, &self.start.rho),
-            };
+            // The sums are of vp, vs and ρ, in the order of `Parameter::ALL`.
+            let (grad, start) = (&sum[*p as usize], self.start.values(*p));
             g.extend(nodes.iter().map(|&n| grad[n] * start[n] as f64));
         }
         Ok(Evaluation {
@@ -894,13 +878,12 @@ impl Inversion {
             .sum();
         let misfits: usize = self.shots.iter().map(|s| s.misfit.memory_bytes()).sum();
         let receiver_side = 8 * self.receiver_side.as_ref().map_or(0, Vec::len);
-        let model = |m: &Model| 4 * (m.vp.len() + m.vs.len() + m.rho.len());
         let free: usize = self.free.iter().map(|(_, nodes)| nodes.len()).sum();
         4 * observed
             + misfits
             + receiver_side
-            + model(&self.model)
-            + model(&self.start)
+            + self.model.memory_bytes()
+            + self.start.memory_bytes()
             + std::mem::size_of::<usize>() * free
             + 8 * (self.x.len() + self.g.len() + self.preconditioner.as_ref().map_or(0, Vec::len))
             + self.lbfgs.memory_bytes()
@@ -1061,7 +1044,7 @@ impl Inversion {
         };
         let model = self.model_at(&step.x);
         // Besides the inversion: the step and the model it leads to.
-        let extra = 8 * step.x.len() + 4 * (model.vp.len() + model.vs.len() + model.rho.len());
+        let extra = 8 * step.x.len() + model.memory_bytes();
         let Evaluation {
             misfit,
             gradient: g_new,

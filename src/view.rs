@@ -54,16 +54,6 @@ const SECTION_PIXELS: usize = 600;
 /// picture fades as the waves leave rather than blowing up what little is left.
 const CLIP_MEMORY: f32 = 0.05;
 
-fn component(name: &str) -> Result<Component> {
-    Ok(match name {
-        "vx" => Component::Vx,
-        "vy" => Component::Vy,
-        "vz" => Component::Vz,
-        "p" => Component::P,
-        _ => bail!("unknown field {name}; use vx, vy, vz or p"),
-    })
-}
-
 impl View {
     pub fn new(sim: Simulation) -> Self {
         Self {
@@ -110,16 +100,11 @@ impl View {
     /// `field` (vx, vy, vz or p) on `plane` (xy, xz or yz) through node `index` along its
     /// normal, scaled so `gain` 1 shows the 99.5th percentile at full colour.
     pub fn section(&mut self, field: &str, plane: &str, index: usize, gain: f32) -> Result<Frame> {
-        let (plane, axis) = match plane {
-            "xy" => (PlaneKind::Xy, 2),
-            "xz" => (PlaneKind::Xz, 1),
-            "yz" => (PlaneKind::Yz, 0),
-            _ => bail!("unknown plane {plane}; use xy, xz or yz"),
-        };
-        let n = self.sim.solver.grid.n[axis];
+        let plane = PlaneKind::plane(plane)?;
+        let n = self.sim.solver.grid.n[plane.normal().expect("a plane")];
         ensure!(index < n, "plane index {index} is off the grid (0..{n})");
         ensure!(gain > 0.0, "gain must be positive");
-        let component = component(field)?;
+        let component = Component::from_name(field)?;
         let snapshot = Snapshot {
             component,
             plane,
@@ -177,7 +162,7 @@ impl View {
 
     /// Which of the receivers' trace arrays holds `name`.
     fn recorded(&self, name: &str) -> Result<usize> {
-        let c = component(name)?;
+        let c = Component::from_name(name)?;
         self.sim
             .receivers
             .components
@@ -187,21 +172,16 @@ impl View {
     }
 }
 
-/// The plane `plane` (xy, xz or yz) through node `index` along its normal: its axis, and the
-/// two axes across and down it.
-fn plane_axes(plane: &str) -> Result<(usize, usize, usize)> {
-    Ok(match plane {
-        "xy" => (2, 0, 1),
-        "xz" => (1, 0, 2),
-        "yz" => (0, 1, 2),
-        _ => bail!("unknown plane {plane}; use xy, xz or yz"),
-    })
-}
-
-/// A section through values on the interior nodes of `grid`, row-major from the top, and its
-/// width and height.
+/// A section through values on the interior nodes of `grid`, on `plane` (xy, xz or yz) through
+/// node `index` along its normal, row-major from the top, and its width and height.
 fn cut(grid: &Grid, values: &[f32], plane: &str, index: usize) -> Result<(Vec<f32>, usize, usize)> {
-    let (normal, across, down) = plane_axes(plane)?;
+    let normal = PlaneKind::plane(plane)?.normal().expect("a plane");
+    // The other two axes, the first across the section and the second down it.
+    let [across, down] = match normal {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
+    };
     let n = grid.n;
     ensure!(
         index < n[normal],
@@ -261,23 +241,6 @@ impl Show {
     }
 }
 
-fn parameter(name: &str) -> Result<Parameter> {
-    Ok(match name {
-        "vp" => Parameter::Vp,
-        "vs" => Parameter::Vs,
-        "rho" => Parameter::Rho,
-        _ => bail!("unknown parameter {name}; use vp, vs or rho"),
-    })
-}
-
-fn values(m: &Model, p: Parameter) -> &[f32] {
-    match p {
-        Parameter::Vp => &m.vp,
-        Parameter::Vs => &m.vs,
-        Parameter::Rho => &m.rho,
-    }
-}
-
 /// An inversion's models and gradient as they last stood, for pictures. Cloning shares them,
 /// so a server can keep a copy to draw from while the inversion moves on.
 #[derive(Clone)]
@@ -304,14 +267,13 @@ impl Pictures {
         index: usize,
         gain: f32,
     ) -> Result<Frame> {
-        let p = parameter(parameter_name)?;
+        let p = Parameter::from_name(parameter_name)?;
         ensure!(gain > 0.0, "gain must be positive");
         let grid = &self.start.grid;
-        let start = values(&self.start, p);
+        let start = self.start.values(p);
         let largest = |v: &mut dyn Iterator<Item = f32>| v.fold(0.0f32, |m, x| m.max(x.abs()));
-        let difference = |m: &Model| -> Vec<f32> {
-            values(m, p).iter().zip(start).map(|(a, b)| a - b).collect()
-        };
+        let difference =
+            |m: &Model| -> Vec<f32> { m.values(p).iter().zip(start).map(|(a, b)| a - b).collect() };
         let true_change = self.truth.as_ref().map(|t| difference(t));
         let update_clip = || {
             let true_largest = true_change
@@ -339,7 +301,7 @@ impl Pictures {
             Show::Model => {
                 let mut range = [f32::INFINITY, f32::NEG_INFINITY];
                 for m in std::iter::once(&self.start).chain(&self.truth) {
-                    for &v in values(m, p) {
+                    for &v in m.values(p) {
                         range = [range[0].min(v), range[1].max(v)];
                     }
                 }
@@ -349,7 +311,7 @@ impl Pictures {
                     (lo, hi) = (0.95 * lo, 1.05 * hi.max(1e-3));
                 }
                 let (rgba, width, height) =
-                    picture(grid, values(&self.model, p), plane, index, |u| {
+                    picture(grid, self.model.values(p), plane, index, |u| {
                         image::sequential_rgba(u, lo, hi)
                     })?;
                 Ok(Frame {
@@ -380,19 +342,18 @@ impl Pictures {
     /// The model as it stands, `parameter` (vp, vs or rho) as an `.npy` file shaped (nz, ny,
     /// nx) like model files.
     pub fn npy(&self, parameter_name: &str) -> Result<Vec<u8>> {
-        let g = self.model.grid;
         npy::to_bytes(
-            &[g.n[2], g.n[1], g.n[0]],
-            values(&self.model, parameter(parameter_name)?),
+            &self.model.grid.shape(),
+            self.model.values(Parameter::from_name(parameter_name)?),
         )
     }
 
     /// Bytes held: each model and gradient once, however many share it.
     pub fn memory_bytes(&self) -> usize {
-        let model = |m: &Model| 4 * (m.vp.len() + m.vs.len() + m.rho.len());
-        let mut bytes = model(&self.start) + self.truth.as_deref().map_or(0, model);
+        let mut bytes =
+            self.start.memory_bytes() + self.truth.as_deref().map_or(0, Model::memory_bytes);
         if !Arc::ptr_eq(&self.model, &self.start) {
-            bytes += model(&self.model);
+            bytes += self.model.memory_bytes();
         }
         bytes
             + self
@@ -622,7 +583,7 @@ impl InversionView {
         };
         // Freed first, so the old and the new are never held together.
         self.pictures.gradient = [None, None, None];
-        for p in [Parameter::Vp, Parameter::Vs, Parameter::Rho] {
+        for p in Parameter::ALL {
             self.pictures.gradient[p as usize] = inversion.gradient_of(p).map(Arc::new);
         }
         if inversion.iteration > 0 {

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::config::{Coefficients, Config, Format, PlaneKind, default_courant};
+use crate::config::{Coefficients, Config, Format, default_courant};
 use crate::cpml::{PmlSettings, Stagger};
 use crate::fd::Stencil;
 use crate::grid::Grid;
@@ -380,23 +380,20 @@ impl Simulation {
         let mut snapshots = Vec::new();
         for s in &cfg.snapshots {
             ensure!(s.interval > 0.0, "a snapshot interval must be positive");
-            let index = match s.plane {
-                PlaneKind::Xy => Some(2),
-                PlaneKind::Xz => Some(1),
-                PlaneKind::Yz => Some(0),
-                PlaneKind::Volume => None,
-            }
-            .map(|a| {
-                let r = (s.at / grid.h[a]).round();
-                ensure!(
-                    (0.0..grid.n[a] as f64).contains(&r),
-                    "snapshot plane at {} m is off the grid",
-                    s.at
-                );
-                Ok(r as usize)
-            })
-            .transpose()?
-            .unwrap_or(0);
+            let index = s
+                .plane
+                .normal()
+                .map(|a| {
+                    let r = (s.at / grid.h[a]).round();
+                    ensure!(
+                        (0.0..grid.n[a] as f64).contains(&r),
+                        "snapshot plane at {} m is off the grid",
+                        s.at
+                    );
+                    Ok(r as usize)
+                })
+                .transpose()?
+                .unwrap_or(0);
             ensure!(
                 !s.formats.is_empty(),
                 "a snapshot needs at least one format"

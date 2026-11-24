@@ -71,6 +71,18 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Its name, as the API gives it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Created => "created",
+            Phase::Paused => "paused",
+            Phase::Running => "running",
+            Phase::Done => "done",
+            Phase::Failed => "failed",
+            Phase::Interrupted => "interrupted",
+        }
+    }
+
     /// Whether the run will take no more steps.
     pub fn finished(self) -> bool {
         matches!(self, Phase::Done | Phase::Failed | Phase::Interrupted)
@@ -625,9 +637,11 @@ fn route(
                 _ => (Phase::Paused, Phase::Running),
             };
             if sh.status.phase != from {
-                return Err(conflict(
-                    format!("the run is {:?}, not {from:?}", sh.status.phase).to_lowercase(),
-                ));
+                return Err(conflict(format!(
+                    "the run is {}, not {}",
+                    sh.status.phase.name(),
+                    from.name()
+                )));
             }
             sh.status.phase = to;
             run.save(&sh.status);
@@ -895,8 +909,8 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
         let sh = run.shared();
         if sh.status.phase != Phase::Created {
             return Err(conflict(format!(
-                "the run has been started already ({:?})",
-                sh.status.phase
+                "the run has been started already ({})",
+                sh.status.phase.name()
             )));
         }
         if !sh.status.needs.is_empty() {

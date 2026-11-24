@@ -363,7 +363,7 @@ fn run() -> Result<()> {
                         println!(
                             "{:<40} {:<11} {:>5} {:>7}  {}{}",
                             s.id,
-                            format!("{:?}", s.phase).to_lowercase(),
+                            s.phase.name(),
                             done,
                             left,
                             match (&s.error, s.kind) {
@@ -646,8 +646,7 @@ fn run() -> Result<()> {
                 strategy,
             )?;
             sim.write_outputs(&out)?;
-            let g = sim.solver.grid;
-            let shape = [g.n[2], g.n[1], g.n[0]];
+            let shape = sim.solver.grid.shape();
             let [vp, vs, rho] = run.gradient.velocities(&sim.solver.model);
             for (name, values) in [("vp", vp), ("vs", vs), ("rho", rho)] {
                 let single: Vec<f32> = values.iter().map(|&v| v as f32).collect();
@@ -689,7 +688,7 @@ fn finish(r: &remote::Remote, id: &str, out: &Path, quiet: bool) -> Result<()> {
     ensure!(
         s.phase == server::Phase::Done,
         "the run {}: {}",
-        format!("{:?}", s.phase).to_lowercase(),
+        s.phase.name(),
         s.error.unwrap_or_default()
     );
     let n = r.download(id, out)?;

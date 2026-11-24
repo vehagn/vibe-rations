@@ -252,7 +252,7 @@ impl Remote {
         ensure!(
             s.phase == Phase::Done,
             "{id} is {}{}",
-            format!("{:?}", s.phase).to_lowercase(),
+            s.phase.name(),
             match s.phase {
                 Phase::Running | Phase::Paused => format!(", {}", progress_line(&s)),
                 _ => s.error.map(|e| format!(": {e}")).unwrap_or_default(),

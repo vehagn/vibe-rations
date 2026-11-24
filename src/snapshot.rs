@@ -31,13 +31,10 @@ impl Snapshot {
 
     /// A base name such as `vz_xz60` (the section through y node 60) or `p_volume`.
     pub fn name(&self) -> String {
-        let plane = match self.plane {
-            PlaneKind::Xy => "xy",
-            PlaneKind::Xz => "xz",
-            PlaneKind::Yz => "yz",
-            PlaneKind::Volume => return format!("{}_volume", self.component.name()),
-        };
-        format!("{}_{plane}{}", self.component.name(), self.index)
+        match self.plane {
+            PlaneKind::Volume => format!("{}_volume", self.component.name()),
+            plane => format!("{}_{}{}", self.component.name(), plane.name(), self.index),
+        }
     }
 
     /// The nodes of the section, row by row from the top, as (width, height) and a function
