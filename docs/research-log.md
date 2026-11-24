@@ -3286,6 +3286,140 @@ surface's remaining first-order concern for misfits.
 minutes); `just physics surface_slope`; Lamb's finer grids with `surface_slope = true` in
 `survey::config`'s `[boundary]`.
 
+## 2026-11-23 — Marmousi2: the whole section, muted L2
+
+**Question.** Every Marmousi2 inversion so far was of the central 6 km, judged against its own
+truth (2026-11-21, "Marmousi2: the mute line without the truth, and a held-out part"). With
+gauss's 62 GiB the whole section fits. Does muted L2, the safest variant on the central part,
+behave the same on the whole section?
+
+**Method** (`examples/marmousi2/whole.toml`, observed traces from `whole-true.toml`). The
+whole section, 17 km by 3.5 km, extruded 5 km along $y$: 681 × 201 × 141 nodes at 25 m
+(central: 241 × 41 × 141). Nine explosive shots at 50 m depth from $x$ = 0.5 to 16.5 km every
+2 km, 1.2 Hz Ricker; 641 receivers recording $v_x$ and $v_z$ on the seafloor (475 m) from 0.5
+to 16.5 km; 3.5 s at $\Delta t$ = 2 ms; order 8, pinned as the central part's. Five L2
+iterations for $v_p$ and $v_s$, density as it is, the top 500 m fixed, with the slow seafloor
+waves muted. **The settings are the central part's, reused, not tuned on the whole
+section:** the start (the section smoothed over 250 m, `25m-smooth`), the mute (keep what
+arrives before $|\Delta x| / 600\ \text{m/s} + 0.87$ s, a 0.42 s taper), and L2 itself, the
+variant chosen on the central part. The rule from the start's slowest seafloor $v_s$
+(`slow_waves_mute`) was not worked out for the whole section. Run on gauss with the binary
+built for its CPU, 12 threads.
+
+The error ratio and cosine with the true update are measured as for the parts
+(`whole_by_region`, which reads the result): over the free nodes below 500 m within four
+nodes of the receivers' plane, the strip the parts' side layers leave them (`ACROSS`, now
+applied to every case, which changes nothing for the parts). Over the whole 5 km across,
+most of which the survey barely sees, every number came out within 1% of 1. The same
+study splits the result into 1 km windows along $x$ and sets each beside the start's $v_s$
+under the seafloor against the truth's, as `seafloor_speeds` does for the parts.
+
+**Results.** Misfit (the muted L2 misfit, relative to the start's 0.7308; 23,033,010
+unknowns):
+
+| Iteration | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Misfit left | 96.2% | 83.1% | 75.1% | 69.9% | 66.2% |
+| Largest change | 2.0% | 10.2% | 11.3% | 12.8% | 14.3% |
+
+Every step was the full one at the first trial. Error ratio and cosine by depth band
+(iteration 1's model was overwritten before it could be kept), with the parts' muted L2 after
+five iterations:
+
+| | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|
+| 2 | $v_p$ | 0.967, +0.41 | 0.992, +0.19 | 0.998, +0.14 | 1.000, −0.01 | 1.000, −0.20 |
+| | $v_s$ | 0.993, +0.15 | 1.006, −0.19 | 1.002, −0.19 | 1.000, −0.04 | 1.000, +0.17 |
+| 3 | $v_p$ | 0.951, +0.41 | 0.988, +0.20 | 0.996, +0.15 | 1.000, −0.00 | 1.001, −0.20 |
+| | $v_s$ | 0.988, +0.17 | 1.009, −0.18 | 1.004, −0.18 | 1.000, −0.04 | 1.000, +0.17 |
+| 4 | $v_p$ | 0.942, +0.40 | 0.986, +0.20 | 0.995, +0.16 | 1.000, +0.00 | 1.001, −0.20 |
+| | $v_s$ | 0.986, +0.18 | 1.011, −0.18 | 1.004, −0.18 | 1.000, −0.04 | 1.000, +0.17 |
+| 5 | $v_p$ | 0.937, +0.40 | 0.984, +0.20 | 0.995, +0.16 | 1.000, +0.01 | 1.001, −0.20 |
+| | $v_s$ | 0.984, +0.19 | 1.013, −0.18 | 1.005, −0.18 | 1.000, −0.05 | 1.000, +0.17 |
+| central, 5 | $v_p$ | 0.916, +0.44 | 0.971, +0.35 | 0.999, +0.05 | 1.000, −0.03 | 1.001, −0.29 |
+| | $v_s$ | 0.970, +0.26 | 1.004, −0.05 | 1.001, −0.05 | 1.000, +0.04 | 1.000, +0.13 |
+| west, 5 | $v_p$ | 1.167, +0.13 | 1.055, +0.20 | 1.013, +0.17 | 0.997, +0.10 | 1.001, −0.20 |
+| | $v_s$ | 0.791, +0.61 | 0.978, +0.26 | 0.999, +0.04 | 1.001, −0.17 | 0.999, +0.29 |
+
+(The west's line was its own 690 m/s, the others' 600 m/s.) By region, after iteration 5:
+the seafloor's $v_s$ (true 345 m/s everywhere), the harmonic mean over the 250 m below it,
+true / start, the delay over 1 km, mean (largest), then the error ratio and cosine, and for
+750–1000 m the window's share of the band's added squared error
+$\sum (m - m_\text{true})^2 - (m_0 - m_\text{true})^2$:
+
+| $x$ (km) | start's $v_s$ | 250 m below | delay (s) | $v_p$ 500–750 m | $v_s$ 500–750 m | $v_s$ 750–1000 m | share |
+|---|---|---|---|---|---|---|---|
+| 0.5–1.5 | 445 | 427 / 450 | 0.12 (0.13) | 0.988, +0.16 | 0.913, +0.59 | 1.002, −0.05 | +0.1% |
+| 1.5–2.5 | 447 | 429 / 453 | 0.12 (0.13) | 0.990, +0.14 | 0.949, +0.53 | 0.997, +0.15 | −0.2% |
+| 2.5–3.5 | 442 | 430 / 447 | 0.09 (0.12) | 1.013, −0.02 | 0.945, +0.54 | 0.991, +0.36 | −0.7% |
+| 3.5–4.5 | 438 | 429 / 443 | 0.07 (0.08) | 0.998, +0.07 | 0.943, +0.53 | 0.995, +0.17 | −0.3% |
+| 4.5–5.5 | 443 | 437 / 447 | 0.05 (0.09) | 1.004, −0.02 | 0.950, +0.51 | 1.004, −0.22 | +0.4% |
+| 5.5–6.5 | 428 | 417 / 434 | 0.09 (0.17) | 0.992, +0.13 | 0.962, +0.45 | 0.993, +0.28 | −0.6% |
+| 6.5–7.5 | 409 | 388 / 420 | 0.20 (0.28) | 0.931, +0.52 | 0.971, +0.35 | 0.992, +0.30 | −0.7% |
+| 7.5–8.5 | 420 | 388 / 440 | 0.30 (0.48) | 0.932, +0.62 | 0.992, +0.18 | 0.998, +0.13 | −1.1% |
+| 8.5–9.5 | 483 | 403 / 516 | 0.54 (0.80) | 0.874, +0.70 | 0.984, +0.27 | 1.004, −0.15 | +3.2% |
+| 9.5–10.5 | 633 | 567 / 660 | 0.25 (0.77) | 0.971, +0.24 | 0.935, +0.37 | 0.978, +0.33 | −5.2% |
+| 10.5–11.5 | 448 | 382 / 483 | 0.55 (0.68) | 0.864, +0.75 | 1.005, −0.13 | 1.012, −0.41 | +13.3% |
+| 11.5–12.5 | 472 | 382 / 518 | 0.69 (0.75) | 0.873, +0.71 | 0.995, +0.17 | 1.043, −0.84 | +35.8% |
+| 12.5–13.5 | 582 | 498 / 615 | 0.38 (0.78) | 0.992, +0.14 | 0.980, +0.21 | 1.032, −0.38 | +21.6% |
+| 13.5–14.5 | 540 | 433 / 573 | 0.56 (0.64) | 0.935, +0.43 | 1.006, −0.10 | 1.031, −0.63 | +45.3% |
+| 14.5–15.5 | 607 | 555 / 628 | 0.21 (0.41) | 1.008, +0.04 | 0.949, +0.33 | 0.997, +0.08 | −3.4% |
+| 15.5–16.5 | 559 | 444 / 598 | 0.58 (0.79) | 0.908, +0.45 | 1.007, +0.02 | 0.983, +0.19 | −8.3% |
+
+Half a period of the 1.2 Hz Ricker is 0.42 s.
+
+- *Over the section, $v_p$ does nearly as well as on the central part, and $v_s$ worse.* At
+  500–750 m $v_p$ ends at 0.937 (central 0.916, west 1.167); its update is a slower band just
+  under the seafloor, about 200 m/s at the 99.9th percentile of the centre plane (775 m/s at
+  most). It gains most east of 6.5 km, 0.864–0.935 in seven of the ten windows there with
+  cosines of +0.43 to +0.75, including the windows where $v_s$ drifts. $v_s$ gains 1.6% at the
+  top (central 3.0%) and moves away below 750 m, 1.013 and 1.005 with cosines of −0.18
+  (central 1.004 and 1.001, −0.05), a little more each iteration.
+- *The $v_s$ drift is where the start is cycle-skipped.* In the four windows from 10.5 to
+  14.5 km the start's $v_s$ in the 250 m under the seafloor is 23–36% fast and the slow waves
+  fall 0.38–0.69 s behind per km on average, up to 0.78 s, past half a period. There
+  $v_s$ at 750–1000 m ends at 1.012–1.043 with cosines of −0.38 to −0.84, and those four
+  windows hold 116% of the band's added squared error; 8.5–9.5 km adds 3.2% and the other
+  windows together take about 20% off. In the west, 0.5–6.5 km, the start is 2–6% fast and the
+  delay 0.05–0.12 s:
+  there $v_s$ at 500–750 m improves by 4–9% (0.913–0.962, cosines +0.45 to +0.59) and
+  barely moves below, as in the western part's own muted run (0.791 at the top, from five
+  iterations of its data alone). The windows with a mean delay of 0.20–0.30 s (6.5–8.5,
+  9.5–10.5, 14.5–15.5 km) gain too. 15.5–16.5 km, at 0.58 s, doesn't fit: $v_s$ at
+  750–1000 m gains there (0.983), and it gets worse at 1000–1500 m instead (1.022).
+- *Below 1.5 km nothing moves*, as on the parts.
+- The misfit fell further than the central part's muted misfit (to 66.2% of the start's,
+  against 0.332 to 0.240 from the first iteration to the fifth there), but the two are of
+  different data and not comparable.
+
+*Cost.* The three observed shots missing after an interrupted run took 13 min 17 s (`run
+--shots` on a copy of `whole-true.toml` with only those sources, moved to `shot-006`–`008`;
+1.7 GiB). The inversion took 25 h 8 min at 10.6 cores on average: the starting misfit and
+gradient 3 h 39 min (24.3 min per shot's gradient), then 4 h 18 min per iteration (a trial
+of nine forward runs, about 40 min, and the next gradient). Its peak was 48.3 GiB resident
+against the plan's 48 GiB (the inversion's own count, 47.7 GiB); 22 GiB with `reconstruct =
+true`. The CPU stayed at 62–71 °C and 3.5 GHz throughout, with no swapping.
+`whole_by_region` takes a second.
+
+**Decision.** The whole section repeats, within one survey, what the two parts showed
+between them (2026-11-23, "Marmousi2: the held-out western part"): where the start predicts
+the slow waves within half a cycle, $v_s$ improves; where it doesn't, $v_s$ below 750 m moves
+away. One mute line for the whole section can't serve both. A faster line or the per-stage
+mute (this entry's first plan) would take from the west what they take from the east, so
+neither is worth 25 hours on gauss yet. The lever is a mute decided from the data by
+offset, and here also by source: the slow waves' phase against the start's synthetics,
+shot by shot and offset by offset (the literature note's "Keep or mute the slow waves").
+Nine shots along 16 km give it the regions to tell apart. Try it first on the two parts,
+then on the whole section. Until then this run is the whole section's baseline. Its
+settings came from the central part, not this section. The delay uses the truth, so it
+explains the result but can't choose a mute.
+
+**Reproduce** (on gauss, or a machine with 50 GiB): `vibe-rations run --shots
+examples/marmousi2/whole-true.toml` (about 40 min), then `vibe-rations invert
+examples/marmousi2/whole.toml` (25 hours on gauss), then `just in marmousi2-study
+whole_by_region`, which reads `out/marmousi2/whole` and any `out/marmousi2/whole-it<n>` kept
+beside it (copies of the model after each iteration, which the inversion overwrites).
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -3317,7 +3451,10 @@ minutes); `just physics surface_slope`; Lamb's finer grids with `surface_slope =
   part the ranking reverses (2026-11-23, "Marmousi2: the held-out western part"). Its start
   predicts the slow waves within half a cycle, so L2 alone recovers $v_s$ best and the mute
   makes $v_p$ worse near the seafloor. Whether to mute depends on cycle skipping, which
-  nothing yet tests from the data. Written but not run (`tests/marmousi2_study.rs`): muted
+  nothing yet tests from the data. The whole section shows both within one survey: with the
+  central part's mute, $v_s$ improves where the start is within half a cycle and drifts
+  away at 10.5–14.5 km, where it isn't (2026-11-23, "Marmousi2: the whole section, muted
+  L2"). Written but not run (`tests/marmousi2_study.rs`): muted
   L2 with the receivers' side
   (`muted_l2_with_receivers_side`), time shifts in a window around the early arrivals, then L2
   (`windowed_time_shifts_then_l2`), muted L2 for twenty iterations (`muted_l2_longer`), and

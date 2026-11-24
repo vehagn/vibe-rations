@@ -367,7 +367,11 @@ doesn't show.
   aren't cycle-skipped and hurt where they are. So a mute is a per-dataset decision, and
   nothing tests it from the data yet: don't make one a default.
   Judge a variant by the error ratio and the cosine with the true update by depth band, not by
-  the misfit, and on both parts. **Beware of tuning to one dataset:** the line, the stage
+  the misfit, and on both parts, within four nodes of the receivers' plane (`ACROSS`: over the
+  whole section's 5 km across, which one line of shots barely sees, every number is within 1%
+  of 1). The whole section (`whole.toml`, 25 hours and 48 GiB on gauss; `whole_by_region`)
+  shows both parts' behaviour in one survey: with one mute, $v_s$ improves where the start
+  is within half a cycle and drifts away at 10.5–14.5 km, where it isn't. **Beware of tuning to one dataset:** the line, the stage
   corners and the central ranking were chosen on the central 6 km against its own truth, and
   the held-out part overturned them. Work settings out from the observed data, the start and
   the source (`slow_waves_mute` derives the line from the start's slowest seafloor $v_s$:

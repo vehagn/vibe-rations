@@ -17,6 +17,8 @@
 //!   `west_misfit_by_mute`: the western 6 km (`Case::part`), held out from the choices made
 //!   on the central part, with the slow waves' mute worked out from its own start
 //!   (`slow_waves_mute`).
+//! - `whole_by_region`: the whole-section inversion's result (`examples/marmousi2/whole.toml`)
+//!   in 1 km windows along x, next to how far its start's seafloor vs is from the truth's.
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
 //!   `stages_with_receivers_side`, and `muted_l2`, `muted_stages`, `down_weighted_l2` and
 //!   `down_weighted_stages` with the seafloor's slow waves muted or down-weighted: inversions
@@ -85,7 +87,8 @@ impl Case {
     }
 
     /// The nodes an inversion of the start may change: outside the absorbing layers and not
-    /// above `fixed_above` (the same for vp and vs where the start is solid, as here).
+    /// above `fixed_above` (the same for vp and vs where the start is solid, as here), within
+    /// `ACROSS` nodes of the receivers' plane.
     fn free(&self, start: &Model) -> Vec<usize> {
         let g = start.grid;
         let [nx, ny, nz] = g.n;
@@ -101,12 +104,15 @@ impl Case {
             .as_ref()
             .and_then(|i| i.fixed_above)
             .unwrap_or(f64::NEG_INFINITY);
+        let line = g
+            .nearest_node(self.start.receivers.positions().unwrap()[0])
+            .unwrap()[1];
         let mut nodes = Vec::new();
         for k in top..nz - w {
             if (k as f64) * g.h[2] < fixed {
                 continue;
             }
-            for j in w..ny - w {
+            for j in (w..ny - w).filter(|j| j.abs_diff(line) <= ACROSS) {
                 for i in w..nx - w {
                     let n = g.interior_idx(i, j, k);
                     if start.vs[n] > 0.0 {
@@ -147,6 +153,12 @@ impl Case {
             .collect()
     }
 }
+
+/// How far from the receivers' plane, in nodes, the error ratios and cosines are measured.
+/// The parts are 41 nodes across with 16 in each side layer, which leaves these 9 nodes; the
+/// whole section (`whole_by_region`) is 201 across, and over all of it the 4 km away from the
+/// line, which the survey barely sees, would dilute every number.
+const ACROSS: usize = 4;
 
 /// A variant of the start's `[inversion]`: keys in place of its `iterations = 5`, and
 /// `[[inversion.stage]]` tables after the section, which ends the file.
@@ -1116,6 +1128,152 @@ fn seafloor_speeds() {
             1.0 / mean(&|i| slowness(&start, i)),
             mean(&delay),
         );
+    }
+}
+
+/// The whole-section inversion (`examples/marmousi2/whole.toml`, run with `invert`, its
+/// model in `out/marmousi2/whole`) region by region: whether its start predicts the slow
+/// waves within half a cycle varies along the section, as between the central and western
+/// parts (`seafloor_speeds`). In 1 km windows along x, on the receivers' plane: the
+/// seafloor's first solid node, vs there (truth and start), the harmonic means of vs over the
+/// 250 m below it and the delay over 1 km, as `seafloor_speeds` works them out; then, over
+/// every free node of the window (all y), the result's error ratio and cosine with the true
+/// update by depth band, and the window's share of the band's added squared error
+/// Σ (m - m_true)² - (m₀ - m_true)² (negative where the window gains). First the whole
+/// section by depth band, for each iteration kept in `out/marmousi2/whole-it<n>`. Uses the
+/// truth: a diagnosis, not a rule an inversion could follow.
+#[test]
+#[ignore = "a study: `just marmousi2-study whole_by_region` (a minute, after the whole inversion)"]
+fn whole_by_region() {
+    let base = PathBuf::from("examples/marmousi2");
+    let config = |name: &str| Config::from_toml(&std::fs::read_to_string(base.join(name)).unwrap());
+    let case = Case {
+        start: config("whole.toml").unwrap(),
+        truth: config("whole-true.toml").unwrap(),
+        base,
+        bands: vec![
+            [500.0, 750.0],
+            [750.0, 1000.0],
+            [1000.0, 1500.0],
+            [1500.0, 2500.0],
+            [2500.0, 3125.0],
+        ],
+    };
+    let (start, truth) = (case.model(&case.start), case.model(&case.truth));
+    let result = |dir: &str| -> Option<Model> {
+        let path = |p: &str| {
+            PathBuf::from("out/marmousi2")
+                .join(dir)
+                .join(format!("{p}.npy"))
+        };
+        if !path("vp").is_file() {
+            return None;
+        }
+        let mut m = start.clone();
+        m.vp = vibe_rations::npy::read(&path("vp")).unwrap().1;
+        m.vs = vibe_rations::npy::read(&path("vs")).unwrap().1;
+        assert_eq!(m.vp.len(), start.vp.len(), "{dir} isn't whole.toml's grid");
+        Some(m)
+    };
+    let mut last = None;
+    for dir in ["whole-it2", "whole-it3", "whole-it4", "whole-it5", "whole"] {
+        if let Some(m) = result(dir) {
+            print_bands(dir, &case, &m, &start, &truth);
+            last = Some(m);
+        }
+    }
+    let Some(m) = last else {
+        println!("no out/marmousi2/whole: run `invert examples/marmousi2/whole.toml` first");
+        return;
+    };
+
+    let g = start.grid;
+    let receiver = case.start.receivers.positions().unwrap()[0];
+    let [_, j, _] = g.nearest_node(receiver).unwrap();
+    let w = case.start.boundary.pml_width;
+    let vs = |m: &Model, i: usize, k: usize| m.vs[g.interior_idx(i, j, k)] as f64;
+    let seafloor = |i: usize| {
+        (0..g.n[2])
+            .find(|&k| truth.vs[g.interior_idx(i, j, k)] > 0.0)
+            .unwrap()
+    };
+    let slowness = |m: &Model, i: usize| {
+        let top = seafloor(i);
+        (top..top + 10).map(|k| 1.0 / vs(m, i, k)).sum::<f64>() / 10.0
+    };
+    let x = |i: usize| i as f64 * g.h[0];
+    let windows: Vec<[f64; 2]> = (0..16)
+        .map(|k| [500.0 + 1000.0 * k as f64, 1500.0 + 1000.0 * k as f64])
+        .collect();
+    let free = case.banded(&start);
+    let excess = |p: &[f32], p0: &[f32], t: &[f32], n: usize| {
+        let (m, m0, t) = (p[n] as f64, p0[n] as f64, t[n] as f64);
+        (m - t).powi(2) - (m0 - t).powi(2)
+    };
+    let band_excess: Vec<[f64; 2]> = free
+        .iter()
+        .map(|nodes| {
+            let sum = |p: &[f32], p0: &[f32], t: &[f32]| {
+                nodes.iter().map(|&n| excess(p, p0, t, n)).sum::<f64>()
+            };
+            [
+                sum(&m.vp, &start.vp, &truth.vp),
+                sum(&m.vs, &start.vs, &truth.vs),
+            ]
+        })
+        .collect();
+    println!(
+        "by 1 km window along x: seafloor; vs on it, true / start; harmonic means over the 250 m \
+         below, true / start; delay over 1 km, mean (largest); then by depth band (m) vp and vs: \
+         error ratio, cosine, share of the band's added squared error"
+    );
+    for [lo, hi] in windows {
+        let columns: Vec<usize> = (w..g.n[0] - w)
+            .filter(|&i| x(i) >= lo && x(i) < hi)
+            .collect();
+        let mean = |f: &dyn Fn(usize) -> f64| {
+            columns.iter().map(|&i| f(i)).sum::<f64>() / columns.len() as f64
+        };
+        let delay = |i: usize| 1000.0 * (slowness(&truth, i) - slowness(&start, i));
+        let largest = columns
+            .iter()
+            .map(|&i| delay(i))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let depth = mean(&|i| seafloor(i) as f64 * g.h[2]);
+        println!(
+            "{:5.1}–{:4.1} km: seafloor {depth:4.0} m; vs {:3.0} / {:3.0} m/s; 250 m {:3.0} / {:3.0} m/s; \
+             delay {:.2} s ({largest:.2})",
+            lo / 1000.0,
+            hi / 1000.0,
+            mean(&|i| vs(&truth, i, seafloor(i))),
+            mean(&|i| vs(&start, i, seafloor(i))),
+            1.0 / mean(&|i| slowness(&truth, i)),
+            1.0 / mean(&|i| slowness(&start, i)),
+            mean(&delay),
+        );
+        for ((band, nodes), [ep_total, es_total]) in
+            case.bands.iter().zip(&free).zip(&band_excess).take(3)
+        {
+            let inside: Vec<usize> = nodes
+                .iter()
+                .copied()
+                .filter(|&n| {
+                    let xi = x(n % g.n[0]);
+                    xi >= lo && xi < hi
+                })
+                .collect();
+            let (ep, cp) = compare(&m.vp, &start.vp, &truth.vp, &inside);
+            let (es, cs) = compare(&m.vs, &start.vs, &truth.vs, &inside);
+            let share = |p: &[f32], p0: &[f32], t: &[f32], total: f64| {
+                100.0 * inside.iter().map(|&n| excess(p, p0, t, n)).sum::<f64>() / total.abs()
+            };
+            println!(
+                "    {:>9}  vp {ep:6.3} {cp:+6.2} {:+7.1}%   vs {es:6.3} {cs:+6.2} {:+7.1}%",
+                format!("{:.0}–{:.0}", band[0], band[1]),
+                share(&m.vp, &start.vp, &truth.vp, *ep_total),
+                share(&m.vs, &start.vs, &truth.vs, *es_total),
+            );
+        }
     }
 }
 
