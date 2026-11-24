@@ -26,7 +26,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
-use crate::gradient::{Strategy, gradient_with};
+use crate::gradient::{Strategy, gradient_with, illuminate};
 use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
@@ -338,6 +338,20 @@ pub struct Shot {
     interval: f64,
 }
 
+impl Shot {
+    /// This shot's misfit as `measure` takes it.
+    fn measured(&self, measure: Measure) -> Result<Misfit> {
+        shot_misfit(
+            measure,
+            &self.config,
+            &self.observed,
+            &self.components,
+            self.samples,
+            self.interval,
+        )
+    }
+}
+
 /// The misfit, its gradient with respect to the unknowns, and the forward wavefields' energy
 /// at every interior node, all summed over the shots.
 pub struct Evaluation {
@@ -516,21 +530,12 @@ impl Inversion {
         }
         // Every stage's filter must suit the traces before the first one starts.
         for stage in &stages[1..] {
-            let shot = &shots[0];
-            shot_misfit(
-                Measure::of(stage, settings, source_frequency),
-                &shot.config,
-                &shot.observed,
-                &shot.components,
-                shot.samples,
-                shot.interval,
-            )?;
+            shots[0].measured(Measure::of(stage, settings, source_frequency))?;
         }
 
         // The nodes each parameter may change at.
         let g = start.grid;
         let [nx, ny, nz] = g.n;
-        let layers = first.solver.cpml.each_ref().map(|c| c.clone());
         let fixed_depth = settings.fixed_above.unwrap_or(f64::NEG_INFINITY);
         let mut free = Vec::new();
         for &p in &settings.parameters {
@@ -541,12 +546,10 @@ impl Inversion {
                 }
                 for j in 0..ny {
                     for i in 0..nx {
-                        let in_layers = [i, j, k]
-                            .iter()
-                            .zip(&layers)
-                            .any(|(&n, c)| c.slab(n).is_some());
                         let n = g.interior_idx(i, j, k);
-                        if !in_layers && !(p == Parameter::Vs && start.vs[n] == 0.0) {
+                        if !first.solver.in_layers([i, j, k])
+                            && !(p == Parameter::Vs && start.vs[n] == 0.0)
+                        {
                             nodes.push(n);
                         }
                     }
@@ -594,11 +597,7 @@ impl Inversion {
             } else {
                 hi
             };
-            let values = match p {
-                Parameter::Vp => &start.vp,
-                Parameter::Vs => &start.vs,
-                Parameter::Rho => &start.rho,
-            };
+            let values = start.values(*p);
             // A little slack: the default vp limit sits 0.1% below the stability limit.
             if let Some(&n) = nodes.iter().find(|&&n| {
                 let v = values[n] as f64;
@@ -663,13 +662,7 @@ impl Inversion {
             settings.water_level > 0.0,
             "the water level must be positive"
         );
-        inversion.illuminate_from_receivers(0)?;
-        let e = inversion.evaluate(&inversion.model)?;
-        inversion.memory_bytes = inversion.memory_bytes.max(e.memory_bytes);
-        inversion.misfit = e.misfit;
-        inversion.g = e.gradient;
-        inversion.preconditioner = inversion.preconditioner_for(&e.illumination);
-        inversion.stage_misfits.push(e.misfit);
+        inversion.start_stage()?;
         Ok(inversion)
     }
 
@@ -693,17 +686,17 @@ impl Inversion {
         );
         let measure = Measure::of(&self.stages[s], &self.settings, self.source_frequency);
         for shot in &mut self.shots {
-            shot.misfit = shot_misfit(
-                measure.clone(),
-                &shot.config,
-                &shot.observed,
-                &shot.components,
-                shot.samples,
-                shot.interval,
-            )?;
+            shot.misfit = shot.measured(measure.clone())?;
         }
         self.stage = s;
         self.lbfgs.clear();
+        self.start_stage()
+    }
+
+    /// The misfit, gradient and preconditioner the stage under way starts from, at the model
+    /// as it stands.
+    fn start_stage(&mut self) -> Result<()> {
+        let s = self.stage;
         self.illuminate_from_receivers(s as u64)?;
         let e = self.evaluate(&self.model)?;
         self.memory_bytes = self.memory_bytes.max(e.memory_bytes);
@@ -750,11 +743,7 @@ impl Inversion {
         let mut m = self.model.clone();
         let mut offset = 0;
         for (p, nodes) in &self.free {
-            let (now, start) = match p {
-                Parameter::Vp => (&mut m.vp, &self.start.vp),
-                Parameter::Vs => (&mut m.vs, &self.start.vs),
-                Parameter::Rho => (&mut m.rho, &self.start.rho),
-            };
+            let (now, start) = (m.values_mut(*p), self.start.values(*p));
             for (i, &n) in nodes.iter().enumerate() {
                 now[n] = (start[n] as f64 * (1.0 + x[offset + i])) as f32;
             }
@@ -781,11 +770,7 @@ impl Inversion {
         for f in order {
             let (p, nodes) = &self.free[f];
             let [lo, hi] = self.bounds[f];
-            let start = match p {
-                Parameter::Vp => &self.start.vp,
-                Parameter::Vs => &self.start.vs,
-                Parameter::Rho => &self.start.rho,
-            };
+            let start = self.start.values(*p);
             for (i, &n) in nodes.iter().enumerate() {
                 let m0 = start[n] as f64;
                 let mut v = (m0 * (1.0 + x[offsets[f] + i])).clamp(lo, hi);
@@ -855,14 +840,10 @@ impl Inversion {
                 s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
             }
         }
-        let [vp, vs, rho] = sum;
         let mut g = Vec::with_capacity(self.x.len());
         for (p, nodes) in &self.free {
-            let (grad, start) = match p {
-                Parameter::Vp => (&vp, &self.start.vp),
-                Parameter::Vs => (&vs, &self.start.vs),
-                Parameter::Rho => (&rho, &self.start.rho),
-            };
+            // The sums are of vp, vs and ρ, in the order of `Parameter::ALL`.
+            let (grad, start) = (&sum[*p as usize], self.start.values(*p));
             g.extend(nodes.iter().map(|&n| grad[n] * start[n] as f64));
         }
         Ok(Evaluation {
@@ -894,13 +875,12 @@ impl Inversion {
             .sum();
         let misfits: usize = self.shots.iter().map(|s| s.misfit.memory_bytes()).sum();
         let receiver_side = 8 * self.receiver_side.as_ref().map_or(0, Vec::len);
-        let model = |m: &Model| 4 * (m.vp.len() + m.vs.len() + m.rho.len());
         let free: usize = self.free.iter().map(|(_, nodes)| nodes.len()).sum();
         4 * observed
             + misfits
             + receiver_side
-            + model(&self.model)
-            + model(&self.start)
+            + self.model.memory_bytes()
+            + self.start.memory_bytes()
             + std::mem::size_of::<usize>() * free
             + 8 * (self.x.len() + self.g.len() + self.preconditioner.as_ref().map_or(0, Vec::len))
             + self.lbfgs.memory_bytes()
@@ -1031,7 +1011,11 @@ impl Inversion {
                 };
                 sim.solver
                     .step_with(|f, t| send(&forces, f, t), |f, t| send(&stresses, f, t));
-                add_energy(&sim.solver, &mut energy);
+                illuminate(
+                    &sim.solver.grid,
+                    &mut energy,
+                    sim.solver.fields.velocities(),
+                );
             }
         }
         energy.iter_mut().for_each(|e| *e /= runs.max(1) as f64);
@@ -1061,7 +1045,7 @@ impl Inversion {
         };
         let model = self.model_at(&step.x);
         // Besides the inversion: the step and the model it leads to.
-        let extra = 8 * step.x.len() + 4 * (model.vp.len() + model.vs.len() + model.rho.len());
+        let extra = 8 * step.x.len() + model.memory_bytes();
         let Evaluation {
             misfit,
             gradient: g_new,
@@ -1103,6 +1087,42 @@ impl Inversion {
         self.history.push(it.clone());
         Ok(Some(it))
     }
+
+    /// What `invert` writes after each iteration, into `out`: the model as it stands
+    /// ([`Model::write`]) and `inversion.json`, with the settings, every stage begun and the
+    /// misfit it started from, every iteration, the most memory held so far, and why the
+    /// inversion stopped early (`stopped`), if it did.
+    pub fn write_outputs(&self, out: &Path, stopped: Option<&str>) -> Result<()> {
+        std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+        self.model.write(out)?;
+        let stages: Vec<serde_json::Value> = self
+            .stages
+            .iter()
+            .zip(&self.stage_misfits)
+            .map(|(stage, misfit)| {
+                serde_json::json!({
+                    "max_frequency": stage.max_frequency,
+                    "misfit": stage.misfit,
+                    "iterations": stage.iterations,
+                    "starting_misfit": misfit,
+                })
+            })
+            .collect();
+        let summary = serde_json::json!({
+            "settings": self.settings,
+            "unknowns": self.unknowns(),
+            "starting_misfit": self.stage_misfits[0],
+            "stages": stages,
+            "iterations": self.history,
+            "memory_bytes": self.memory_bytes,
+            "stopped": stopped,
+        });
+        std::fs::write(
+            out.join("inversion.json"),
+            serde_json::to_string_pretty(&summary)? + "\n",
+        )?;
+        Ok(())
+    }
 }
 
 /// The misfit `measure` sets up for one shot, run as `config` says, with the receivers'
@@ -1121,26 +1141,6 @@ fn shot_misfit(
         crate::misfit::offsets(config)?
     };
     Misfit::new(measure, observed, components, samples, interval, &offsets)
-}
-
-/// Adds |v|² at every interior node, each component taken where it is stored.
-fn add_energy(solver: &crate::solver::Solver, energy: &mut [f64]) {
-    use rayon::prelude::*;
-    let g = solver.grid;
-    let [nx, ny, _] = g.n;
-    let v = [&solver.fields.vx, &solver.fields.vy, &solver.fields.vz];
-    energy
-        .par_chunks_mut(nx * ny)
-        .enumerate()
-        .for_each(|(k, plane)| {
-            for j in 0..ny {
-                let row = g.idx(0, j, k);
-                for i in 0..nx {
-                    let p = row + i;
-                    plane[j * nx + i] += v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>();
-                }
-            }
-        });
 }
 
 /// The next number of a SplitMix64 sequence (Steele, Lea & Flood 2014): reproducible signs

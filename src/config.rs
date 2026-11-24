@@ -252,6 +252,15 @@ pub struct ModelConfig {
     pub interfaces: Interfaces,
 }
 
+impl ModelConfig {
+    /// The files it names, vp, vs and rho, if it is read from files.
+    pub fn file_paths(&self) -> impl Iterator<Item = &Path> {
+        self.files
+            .iter()
+            .flat_map(|f| [f.vp.as_path(), f.vs.as_path(), f.rho.as_path()])
+    }
+}
+
 /// How the interfaces between `[[model.layer]]`s are put onto the nodes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -478,6 +487,37 @@ pub enum PlaneKind {
     Volume,
 }
 
+impl PlaneKind {
+    /// The plane (not the volume) called `name`: xy, xz or yz.
+    pub fn plane(name: &str) -> Result<Self> {
+        Ok(match name {
+            "xy" => PlaneKind::Xy,
+            "xz" => PlaneKind::Xz,
+            "yz" => PlaneKind::Yz,
+            _ => bail!("unknown plane {name}; use xy, xz or yz"),
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PlaneKind::Xy => "xy",
+            PlaneKind::Xz => "xz",
+            PlaneKind::Yz => "yz",
+            PlaneKind::Volume => "volume",
+        }
+    }
+
+    /// The axis normal to the plane (0 for x), or None for a volume.
+    pub fn normal(self) -> Option<usize> {
+        match self {
+            PlaneKind::Xy => Some(2),
+            PlaneKind::Xz => Some(1),
+            PlaneKind::Yz => Some(0),
+            PlaneKind::Volume => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
@@ -499,6 +539,17 @@ pub enum Parameter {
 }
 
 impl Parameter {
+    /// Every parameter, in the order of their indices (`p as usize`).
+    pub const ALL: [Parameter; 3] = [Parameter::Vp, Parameter::Vs, Parameter::Rho];
+
+    /// The parameter called `name` (vp, vs or rho), as configurations name it.
+    pub fn from_name(name: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|p| p.name() == name)
+            .with_context(|| format!("unknown parameter {name}; use vp, vs or rho"))
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Parameter::Vp => "vp",

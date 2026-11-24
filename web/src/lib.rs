@@ -300,7 +300,7 @@ pub fn model_files(config: &str) -> Vec<String> {
         return vec![];
     };
     let mut names = Vec::new();
-    for f in cfg.model.files.iter().flat_map(|f| [&f.vp, &f.vs, &f.rho]) {
+    for f in cfg.model.file_paths() {
         let name = f.to_string_lossy().into_owned();
         if !names.contains(&name) {
             names.push(name);

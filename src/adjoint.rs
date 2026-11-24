@@ -107,22 +107,7 @@ impl Adjoint {
         // Stresses recorded after the last forward step have nothing after them to pass
         // through: they are where the adjoint run starts.
         if let Some(last) = adjoint.steps.checked_sub(1) {
-            let Self {
-                solver,
-                record_every,
-                samples,
-                components,
-                ops,
-                residuals,
-                ..
-            } = &mut adjoint;
-            let at = Samples {
-                record_every: *record_every,
-                samples: *samples,
-                components,
-                ops,
-                residuals,
-            };
+            let (solver, at) = adjoint.parts();
             at.inject(&mut solver.fields, last, true);
             if solver.free_surface {
                 solver.mirror_stress();
@@ -148,6 +133,19 @@ impl Adjoint {
     pub fn step(&mut self) {
         assert!(self.remaining() > 0, "the adjoint run is over");
         let n = self.steps - 1 - self.solver.step;
+        let (solver, at) = self.parts();
+        solver.step_with(
+            |f, _| at.inject(f, n, false),
+            |f, _| {
+                if let Some(earlier) = n.checked_sub(1) {
+                    at.inject(f, earlier, true);
+                }
+            },
+        );
+    }
+
+    /// The solver, and the residuals borrowed apart from it.
+    fn parts(&mut self) -> (&mut Solver, Samples<'_>) {
         let Self {
             solver,
             record_every,
@@ -164,14 +162,7 @@ impl Adjoint {
             ops,
             residuals,
         };
-        solver.step_with(
-            |f, _| at.inject(f, n, false),
-            |f, _| {
-                if let Some(earlier) = n.checked_sub(1) {
-                    at.inject(f, earlier, true);
-                }
-            },
-        );
+        (solver, at)
     }
 
     /// Takes every remaining step, calling `after` with the forward step the wavefield then

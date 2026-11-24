@@ -55,6 +55,13 @@ impl Grid {
         self.n.iter().product()
     }
 
+    /// The shape of an interior-only array with its slowest axis first, (nz, ny, nx), as
+    /// `.npy` files hold it.
+    pub fn shape(&self) -> [usize; 3] {
+        let [nx, ny, nz] = self.n;
+        [nz, ny, nx]
+    }
+
     /// Index of interior node (i, j, k) in a padded array, x fastest.
     #[inline]
     pub fn idx(&self, i: usize, j: usize, k: usize) -> usize {

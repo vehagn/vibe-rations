@@ -143,12 +143,8 @@ pub fn rebuild_drift_where(
                 .flat_map(move |j| x.clone().map(move |i| g.idx(i, j, k)))
         })
         .collect();
-    let arrays = |f: &Fields| -> [Vec<f32>; 9] {
-        [
-            &f.vx, &f.vy, &f.vz, &f.sxx, &f.syy, &f.szz, &f.sxy, &f.sxz, &f.syz,
-        ]
-        .map(|a| nodes.iter().map(|&p| a[p]).collect())
-    };
+    let arrays =
+        |f: &Fields| -> [Vec<f32>; 9] { f.arrays().map(|a| nodes.iter().map(|&p| a[p]).collect()) };
     let mut records = vec![0.0f32; steps * len];
     let mut saved: Vec<(usize, Fields)> = Vec::new();
     let mut scale = [0.0f32; 9];

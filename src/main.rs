@@ -307,9 +307,8 @@ fn run() -> Result<()> {
             if shots {
                 // Each shot sets up its own; this one would only hold memory.
                 drop(sim);
-                let base = config.parent().unwrap_or(Path::new("."));
                 for s in 0..cfg.sources.len() {
-                    let mut shot = Simulation::new(&cfg.shot(s)?, base)?;
+                    let mut shot = Simulation::new(&cfg.shot(s)?, base(&config))?;
                     let dir = out.join(shot_dir(s));
                     if !quiet {
                         eprintln!("shot {} of {}", s + 1, cfg.sources.len());
@@ -363,7 +362,7 @@ fn run() -> Result<()> {
                         println!(
                             "{:<40} {:<11} {:>5} {:>7}  {}{}",
                             s.id,
-                            format!("{:?}", s.phase).to_lowercase(),
+                            s.phase.name(),
                             done,
                             left,
                             match (&s.error, s.kind) {
@@ -421,31 +420,28 @@ fn run() -> Result<()> {
             };
             let m = plan(&cfg, &config, kind)?;
             println!("{}", m.table());
-            if let Some(inversion) = cfg.inversion.as_mut().filter(|_| invert) {
-                // The other way to get the forward fields back, for comparison.
-                inversion.reconstruct = !inversion.reconstruct;
-                let flag = if inversion.reconstruct {
-                    "with reconstruct = true"
-                } else {
-                    "with reconstruct = false"
-                };
-                let o = plan(&cfg, &config, Kind::Invert)?;
-                println!("  {:>10}  at most {flag}", memory::human(o.peak));
-            }
-            if gradient {
-                // The other way to get the forward field back, for comparison.
-                let (other, flag) = if strategy.reconstruct {
-                    (
-                        Strategy::Checkpoints { every: None },
-                        "without --reconstruct",
-                    )
-                } else {
-                    (
-                        Strategy::Reconstruct { segment: None },
-                        "with --reconstruct",
-                    )
-                };
-                let o = plan(&cfg, &config, Kind::Gradient(other))?;
+            // The other way to get the forward fields back, for comparison.
+            let other = match kind {
+                Kind::Run => None,
+                Kind::Gradient(Strategy::Checkpoints { .. }) => Some((
+                    Kind::Gradient(Strategy::Reconstruct { segment: None }),
+                    "with --reconstruct".to_string(),
+                )),
+                Kind::Gradient(Strategy::Reconstruct { .. }) => Some((
+                    Kind::Gradient(Strategy::Checkpoints { every: None }),
+                    "without --reconstruct".to_string(),
+                )),
+                Kind::Invert => {
+                    let inversion = cfg.inversion.as_mut().expect("checked above");
+                    inversion.reconstruct = !inversion.reconstruct;
+                    Some((
+                        Kind::Invert,
+                        format!("with reconstruct = {}", inversion.reconstruct),
+                    ))
+                }
+            };
+            if let Some((kind, flag)) = other {
+                let o = plan(&cfg, &config, kind)?;
                 println!("  {:>10}  at most {flag}", memory::human(o.peak));
             }
             if let Some(free) = memory::available() {
@@ -517,10 +513,6 @@ fn run() -> Result<()> {
         }
         Command::Invert { config, out } => {
             let (cfg, sim, planned) = load(&config, Kind::Invert)?;
-            let settings = cfg
-                .inversion
-                .clone()
-                .context("the configuration has no [inversion] section")?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
             eprintln!(
@@ -528,31 +520,26 @@ fn run() -> Result<()> {
                  `vibe-rations memory --invert` itemises it",
                 memory::human(planned.peak)
             );
-            let next_to_layers = sim.receivers_next_to_layers();
-            if next_to_layers > 0 {
-                eprintln!(
-                    "warning: {next_to_layers} receiver(s) next to the absorbing layers read \
-                     velocities inside them, which makes the gradient approximate"
-                );
-            }
+            warn_next_to_layers(&sim);
             drop(sim);
-            let base = config.parent().unwrap_or(Path::new("."));
             eprintln!(
                 "the starting misfit and gradient, {} shot(s)",
                 cfg.sources.len()
             );
-            let mut inversion = Inversion::from_config(&cfg, base)?;
-            let first = inversion.misfit();
-            eprintln!("{} unknowns; misfit {first:.6e}", inversion.unknowns());
-            std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
-            save(&out, &inversion, &settings, first)?;
+            let mut inversion = Inversion::from_config(&cfg, base(&config))?;
+            eprintln!(
+                "{} unknowns; misfit {:.6e}",
+                inversion.unknowns(),
+                inversion.misfit()
+            );
+            inversion.write_outputs(&out, None)?;
             let stages = inversion.stages().to_vec();
             for (s, stage) in stages.iter().enumerate() {
                 if s > 0 {
                     inversion.begin_stage(s)?;
                     // So that inversion.json lists every stage begun, even one that takes no
                     // step.
-                    save(&out, &inversion, &settings, first)?;
+                    inversion.write_outputs(&out, None)?;
                 }
                 let start = inversion.misfit();
                 if stages.len() > 1 {
@@ -582,7 +569,7 @@ fn run() -> Result<()> {
                         100.0 * it.largest_change,
                         if it.restarted { ", restarted" } else { "" }
                     );
-                    save(&out, &inversion, &settings, first)?;
+                    inversion.write_outputs(&out, None)?;
                 }
             }
             eprintln!("wrote {}", out.display());
@@ -607,14 +594,7 @@ fn run() -> Result<()> {
                  `vibe-rations memory --gradient{flag}` itemises it",
                 memory::human(planned.peak)
             );
-            let next_to_layers = sim.receivers_next_to_layers();
-            if next_to_layers > 0 {
-                eprintln!(
-                    "warning: {next_to_layers} receiver(s) next to the absorbing layers read \
-                     velocities inside them, which makes the gradient approximate; move them a \
-                     node further in"
-                );
-            }
+            let next_to_layers = warn_next_to_layers(&sim);
             let r = &sim.receivers;
             let want = [r.points.len(), r.samples];
             let data = r
@@ -646,8 +626,7 @@ fn run() -> Result<()> {
                 strategy,
             )?;
             sim.write_outputs(&out)?;
-            let g = sim.solver.grid;
-            let shape = [g.n[2], g.n[1], g.n[0]];
+            let shape = sim.solver.grid.shape();
             let [vp, vs, rho] = run.gradient.velocities(&sim.solver.model);
             for (name, values) in [("vp", vp), ("vs", vs), ("rho", rho)] {
                 let single: Vec<f32> = values.iter().map(|&v| v as f32).collect();
@@ -689,7 +668,7 @@ fn finish(r: &remote::Remote, id: &str, out: &Path, quiet: bool) -> Result<()> {
     ensure!(
         s.phase == server::Phase::Done,
         "the run {}: {}",
-        format!("{:?}", s.phase).to_lowercase(),
+        s.phase.name(),
         s.error.unwrap_or_default()
     );
     let n = r.download(id, out)?;
@@ -701,7 +680,6 @@ fn base(path: &Path) -> &Path {
     path.parent().unwrap_or(Path::new("."))
 }
 
-/// Sets a run up, after making sure it fits in the memory available, if that can be known.
 /// What a configuration is loaded for, which decides the memory it needs.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -740,46 +718,22 @@ fn load(path: &Path, kind: Kind) -> Result<(Config, Simulation, memory::Memory)>
     Ok((cfg, sim, m))
 }
 
-/// Writes the model as it stands and the history so far.
-fn save(
-    out: &Path,
-    inversion: &Inversion,
-    settings: &vibe_rations::config::InversionConfig,
-    first: f64,
-) -> Result<()> {
-    let m = &inversion.model;
-    let shape = [m.grid.n[2], m.grid.n[1], m.grid.n[0]];
-    for (name, values) in [("vp", &m.vp), ("vs", &m.vs), ("rho", &m.rho)] {
-        npy::write(&out.join(format!("{name}.npy")), &shape, values)?;
-    }
-    let summary = serde_json::json!({
-        "settings": settings,
-        "unknowns": inversion.unknowns(),
-        "starting_misfit": first,
-        "stages": inversion
-            .stages()
-            .iter()
-            .zip(&inversion.stage_misfits)
-            .map(|(stage, misfit)| serde_json::json!({
-                "max_frequency": stage.max_frequency,
-                "misfit": stage.misfit,
-                "iterations": stage.iterations,
-                "starting_misfit": misfit,
-            }))
-            .collect::<Vec<_>>(),
-        "iterations": inversion.history,
-        "memory_bytes": inversion.memory_bytes,
-    });
-    std::fs::write(
-        out.join("inversion.json"),
-        serde_json::to_string_pretty(&summary)? + "\n",
-    )?;
-    Ok(())
-}
-
 fn report(sim: &Simulation) {
     eprintln!("{}", sim.info.summary());
     for w in &sim.info.warnings {
         eprintln!("warning: {w}");
     }
+}
+
+/// Warns about receivers whose adjoint sources would reach into the absorbing layers, and
+/// returns how many there are.
+fn warn_next_to_layers(sim: &Simulation) -> usize {
+    let n = sim.receivers_next_to_layers();
+    if n > 0 {
+        eprintln!(
+            "warning: {n} receiver(s) next to the absorbing layers read velocities inside them, \
+             which makes the gradient approximate; move them a node further in"
+        );
+    }
+    n
 }

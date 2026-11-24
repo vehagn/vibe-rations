@@ -1,8 +1,9 @@
 //! Receivers: traces of the wavefield at points (nodes, or anywhere between them).
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::solver::{PointOp, Solver};
+use crate::solver::{Field, PointOp, Solver};
 
 /// A quantity to record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -17,6 +18,28 @@ pub enum Component {
 }
 
 impl Component {
+    /// Every component.
+    pub const ALL: [Component; 4] = [Component::Vx, Component::Vy, Component::Vz, Component::P];
+
+    /// The component called `name` (vx, vy, vz or p), as configurations name it.
+    pub fn from_name(name: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.name() == name)
+            .with_context(|| format!("unknown field {name}; use vx, vy, vz or p"))
+    }
+
+    /// The wavefield arrays it is read from: its velocity, or for pressure the three normal
+    /// stresses.
+    pub fn fields(self) -> &'static [Field] {
+        match self {
+            Component::Vx => &[Field::Vx],
+            Component::Vy => &[Field::Vy],
+            Component::Vz => &[Field::Vz],
+            Component::P => &[Field::Sxx, Field::Syy, Field::Szz],
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Component::Vx => "vx",
@@ -95,27 +118,11 @@ impl Receivers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpml::PmlSettings;
     use crate::grid::Grid;
-    use crate::model::Model;
+    use crate::solver::testing;
 
     fn solver() -> Solver {
-        let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let pml = PmlSettings {
-            power: 2.0,
-            reflection: None,
-            kappa_max: 1.0,
-            alpha_max: 30.0,
-            vp_max: 3000.0,
-            sponge: 0.0,
-        };
-        Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            false,
-            &pml,
-        )
+        testing::solver(Grid::new([10, 10, 10], [10.0; 3]), 3, false)
     }
 
     fn close(a: &[f32], b: &[f32]) -> bool {
@@ -146,9 +153,11 @@ mod tests {
 
     #[test]
     fn names_match_the_configuration() {
-        for c in [Component::Vx, Component::Vy, Component::Vz, Component::P] {
+        for c in Component::ALL {
             let parsed: Component = serde_json::from_str(&format!("\"{}\"", c.name())).unwrap();
             assert_eq!(parsed, c);
+            assert_eq!(Component::from_name(c.name()).unwrap(), c);
         }
+        assert!(Component::from_name("vq").is_err());
     }
 }

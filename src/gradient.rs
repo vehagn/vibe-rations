@@ -337,19 +337,13 @@ pub fn gradient_with(
                 }
             }
             for n in (start..end).rev() {
-                let f = &sim.solver.fields;
-                for (a, v) in after.iter_mut().zip([&f.vx, &f.vy, &f.vz]) {
+                for (a, v) in after.iter_mut().zip(sim.solver.fields.velocities()) {
                     a.copy_from_slice(v);
                 }
                 let r = (n - start) * blen;
                 sim.step_back(band, &records[r..r + blen]);
-                let f = &sim.solver.fields;
-                c.step(
-                    &sim.solver,
-                    n,
-                    [&f.vx, &f.vy, &f.vz],
-                    [&after[0], &after[1], &after[2]],
-                );
+                let before = sim.solver.fields.velocities();
+                c.step(&sim.solver, n, before, after.each_ref().map(Vec::as_slice));
             }
             c.check()?;
         }
@@ -370,13 +364,9 @@ pub fn gradient_with(
             peak_bytes = peak_bytes.max(held);
 
             for n in (start..end).rev() {
-                let (before, after) = (&segment[n - start], &segment[n - start + 1]);
-                c.step(
-                    &sim.solver,
-                    n,
-                    [&before[0], &before[1], &before[2]],
-                    [&after[0], &after[1], &after[2]],
-                );
+                let [before, after] =
+                    [n - start, n - start + 1].map(|i| segment[i].each_ref().map(Vec::as_slice));
+                c.step(&sim.solver, n, before, after);
             }
             c.check()?;
         }
@@ -453,10 +443,8 @@ impl Correlator {
         correlate_density(&self.adjoint.solver, &mut self.sums, before, after);
         illuminate(&g, &mut self.illumination, after);
         // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
-        let f = &self.adjoint.solver.fields;
-        self.adjoint
-            .solver
-            .strain_rate([&f.vx, &f.vy, &f.vz], &mut self.strain);
+        let adjoint = &self.adjoint.solver;
+        adjoint.strain_rate(adjoint.fields.velocities(), &mut self.strain);
         self.adjoint_strain
             .par_iter_mut()
             .zip(&self.strain)
@@ -478,12 +466,9 @@ impl Correlator {
     }
 }
 
+/// A copy of the velocities `s` holds.
 fn velocities(s: &Solver) -> [Vec<f32>; 3] {
-    [
-        s.fields.vx.clone(),
-        s.fields.vy.clone(),
-        s.fields.vz.clone(),
-    ]
+    s.fields.velocities().map(<[f32]>::to_vec)
 }
 
 /// The pressure residuals, as they enter the adjoint strain.
@@ -625,8 +610,7 @@ fn correlate_density(adjoint: &Solver, sums: &mut Sums, before: [&[f32]; 3], aft
     let [nx, ny, nz] = g.n;
     let len = g.plane_len();
     let halo = g.halo;
-    let f = &adjoint.fields;
-    let back = [&f.vx, &f.vy, &f.vz];
+    let back = adjoint.fields.velocities();
     sums[halo * len..(halo + nz) * len]
         .par_chunks_mut(len)
         .enumerate()
@@ -645,8 +629,8 @@ fn correlate_density(adjoint: &Solver, sums: &mut Sums, before: [&[f32]; 3], aft
         });
 }
 
-/// Adds |v|² at every interior node, each component taken where it is stored.
-fn illuminate(g: &Grid, illumination: &mut [f64], v: [&[f32]; 3]) {
+/// Adds |v|² at every interior node of `g`, each component of `v` taken where it is stored.
+pub(crate) fn illuminate(g: &Grid, illumination: &mut [f64], v: [&[f32]; 3]) {
     let [nx, ny, _] = g.n;
     illumination
         .par_chunks_mut(nx * ny)

@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::config::{Interfaces, LayerConfig, ModelConfig};
+use crate::config::{Interfaces, LayerConfig, ModelConfig, ModelFiles, Parameter};
 use crate::grid::Grid;
 use crate::npy;
 
@@ -195,8 +195,8 @@ impl Files<'_> {
 /// Whether an array of `shape` is a section, (nz, nx), the same at every y, rather than the
 /// whole grid, (nz, ny, nx); an error if it is neither.
 fn is_section(shape: &[usize], grid: Grid, name: &Path) -> Result<bool> {
-    let [nx, ny, nz] = grid.n;
-    if shape == [nz, ny, nx] {
+    let [nx, _, nz] = grid.n;
+    if shape == grid.shape() {
         Ok(false)
     } else if shape == [nz, nx] {
         Ok(true)
@@ -205,9 +205,19 @@ fn is_section(shape: &[usize], grid: Grid, name: &Path) -> Result<bool> {
             "{} has shape {shape:?}; the grid needs (nz, ny, nx) = {:?}, or (nz, nx) = {:?} \
              for a section the same at every y",
             name.display(),
-            [nz, ny, nx],
+            grid.shape(),
             [nz, nx]
         )
+    }
+}
+
+/// The files a configured model is read from, or None if it is layered: it takes one or the
+/// other.
+fn model_files(cfg: &ModelConfig) -> Result<Option<&ModelFiles>> {
+    match (&cfg.files, cfg.layers.is_empty()) {
+        (Some(_), false) => bail!("the model takes either layers or files, not both"),
+        (None, true) => bail!("the model needs [[model.layer]]s or [model.files]"),
+        (files, _) => Ok(files.as_ref()),
     }
 }
 
@@ -243,11 +253,9 @@ impl Model {
     /// Builds the model a configuration describes, its files from `files`. A file is either
     /// the whole grid, (nz, ny, nx), or a section, (nz, nx), repeated along y: a 2.5D model.
     pub fn from_files(grid: Grid, cfg: &ModelConfig, files: Files) -> Result<Self> {
-        let mut model = match (&cfg.files, cfg.layers.is_empty()) {
-            (Some(_), false) => bail!("the model takes either layers or files, not both"),
-            (None, true) => bail!("the model needs [[model.layer]]s or [model.files]"),
-            (None, false) => Self::layered(grid, cfg)?,
-            (Some(names), true) => {
+        let mut model = match model_files(cfg)? {
+            None => Self::layered(grid, cfg)?,
+            Some(names) => {
                 let load = |p: &Path| -> Result<Vec<f32>> {
                     let (shape, data) = files.read(p)?;
                     if !is_section(&shape, grid, p)? {
@@ -295,17 +303,15 @@ impl Model {
             fast = fast.max(vp);
             slowest = slowest.min(slow(vp, vs));
         };
-        match (&cfg.files, cfg.layers.is_empty()) {
-            (Some(_), false) => bail!("the model takes either layers or files, not both"),
-            (None, true) => bail!("the model needs [[model.layer]]s or [model.files]"),
-            (None, false) => {
+        match model_files(cfg)? {
+            None => {
                 for [vp, vs, _] in layer_profile(grid, cfg)? {
                     // As the model stores them.
                     take(vp as f32 as f64, vs as f32 as f64);
                 }
             }
             // A section's values are the grid's, so its extremes are too.
-            (Some(names), true) => match files {
+            Some(names) => match files {
                 Files::Dir(base) => {
                     let open = |p: &Path| -> Result<npy::Stream> {
                         let path = base.join(p);
@@ -422,6 +428,42 @@ impl Model {
                     "unphysical model at node ({i}, {j}, {k}): vp {vp}, vs {vs}, rho {rho}"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// The values of `p` at every node.
+    pub fn values(&self, p: Parameter) -> &[f32] {
+        match p {
+            Parameter::Vp => &self.vp,
+            Parameter::Vs => &self.vs,
+            Parameter::Rho => &self.rho,
+        }
+    }
+
+    /// The values of `p` at every node, to change.
+    pub fn values_mut(&mut self, p: Parameter) -> &mut [f32] {
+        match p {
+            Parameter::Vp => &mut self.vp,
+            Parameter::Vs => &mut self.vs,
+            Parameter::Rho => &mut self.rho,
+        }
+    }
+
+    /// Bytes its arrays hold.
+    pub fn memory_bytes(&self) -> usize {
+        4 * (self.vp.len() + self.vs.len() + self.rho.len())
+    }
+
+    /// Writes `vp.npy`, `vs.npy` and `rho.npy` into `dir`, shaped (nz, ny, nx), ready for
+    /// `[model.files]`.
+    pub fn write(&self, dir: &Path) -> Result<()> {
+        for p in Parameter::ALL {
+            npy::write(
+                &dir.join(format!("{}.npy", p.name())),
+                &self.grid.shape(),
+                self.values(p),
+            )?;
         }
         Ok(())
     }

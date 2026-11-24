@@ -16,13 +16,12 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::config::{Config, InversionConfig, PlaneKind};
-use crate::fd::Stencil;
 use crate::gradient::{Strategy, checkpoint_interval, reconstruction_segment};
 use crate::grid::Grid;
 use crate::misfit::{Measure, Misfit};
 use crate::model::{Files, Model};
 use crate::receiver::Component;
-use crate::simulation::timing;
+use crate::simulation::{Simulation, Timing, timing};
 use crate::solver::{Band, BandSize};
 
 /// One part of a run's memory.
@@ -188,30 +187,24 @@ impl Plan {
                 8 * n * (3 + u64::from(inversion.precondition)),
             ),
             part(
+                "the misfits' own arrays: muted or filtered traces, weights, offsets, phase \
+                 kernels",
+                shots as u64 * inversion.misfit_bytes,
+            ),
+            part(
+                "the receivers' side of the illumination",
+                if inversion.receiver_side {
+                    8 * interior
+                } else {
+                    0
+                },
+            ),
+            // Last, as a test expects.
+            part(
                 "the free nodes' indices",
                 std::mem::size_of::<usize>() as u64 * n,
             ),
         ]);
-        if inversion.misfit_bytes > 0 {
-            // Before the free nodes' indices, which a test expects last.
-            let at = parts.len() - 1;
-            parts.insert(
-                at,
-                part(
-                    "the misfits' own arrays: muted or filtered traces, weights, offsets, phase \
-                     kernels",
-                    shots as u64 * inversion.misfit_bytes,
-                ),
-            );
-        }
-        if inversion.receiver_side {
-            // Before the free nodes' indices, which a test expects last.
-            let at = parts.len() - 1;
-            parts.insert(
-                at,
-                part("the receivers' side of the illumination", 8 * interior),
-            );
-        }
         Memory::of(parts)
     }
 
@@ -433,10 +426,7 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
         .inversion
         .as_ref()
         .context("the configuration has no [inversion] section")?;
-    let taylor = Stencil::taylor(cfg.scheme.order)?;
-    let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
-    let [vp_max, slowest] = Model::extremes(grid, &cfg.model, base)?;
-    let timing = timing(cfg, &grid, vp_max, slowest)?;
+    let (grid, timing) = timed(cfg, Files::Dir(base))?;
     let steps = timing.steps;
     // The traces' sampling and the sources' frequency, as `Inversion::new` sets them.
     let interval = cfg.output.record_every.max(1) as f64 * timing.dt;
@@ -493,16 +483,15 @@ pub fn estimate_synthetic_inversion(cfg: &Config, base: &Path) -> Result<Memory>
 }
 
 fn plan(cfg: &Config, files: Files) -> Result<Plan> {
-    let (grid, steps) = timed(cfg, files)?;
-    Plan::new(cfg, grid, steps)
+    let (grid, timing) = timed(cfg, files)?;
+    Plan::new(cfg, grid, timing.steps)
 }
 
-/// The grid with its halo, and the steps of the run.
-fn timed(cfg: &Config, files: Files) -> Result<(Grid, usize)> {
-    let taylor = Stencil::taylor(cfg.scheme.order)?;
-    let grid = cfg.grid.grid()?.with_halo(taylor.half_length());
+/// The grid with its halo, and the run's timing, from the model's extremes.
+fn timed(cfg: &Config, files: Files) -> Result<(Grid, Timing)> {
+    let grid = Simulation::grid(cfg)?;
     let [vp_max, slowest] = Model::extremes_in(grid, &cfg.model, files)?;
-    Ok((grid, timing(cfg, &grid, vp_max, slowest)?.steps))
+    Ok((grid, timing(cfg, &grid, vp_max, slowest)?))
 }
 
 /// Nodes an inversion may change (`Inversion::new`): outside the absorbing layers and not

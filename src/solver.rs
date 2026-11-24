@@ -39,6 +39,7 @@ use crate::cpml::{CpmlAxis, PmlSettings, Stagger};
 use crate::fd::Stencil;
 use crate::grid::{AsPoint, Grid};
 use crate::model::Model;
+use crate::receiver::Component;
 
 /// How many values below a free surface estimate a field's slope there, one-sidedly
 /// ([`Solver::continue_with_slope`]): fifth order. Four points misread a vertically incident P
@@ -74,6 +75,24 @@ pub enum Field {
 }
 
 impl Field {
+    /// Every field, in the order of [`Fields::arrays`].
+    pub const ALL: [Field; 9] = [
+        Field::Vx,
+        Field::Vy,
+        Field::Vz,
+        Field::Sxx,
+        Field::Syy,
+        Field::Szz,
+        Field::Sxy,
+        Field::Sxz,
+        Field::Syz,
+    ];
+
+    /// Whether it is a particle velocity rather than a stress.
+    pub fn is_velocity(self) -> bool {
+        matches!(self, Field::Vx | Field::Vy | Field::Vz)
+    }
+
     /// Where the field sits along each axis, in nodes past each node (0 or ½), and its sign
     /// mirrored across the free surface: even for the velocities and σxx, σyy and σxy, odd for
     /// σzz, σxz and σyz.
@@ -132,6 +151,39 @@ impl Fields {
             Field::Sxz => &mut self.sxz,
             Field::Syz => &mut self.syz,
         }
+    }
+
+    /// Every array, in the order of [`Field::ALL`].
+    pub fn arrays(&self) -> [&Vec<f32>; 9] {
+        [
+            &self.vx, &self.vy, &self.vz, &self.sxx, &self.syy, &self.szz, &self.sxy, &self.sxz,
+            &self.syz,
+        ]
+    }
+
+    /// Every array, mutably, in the order of [`Field::ALL`].
+    pub fn arrays_mut(&mut self) -> [&mut Vec<f32>; 9] {
+        [
+            &mut self.vx,
+            &mut self.vy,
+            &mut self.vz,
+            &mut self.sxx,
+            &mut self.syy,
+            &mut self.szz,
+            &mut self.sxy,
+            &mut self.sxz,
+            &mut self.syz,
+        ]
+    }
+
+    /// The particle velocities vx, vy and vz.
+    pub fn velocities(&self) -> [&[f32]; 3] {
+        [&self.vx, &self.vy, &self.vz]
+    }
+
+    /// Bytes its arrays hold.
+    pub fn memory_bytes(&self) -> usize {
+        4 * self.arrays().iter().map(|v| v.len()).sum::<usize>()
     }
 }
 
@@ -237,15 +289,8 @@ pub struct State {
 impl State {
     /// Bytes it holds.
     pub fn memory_bytes(&self) -> usize {
-        let f = &self.fields;
-        let fields: usize = [
-            &f.vx, &f.vy, &f.vz, &f.sxx, &f.syy, &f.szz, &f.sxy, &f.sxz, &f.syz,
-        ]
-        .iter()
-        .map(|v| v.len())
-        .sum();
         let psi: usize = self.psi_v.iter().chain(&self.psi_s).map(Vec::len).sum();
-        4 * (fields + psi)
+        self.fields.memory_bytes() + 4 * psi
     }
 }
 
@@ -389,21 +434,26 @@ impl Solver {
 
     /// Bytes the solver holds.
     pub fn memory_bytes(&self) -> usize {
-        let f = &self.fields;
         let m = &self.material;
-        let d = &self.model;
-        let arrays = [
-            &f.vx, &f.vy, &f.vz, &f.sxx, &f.syy, &f.szz, &f.sxy, &f.sxz, &f.syz, &m.bx, &m.by,
-            &m.bz, &m.lam, &m.l2m, &m.mxy, &m.mxz, &m.myz, &d.vp, &d.vs, &d.rho,
-        ];
+        let material = [&m.bx, &m.by, &m.bz, &m.lam, &m.l2m, &m.mxy, &m.mxz, &m.myz];
         let psi = self.psi_v.iter().chain(&self.psi_s);
         let sponge = self.sponge.iter().flatten();
-        4 * arrays
+        let values: usize = material
             .into_iter()
             .chain(psi)
             .chain(sponge)
             .map(Vec::len)
-            .sum::<usize>()
+            .sum();
+        self.fields.memory_bytes() + self.model.memory_bytes() + 4 * values
+    }
+
+    /// Whether the node nearest `point` (a node, or grid coordinates) is in an absorbing layer.
+    pub fn in_layers(&self, point: impl AsPoint) -> bool {
+        point
+            .point()
+            .iter()
+            .zip(&self.cpml)
+            .any(|(&x, c)| c.slab(x.round() as usize).is_some())
     }
 
     /// Time of the velocities now held: steps × dt - dt/2.
@@ -737,11 +787,7 @@ impl Solver {
         let (len, nxt) = (g.plane_len(), g.padded()[0]);
         let [fx, fy, fz] = factors;
         let x_ranges = self.cpml[0].ranges();
-        let f = &mut self.fields;
-        for v in [
-            &mut f.vx, &mut f.vy, &mut f.vz, &mut f.sxx, &mut f.syy, &mut f.szz, &mut f.sxy,
-            &mut f.sxz, &mut f.syz,
-        ] {
+        for v in self.fields.arrays_mut() {
             v[g.halo * len..(g.halo + nz) * len]
                 .par_chunks_mut(len)
                 .enumerate()
@@ -818,45 +864,49 @@ impl Solver {
         // Indices at - m to at + m - 1 must exist, or be mirror images.
         let room = if mirror { usize::MAX } else { at };
         let m = self.stencil.half_length().min(n - at).min(room);
-        let raw: Vec<(isize, f32)> = if m == 0 {
-            vec![(0, 1.5), (1, -0.5)]
+        if m == 0 {
+            return self.fold(axis, [(0, 1.5), (1, -0.5)], 0.5, parity);
+        }
+        let w = if m == self.stencil.half_length() {
+            self.stencil.interpolation().to_vec()
         } else {
-            let w: Vec<f32> = if m == self.stencil.half_length() {
-                self.stencil
-                    .interpolation()
-                    .iter()
-                    .map(|&w| w as f32)
-                    .collect()
-            } else {
-                crate::fd::midpoint_weights(m)
-                    .iter()
-                    .map(|&w| w as f32)
-                    .collect()
-            };
-            let m = m as isize;
-            (-m..m)
-                .map(|o| (o, w[if o < 0 { -o - 1 } else { o } as usize]))
-                .collect()
+            crate::fd::midpoint_weights(m)
         };
-        let at = at as isize;
-        let mut out: Vec<(usize, f32)> = Vec::with_capacity(raw.len());
+        let (at, m) = (at as isize, m as isize);
+        // Symmetric about the node, and rounded to single precision before folding, so the
+        // slope's share comes from the weights as they are applied.
+        let weights = (-m..m).map(|o| {
+            let w = w[if o < 0 { -o - 1 } else { o } as usize];
+            (at + o, w as f32 as f64)
+        });
+        self.fold(axis, weights, 0.5, parity)
+    }
+
+    /// Interpolation weights on indices m along `axis` of a quantity stored at m + `shift`,
+    /// as weights on the interior indices: one above a free surface (m < 0) folds onto its
+    /// mirror image with sign `parity` (a node's index -m mirrors m; a value half a node down,
+    /// at index m, position m + ½, mirrors index -1 - m), and evenly mirrored fields are
+    /// continued with their slope ([`Solver::continue_with_slope`]). Zero weights are left out.
+    fn fold(
+        &self,
+        axis: usize,
+        weights: impl IntoIterator<Item = (isize, f64)>,
+        shift: f64,
+        parity: f32,
+    ) -> Vec<(usize, f32)> {
+        let mut out = Vec::new();
         let mut folded = 0.0;
-        for (offset, w) in raw {
-            let m = at + offset;
-            // Index -1 - m mirrors index m across the surface (positions -m - ½ and m + ½).
+        for (m, w) in weights {
             let (m, w) = if m < 0 {
-                folded += w as f64 * -(m as f64 + 0.5);
-                (-1 - m, parity * w)
+                folded += w * -(m as f64 + shift);
+                (if shift == 0.0 { -m } else { -1 - m }, parity * w as f32)
             } else {
-                (m, w)
+                (m, w as f32)
             };
-            match out.iter_mut().find(|(i, _)| *i == m as usize) {
-                Some((_, sum)) => *sum += w,
-                None => out.push((m as usize, w)),
-            }
+            accumulate(&mut out, m as usize, w);
         }
         if parity > 0.0 {
-            self.continue_with_slope(&mut out, axis, folded, 0.5);
+            self.continue_with_slope(&mut out, axis, folded, shift);
         }
         out.retain(|&(_, w)| w != 0.0);
         out
@@ -892,11 +942,7 @@ impl Solver {
             .into_iter()
             .enumerate()
         {
-            let w = (-2.0 * folded * d) as f32;
-            match out.iter_mut().find(|(i, _)| *i == m) {
-                Some((_, sum)) => *sum += w,
-                None => out.push((m, w)),
-            }
+            accumulate(out, m, (-2.0 * folded * d) as f32);
         }
     }
 
@@ -933,27 +979,7 @@ impl Solver {
             let points: Vec<f64> = (lo..=hi).map(|m| m as f64 + shift - x).collect();
             crate::fd::lagrange_at_zero(&points)
         };
-        let mut out: Vec<(usize, f32)> = Vec::with_capacity(weights.len());
-        let mut folded = 0.0;
-        for (m, w) in (lo..=hi).zip(weights) {
-            // Above the surface, a node's index -m mirrors m; a value half a node down, at
-            // index m (position m + ½), mirrors index -1 - m.
-            let (m, w) = if m < 0 {
-                folded += w * -(m as f64 + shift);
-                (if shift == 0.0 { -m } else { -1 - m }, parity * w as f32)
-            } else {
-                (m, w as f32)
-            };
-            match out.iter_mut().find(|(i, _)| *i == m as usize) {
-                Some((_, sum)) => *sum += w,
-                None => out.push((m as usize, w)),
-            }
-        }
-        if mirror && parity > 0.0 {
-            self.continue_with_slope(&mut out, axis, folded, shift);
-        }
-        out.retain(|&(_, w)| w != 0.0);
-        out
+        self.fold(axis, (lo..=hi).zip(weights), shift, parity)
     }
 
     /// Padded indices and weights that interpolate `field` onto `point`: the product of
@@ -978,11 +1004,13 @@ impl Solver {
 
     /// The linear functional that reads component `c` at `point` (a node, or any point in grid
     /// coordinates).
-    pub fn receiver_op(&self, c: crate::receiver::Component, point: impl AsPoint) -> PointOp {
-        use crate::receiver::Component;
+    pub fn receiver_op(&self, c: Component, point: impl AsPoint) -> PointOp {
         let p = point.point();
-        let reads = |fields: &[Field], scale: f32| PointOp {
-            terms: fields
+        // Pressure is -(σxx + σyy + σzz)/3.
+        let scale = if c == Component::P { -1.0 / 3.0 } else { 1.0 };
+        PointOp {
+            terms: c
+                .fields()
                 .iter()
                 .flat_map(|&f| {
                     self.field_weights(f, p)
@@ -990,12 +1018,6 @@ impl Solver {
                         .map(move |(i, w)| (f, i, w * scale))
                 })
                 .collect(),
-        };
-        match c {
-            Component::Vx => reads(&[Field::Vx], 1.0),
-            Component::Vy => reads(&[Field::Vy], 1.0),
-            Component::Vz => reads(&[Field::Vz], 1.0),
-            Component::P => reads(&[Field::Sxx, Field::Syy, Field::Szz], -1.0 / 3.0),
         }
     }
 
@@ -1007,8 +1029,7 @@ impl Solver {
     /// A pressure residual is an isotropic stress source dt·K/V per unit, K = λ + 2μ/3; on the
     /// free surface, where σzz = 0, it loads σxx and σyy with the plane-stress modulus instead.
     /// See the `adjoint` module for why.
-    pub fn adjoint_op(&self, c: crate::receiver::Component, point: impl AsPoint) -> PointOp {
-        use crate::receiver::Component;
+    pub fn adjoint_op(&self, c: Component, point: impl AsPoint) -> PointOp {
         let g = self.grid;
         let volume = g.cell_volume() as f32;
         let plane = g.plane_len();
@@ -1030,7 +1051,7 @@ impl Solver {
                 // The weights the receiver reads σxx, σyy and σzz with at each node: the same
                 // but where σzz's odd mirror image folds in near the free surface.
                 let mut nodes: Vec<(usize, [f32; 3])> = Vec::new();
-                for (c, field) in [Field::Sxx, Field::Syy, Field::Szz].into_iter().enumerate() {
+                for (c, &field) in Component::P.fields().iter().enumerate() {
                     for (p, w) in self.field_weights(field, point) {
                         match nodes.iter_mut().find(|(q, _)| *q == p) {
                             Some((_, ws)) => ws[c] = w,
@@ -1072,7 +1093,7 @@ impl Solver {
                         ]
                     };
                     let scale = 1.0 / (3.0 * volume * self.cell_share(Field::Sxx, k));
-                    for (field, v) in [Field::Sxx, Field::Syy, Field::Szz].into_iter().zip(loads) {
+                    for (&field, v) in Component::P.fields().iter().zip(loads) {
                         if v != 0.0 {
                             op.terms.push((field, p, v * scale));
                         }
@@ -1084,14 +1105,14 @@ impl Solver {
     }
 
     /// A component's value at a point (a node, or grid coordinates) now.
-    pub fn sample(&self, c: crate::receiver::Component, point: impl AsPoint) -> f32 {
+    pub fn sample(&self, c: Component, point: impl AsPoint) -> f32 {
         self.receiver_op(c, point).sample(&self.fields)
     }
 
     /// The largest particle-velocity component anywhere, or infinity if any is not finite.
     pub fn peak_velocity(&self) -> f32 {
-        let f = &self.fields;
-        [&f.vx, &f.vy, &f.vz]
+        self.fields
+            .velocities()
             .iter()
             .map(|v| {
                 v.par_iter()
@@ -1164,16 +1185,6 @@ impl BandSize {
         self.runs * std::mem::size_of::<(usize, usize)>()
     }
 }
-
-/// Order of the stresses in a record and in [`Band::faces`].
-const STRESSES: [Field; 6] = [
-    Field::Sxx,
-    Field::Syy,
-    Field::Szz,
-    Field::Sxy,
-    Field::Sxz,
-    Field::Syz,
-];
 
 impl Band {
     /// The band around `interior` on `grid`, `reach` nodes deep (the stencil's half-length).
@@ -1299,16 +1310,12 @@ impl Band {
 
     /// Writes the velocities of `record` back into `fields`.
     pub fn restore_velocity(&self, fields: &mut Fields, record: &[f32]) {
-        self.restore(fields, record, |f| {
-            matches!(f, Field::Vx | Field::Vy | Field::Vz)
-        });
+        self.restore(fields, record, Field::is_velocity);
     }
 
     /// Writes the stresses of `record` back into `fields`.
     pub fn restore_stress(&self, fields: &mut Fields, record: &[f32]) {
-        self.restore(fields, record, |f| {
-            !matches!(f, Field::Vx | Field::Vy | Field::Vz)
-        });
+        self.restore(fields, record, |f| !f.is_velocity());
     }
 
     fn restore(&self, fields: &mut Fields, record: &[f32], which: impl Fn(Field) -> bool) {
@@ -1328,16 +1335,21 @@ impl Band {
         }
     }
 
-    /// Each array and its runs, in the order of a record.
+    /// Each array and its runs, in the order of a record ([`Field::ALL`]'s): the velocities
+    /// on the shell, then each stress on its faces.
     fn arrays(&self) -> impl Iterator<Item = (Field, &[(usize, usize)])> {
-        [Field::Vx, Field::Vy, Field::Vz]
+        let shell = std::iter::repeat_n(self.shell.as_slice(), 3);
+        Field::ALL
             .into_iter()
-            .map(|f| (f, self.shell.as_slice()))
-            .chain(
-                STRESSES
-                    .into_iter()
-                    .zip(self.faces.iter().map(Vec::as_slice)),
-            )
+            .zip(shell.chain(self.faces.iter().map(Vec::as_slice)))
+    }
+}
+
+/// Adds weight `w` to index `m`'s entry in `out`, or makes one.
+fn accumulate(out: &mut Vec<(usize, f32)>, m: usize, w: f32) {
+    match out.iter_mut().find(|(i, _)| *i == m) {
+        Some((_, sum)) => *sum += w,
+        None => out.push((m, w)),
     }
 }
 
@@ -1434,11 +1446,13 @@ fn planes<'a, const N: usize>(
         .collect()
 }
 
+/// What the unit tests across the crate make solvers with.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
 
-    fn pml() -> PmlSettings {
+    /// Layers with a quadratic profile set for 3000 m/s, and no sponge.
+    pub fn pml() -> PmlSettings {
         PmlSettings {
             power: 2.0,
             reflection: None,
@@ -1449,6 +1463,19 @@ mod tests {
         }
     }
 
+    /// A solver at rest in a homogeneous solid (vp 3000 m/s, vs 1700 m/s, ρ 2500 kg/m³) on
+    /// `grid`, stepping 1 ms, with layers `pml_width` nodes thick ([`pml`]).
+    pub fn solver(grid: Grid, pml_width: usize, free_surface: bool) -> Solver {
+        let model = Model::homogeneous(grid, 3000.0, 1700.0, 2500.0);
+        Solver::new(model, 1e-3, pml_width, free_surface, &pml())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{pml, solver};
+    use super::*;
+
     #[test]
     fn harmonic_mean_vanishes_next_to_a_fluid() {
         assert_eq!(harmonic_mean([1.0, 1.0, 1.0, 0.0]), 0.0);
@@ -1458,13 +1485,7 @@ mod tests {
     #[test]
     fn a_wavefield_at_rest_stays_at_rest() {
         let g = Grid::new([16, 14, 12], [10.0; 3]);
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            4,
-            true,
-            &pml(),
-        );
+        let mut s = solver(g, 4, true);
         for _ in 0..5 {
             s.step();
         }
@@ -1476,13 +1497,7 @@ mod tests {
     #[test]
     fn mirrors_stress_across_the_free_surface() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            true,
-            &pml(),
-        );
+        let mut s = solver(g, 3, true);
         let p = g.plane_len();
         for (n, v) in s.fields.szz.iter_mut().enumerate() {
             *v = n as f32;
@@ -1510,13 +1525,7 @@ mod tests {
     #[test]
     fn mirrors_velocity_across_the_free_surface() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let mut s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            true,
-            &pml(),
-        );
+        let mut s = solver(g, 3, true);
         let p = g.plane_len();
         for (n, v) in s.fields.vx.iter_mut().enumerate() {
             *v = n as f32;
@@ -1534,9 +1543,7 @@ mod tests {
     #[test]
     fn interpolation_weights_sum_to_one_and_fold_at_the_free_surface() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
-        let open = Solver::new(model.clone(), 1e-3, 3, false, &pml());
-        let free = Solver::new(model, 1e-3, 3, true, &pml());
+        let (open, free) = (solver(g, 3, false), solver(g, 3, true));
         let sum = |w: &[(usize, f32)]| w.iter().map(|&(_, w)| w).sum::<f32>();
         for at in 0..10 {
             for s in [&open, &free] {
@@ -1570,15 +1577,9 @@ mod tests {
         let f = |z: f64| 2.0 + 3.0 * z - 0.7 * z * z;
         for order in [4, 8] {
             let g = Grid::new([12, 12, 12], [10.0; 3]).with_halo(order / 2);
-            let s = Solver::new(
-                Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-                1e-3,
-                0,
-                true,
-                &pml(),
-            )
-            .with_stencil(Stencil::taylor(order).unwrap())
-            .with_surface_slope(true);
+            let s = solver(g, 0, true)
+                .with_stencil(Stencil::taylor(order).unwrap())
+                .with_surface_slope(true);
             for (shift, x) in [
                 (0.5, 0.0),
                 (0.5, 0.3),
@@ -1608,14 +1609,7 @@ mod tests {
     #[test]
     fn interpolation_matches_the_stencil() {
         let g = Grid::new([20, 20, 20], [10.0; 3]).with_halo(4);
-        let s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            false,
-            &pml(),
-        )
-        .with_stencil(Stencil::taylor(8).unwrap());
+        let s = solver(g, 3, false).with_stencil(Stencil::taylor(8).unwrap());
         let eighth: Vec<(usize, f32)> = [-5.0, 49.0, -245.0, 1225.0, 1225.0, -245.0, 49.0, -5.0]
             .iter()
             .enumerate()
@@ -1693,13 +1687,7 @@ mod tests {
     #[test]
     fn point_ops_inject_the_transpose_of_what_they_sample() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            true,
-            &pml(),
-        );
+        let s = solver(g, 3, true);
         let mut probe = Fields::zeros(g.padded_len());
         for (n, v) in probe.vz.iter_mut().enumerate() {
             *v = ((n * 7919) % 1000) as f32 / 1000.0 - 0.5;
@@ -1707,10 +1695,10 @@ mod tests {
         probe.vx.clone_from(&probe.vz);
         probe.sxx.clone_from(&probe.vz);
         for (c, node) in [
-            (crate::receiver::Component::Vz, [5, 5, 0]),
-            (crate::receiver::Component::Vz, [5, 5, 1]),
-            (crate::receiver::Component::Vx, [0, 5, 5]),
-            (crate::receiver::Component::P, [5, 5, 5]),
+            (Component::Vz, [5, 5, 0]),
+            (Component::Vz, [5, 5, 1]),
+            (Component::Vx, [0, 5, 5]),
+            (Component::P, [5, 5, 5]),
         ] {
             let op = s.receiver_op(c, node);
             let mut f = Fields::zeros(g.padded_len());
@@ -1735,9 +1723,7 @@ mod tests {
     #[test]
     fn values_on_the_free_surface_stand_for_half_a_cell() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
-        let free = Solver::new(model.clone(), 1e-3, 3, true, &pml());
-        let open = Solver::new(model, 1e-3, 3, false, &pml());
+        let (free, open) = (solver(g, 3, true), solver(g, 3, false));
         for f in [
             Field::Vx,
             Field::Vy,
@@ -1833,14 +1819,8 @@ mod tests {
     #[test]
     fn pressure_reads_the_mean_normal_stress() {
         let g = Grid::new([10, 10, 10], [10.0; 3]);
-        let s = Solver::new(
-            Model::homogeneous(g, 3000.0, 1700.0, 2500.0),
-            1e-3,
-            3,
-            false,
-            &pml(),
-        );
-        let op = s.receiver_op(crate::receiver::Component::P, [4, 5, 6]);
+        let s = solver(g, 3, false);
+        let op = s.receiver_op(Component::P, [4, 5, 6]);
         let p = g.idx(4, 5, 6);
         assert_eq!(
             op.terms,

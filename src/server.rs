@@ -71,6 +71,18 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Its name, as the API gives it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Created => "created",
+            Phase::Paused => "paused",
+            Phase::Running => "running",
+            Phase::Done => "done",
+            Phase::Failed => "failed",
+            Phase::Interrupted => "interrupted",
+        }
+    }
+
     /// Whether the run will take no more steps.
     pub fn finished(self) -> bool {
         matches!(self, Phase::Done | Phase::Failed | Phase::Interrupted)
@@ -98,6 +110,28 @@ impl Kind {
                 format!("unknown kind {k}; use run or inversion"),
             )),
         }
+    }
+
+    /// The memory a run of this kind of `cfg` needs, its files under `dir`.
+    fn estimate(self, cfg: &Config, dir: &Path) -> Result<memory::Memory> {
+        match self {
+            Kind::Run => memory::estimate(cfg, dir),
+            Kind::Inversion => memory::estimate_synthetic_inversion(cfg, dir),
+        }
+    }
+
+    /// The files a run of this kind takes besides its configuration `cfg`: the model files it
+    /// names, and an inversion's truth.
+    fn uploads(self, cfg: &Config) -> Vec<String> {
+        let mut names: Vec<String> = cfg
+            .model
+            .file_paths()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        if self == Kind::Inversion {
+            names.push(TRUTH.into());
+        }
+        names
     }
 }
 
@@ -230,6 +264,29 @@ impl Run {
 
     fn status(&self) -> Status {
         self.shared().status()
+    }
+
+    /// Notes that a client asked for a picture of it now, which keeps it watched.
+    fn pictured(&self) {
+        self.shared().pictured = Some(Instant::now());
+    }
+
+    /// Its configuration, as it was created with.
+    fn config(&self) -> Result<Config, Error> {
+        let text = fs::read_to_string(self.dir.join("config.toml")).map_err(internal)?;
+        Ok(Config::from_toml(&text)?)
+    }
+
+    /// Marks it set up, running or held if `paused`, and returns its status.
+    fn set_up(&self, sh: &mut Shared, paused: bool) -> Status {
+        sh.status.live = true;
+        sh.status.phase = if paused {
+            Phase::Paused
+        } else {
+            Phase::Running
+        };
+        self.save(&sh.status);
+        sh.status()
     }
 }
 
@@ -431,6 +488,11 @@ impl From<anyhow::Error> for Error {
     }
 }
 
+/// An error of the server's own, such as a file it can't write.
+fn internal(e: impl std::fmt::Display) -> Error {
+    Error(500, e.to_string())
+}
+
 fn not_found(what: &str) -> Error {
     Error(404, format!("no {what}"))
 }
@@ -566,10 +628,7 @@ fn route(
         }))),
         (Post, ["api", "estimate"]) => {
             let cfg = Config::from_toml(&body_text(request)?)?;
-            let m = match Kind::parse(query)? {
-                Kind::Run => memory::estimate(&cfg, &server.data)?,
-                Kind::Inversion => memory::estimate_synthetic_inversion(&cfg, &server.data)?,
-            };
+            let m = Kind::parse(query)?.estimate(&cfg, &server.data)?;
             let mut value = serde_json::to_value(m).expect("Memory serialises");
             value["limit"] = serde_json::json!(memory::available());
             Ok(Reply::Json(value))
@@ -598,7 +657,7 @@ fn route(
             st.view = None;
             st.pictures = None;
             drop(st);
-            fs::remove_dir_all(&run.dir).map_err(|e| Error(500, e.to_string()))?;
+            fs::remove_dir_all(&run.dir).map_err(internal)?;
             Ok(Reply::Empty)
         }
         (Put, ["api", "runs", id, "files", rest @ ..]) => {
@@ -607,7 +666,8 @@ fn route(
         (Get, ["api", "runs", id, "files", rest @ ..]) => {
             let run = find(server, id)?;
             let name = rest.join("/");
-            if !uploads(&run)?.contains(&name) {
+            let kind = run.shared().status.kind;
+            if !kind.uploads(&run.config()?).contains(&name) {
                 return Err(not_found("such file"));
             }
             let path = inside(&run.dir, &name)?;
@@ -625,9 +685,11 @@ fn route(
                 _ => (Phase::Paused, Phase::Running),
             };
             if sh.status.phase != from {
-                return Err(conflict(
-                    format!("the run is {:?}, not {from:?}", sh.status.phase).to_lowercase(),
-                ));
+                return Err(conflict(format!(
+                    "the run is {}, not {}",
+                    sh.status.phase.name(),
+                    from.name()
+                )));
             }
             sh.status.phase = to;
             run.save(&sh.status);
@@ -638,7 +700,7 @@ fn route(
         }
         (Get, ["api", "runs", id, "section"]) => {
             let run = find(server, id)?;
-            run.shared().pictured = Some(Instant::now());
+            run.pictured();
             let mut st = run.state();
             let view = live(&mut st)?;
             let index: usize = number(query, "index", 0.0)? as usize;
@@ -654,7 +716,7 @@ fn route(
         }
         (Get, ["api", "runs", id, "model"]) => {
             let run = find(server, id)?;
-            run.shared().pictured = Some(Instant::now());
+            run.pictured();
             let pictures = run.state().pictures.clone().ok_or_else(|| {
                 conflict("this run has no inversion in memory; its outputs can still be fetched")
             })?;
@@ -676,7 +738,7 @@ fn route(
         }
         (Get, ["api", "runs", id, "gather"]) => {
             let run = find(server, id)?;
-            run.shared().pictured = Some(Instant::now());
+            run.pictured();
             let mut st = run.state();
             let view = live(&mut st)?;
             let rows = number(query, "rows", 600.0)? as usize;
@@ -700,8 +762,7 @@ fn route(
         }
         (Get, ["api", "runs", id, "config"]) => {
             let run = find(server, id)?;
-            let text =
-                fs::read(run.dir.join("config.toml")).map_err(|e| Error(500, e.to_string()))?;
+            let text = fs::read(run.dir.join("config.toml")).map_err(internal)?;
             Ok(Reply::Bytes("text/plain; charset=utf-8", text, vec![]))
         }
         (Get, ["api", "runs", id, "outputs"]) => {
@@ -789,22 +850,13 @@ fn number(query: &BTreeMap<String, String>, key: &str, default: f64) -> Result<f
 /// A new run from a configuration: its directory, configuration and status.
 fn create(server: &Server, name: &str, toml: &str, kind: Kind) -> Result<Status, Error> {
     let cfg = Config::from_toml(toml)?;
-    let mut needs: Vec<String> = match &cfg.model.files {
-        Some(f) => [&f.vp, &f.vs, &f.rho]
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
-        None => vec![],
-    };
-    if kind == Kind::Inversion {
-        if cfg.inversion.is_none() {
-            return Err(Error(
-                400,
-                "an inversion needs an [inversion] section".into(),
-            ));
-        }
-        needs.push(TRUTH.into());
+    if kind == Kind::Inversion && cfg.inversion.is_none() {
+        return Err(Error(
+            400,
+            "an inversion needs an [inversion] section".into(),
+        ));
     }
+    let needs = kind.uploads(&cfg);
     for n in &needs {
         relative(n)?;
     }
@@ -825,8 +877,8 @@ fn create(server: &Server, name: &str, toml: &str, kind: Kind) -> Result<Status,
         if stem.is_empty() { "run" } else { &stem }
     );
     let dir = server.data.join(&id);
-    fs::create_dir_all(&dir).map_err(|e| Error(500, e.to_string()))?;
-    fs::write(dir.join("config.toml"), toml).map_err(|e| Error(500, e.to_string()))?;
+    fs::create_dir_all(&dir).map_err(internal)?;
+    fs::write(dir.join("config.toml"), toml).map_err(internal)?;
     let status = Status {
         id: id.clone(),
         name: name.to_string(),
@@ -850,25 +902,6 @@ fn create(server: &Server, name: &str, toml: &str, kind: Kind) -> Result<Status,
     Ok(status)
 }
 
-/// The files a run takes besides its configuration: the model files it names, and an
-/// inversion's truth.
-fn uploads(run: &Run) -> Result<Vec<String>, Error> {
-    let text =
-        fs::read_to_string(run.dir.join("config.toml")).map_err(|e| Error(500, e.to_string()))?;
-    let cfg = Config::from_toml(&text)?;
-    let mut names: Vec<String> = cfg
-        .model
-        .files
-        .iter()
-        .flat_map(|f| [&f.vp, &f.vs, &f.rho])
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    if run.shared().status.kind == Kind::Inversion {
-        names.push(TRUTH.into());
-    }
-    Ok(names)
-}
-
 /// Stores a model file the configuration names.
 fn upload(run: &Run, name: &str, request: &mut Request) -> Result<Status, Error> {
     if !run.shared().status.needs.iter().any(|n| n == name) {
@@ -876,9 +909,9 @@ fn upload(run: &Run, name: &str, request: &mut Request) -> Result<Status, Error>
     }
     let path = run.dir.join(relative(name)?);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error(500, e.to_string()))?;
+        fs::create_dir_all(parent).map_err(internal)?;
     }
-    let mut file = File::create(&path).map_err(|e| Error(500, e.to_string()))?;
+    let mut file = File::create(&path).map_err(internal)?;
     io::copy(request.as_reader(), &mut file)
         .map_err(|e| Error(400, format!("receiving {name}: {e}")))?;
     let mut sh = run.shared();
@@ -895,8 +928,8 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
         let sh = run.shared();
         if sh.status.phase != Phase::Created {
             return Err(conflict(format!(
-                "the run has been started already ({:?})",
-                sh.status.phase
+                "the run has been started already ({})",
+                sh.status.phase.name()
             )));
         }
         if !sh.status.needs.is_empty() {
@@ -906,14 +939,9 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
             )));
         }
     }
-    let text =
-        fs::read_to_string(run.dir.join("config.toml")).map_err(|e| Error(500, e.to_string()))?;
-    let cfg = Config::from_toml(&text)?;
+    let cfg = run.config()?;
     let kind = run.shared().status.kind;
-    let need = match kind {
-        Kind::Run => memory::estimate(&cfg, &run.dir)?.peak,
-        Kind::Inversion => memory::estimate_synthetic_inversion(&cfg, &run.dir)?.peak,
-    };
+    let need = kind.estimate(&cfg, &run.dir)?.peak;
     if let Some(mut free) = memory::available() {
         if need > free {
             free += evict(server, run, need - free);
@@ -934,20 +962,13 @@ fn start(server: &Server, run: &Arc<Run>, paused: bool) -> Result<Status, Error>
     }
     let sim = Simulation::new(&cfg, &run.dir)?;
     let out = run.dir.join("out");
-    fs::create_dir_all(out.join("snapshots")).map_err(|e| Error(500, e.to_string()))?;
+    fs::create_dir_all(out.join("snapshots")).map_err(internal)?;
     let view = View::new(sim);
     let mut sh = run.shared();
     sh.status.info = Some(view.info());
     sh.status.total_steps = view.sim.steps;
-    sh.status.live = true;
-    sh.status.phase = if paused {
-        Phase::Paused
-    } else {
-        Phase::Running
-    };
     st.view = Some(view);
-    run.save(&sh.status);
-    let s = sh.status();
+    let s = run.set_up(&mut sh, paused);
     drop(sh);
     drop(st);
     server.wake.notify_all();
@@ -961,7 +982,7 @@ fn start_inversion(
     mut st: MutexGuard<'_, State>,
     paused: bool,
 ) -> Result<Status, Error> {
-    let text = fs::read_to_string(run.dir.join(TRUTH)).map_err(|e| Error(500, e.to_string()))?;
+    let text = fs::read_to_string(run.dir.join(TRUTH)).map_err(internal)?;
     let truth = Config::from_toml(&text).map_err(|e| Error(400, format!("in {TRUTH}: {e:#}")))?;
     if truth.model.files.is_some() {
         return Err(Error(
@@ -988,14 +1009,7 @@ fn start_inversion(
     sh.status.info = Some(info);
     sh.status.total_steps = view.units();
     sh.status.inversion = Some(view.status());
-    sh.status.live = true;
-    sh.status.phase = if paused {
-        Phase::Paused
-    } else {
-        Phase::Running
-    };
-    run.save(&sh.status);
-    let s = sh.status();
+    let s = run.set_up(&mut sh, paused);
     drop(sh);
     drop(st);
     let run = run.clone();
@@ -1117,11 +1131,7 @@ fn list_files(root: &Path, dir: &Path, out: &mut Vec<serde_json::Value>) {
 /// page (a new image), so a client's copy is current if its tag is.
 fn etag(file: &File) -> Option<String> {
     let meta = file.metadata().ok()?;
-    let modified = meta
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     Some(format!("\"{:x}-{:x}\"", meta.len(), modified.as_nanos()))
 }
 
