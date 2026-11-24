@@ -1722,8 +1722,8 @@ mod tests {
         assert!(inv.gradient_of(Parameter::Vp).is_none());
     }
 
-    /// With `reconstruct` the gradient runs rebuild each forward wavefield backwards instead
-    /// of replaying it: the misfit is the same bit for bit (the forward runs are), and the
+    /// With `reconstruct` (the default) the gradient runs rebuild each forward wavefield
+    /// backwards instead of replaying it from checkpoints (`reconstruct = false`): the misfit is the same bit for bit (the forward runs are), and the
     /// gradient and the step it leads to are the replay's up to single-precision round-off
     /// (here 2.6 × 10⁻⁶ of the gradient's norm, 5.5 × 10⁻⁶ of the misfit after the step, and
     /// at most 9.4 × 10⁻⁸ of a value of vs).
@@ -1739,8 +1739,8 @@ mod tests {
             let it = inv.iterate().unwrap().expect("a step");
             (inv.strategy(), misfit, g, it.misfit, inv.model.vs.clone())
         };
-        let (replayed, misfit, g, stepped, vs) = run("");
-        let (rebuilt, misfit_r, g_r, stepped_r, vs_r) = run("reconstruct = true");
+        let (replayed, misfit, g, stepped, vs) = run("reconstruct = false");
+        let (rebuilt, misfit_r, g_r, stepped_r, vs_r) = run("");
         assert_eq!(replayed, Strategy::Checkpoints { every: None });
         assert_eq!(rebuilt, Strategy::Reconstruct { segment: None });
         assert_eq!(misfit, misfit_r);

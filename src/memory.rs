@@ -884,8 +884,8 @@ mod tests {
                      [[inversion.stage]]\nmax_frequency = 10.0\niterations = 1";
         let muted = "[[inversion.mute]]\nkeep = \"before\"\nvelocity = 1000.0\ndelay = 0.1\n\
                      taper = 0.02";
-        let rebuilt = "reconstruct = true";
-        for stages in ["", filtering, receivers, phase, muted, rebuilt] {
+        let replayed = "reconstruct = false";
+        for stages in ["", filtering, receivers, phase, muted, replayed] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

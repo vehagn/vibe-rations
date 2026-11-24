@@ -11,8 +11,9 @@
 //!   of the lines: each part's norm and its cosine with the true update by depth band.
 //! - `misfit_by_mute`: what the mutes of the muted and down-weighted variants keep of that
 //!   misfit and of its gradient, by component, by depth band.
-//! - `l2_rebuilt`: `l2` with the forward wavefields rebuilt backwards instead of replayed
-//!   from checkpoints, and how far its model lies from `l2`'s.
+//! - `l2_checkpointed`: `l2` with the forward wavefields replayed from checkpoints instead
+//!   of rebuilt backwards (the default since 2026-11-24; before, this was `l2_rebuilt`, the
+//!   other way round), and how far its model lies from `l2`'s.
 //! - `mute_lines`, `west_l2`, `west_muted_l2`, `west_stages_muted_after_the_first`,
 //!   `west_misfit_by_mute`: the western 6 km (`Case::part`), held out from the choices made
 //!   on the central part, with the slow waves' mute worked out from its own start
@@ -283,7 +284,7 @@ const PHASE_THEN_L2: Variant = (
 
 /// L2 with each shot's forward wavefield rebuilt backwards from the band around the layers
 /// instead of replayed from checkpoints.
-const L2_REBUILT: Variant = ("iterations = 5\nreconstruct = true", "");
+const L2_CHECKPOINTED: Variant = ("iterations = 5\nreconstruct = false", "");
 
 /// Every variant's configuration parses and has the stages, mutes (the inversion's and each
 /// stage's) and iterations it means.
@@ -291,7 +292,7 @@ const L2_REBUILT: Variant = ("iterations = 5\nreconstruct = true", "");
 fn the_variants_parse() {
     for (variant, stages, mutes, stage_mutes, iterations) in [
         (L2, 1, 0, 0, 5),
-        (L2_REBUILT, 1, 0, 0, 5),
+        (L2_CHECKPOINTED, 1, 0, 0, 5),
         (FREQUENCY_STAGES, 3, 0, 0, 5),
         (STAGES_WITH_RECEIVERS_SIDE, 3, 0, 0, 5),
         (muted(false, SLOW_WAVES_MUTED), 1, 1, 0, 5),
@@ -1311,11 +1312,11 @@ fn l2() {
 }
 
 #[test]
-#[ignore = "a study: `just marmousi2-study l2_rebuilt` (about 40 minutes, after `l2`)"]
-fn l2_rebuilt() {
-    let case = Case::central(L2_REBUILT);
-    invert("l2-rebuilt", &case);
-    compare_variants(&case, "l2", "l2-rebuilt", 0);
+#[ignore = "a study: `just marmousi2-study l2_checkpointed` (about 35 minutes, after `l2`)"]
+fn l2_checkpointed() {
+    let case = Case::central(L2_CHECKPOINTED);
+    invert("l2-checkpointed", &case);
+    compare_variants(&case, "l2", "l2-checkpointed", 0);
 }
 
 #[test]

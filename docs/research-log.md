@@ -3611,6 +3611,35 @@ the dev container; 29 and 34 natively on the Mac: `just in mac-test marmousi2_st
 `out/mac/marmousi2_study l2 --ignored --exact --nocapture --test-threads 1` and the same for
 `l2_rebuilt`).
 
+## 2026-11-24 — Inversions rebuild their wavefields by default
+
+**Question.** Rebuilding the forward wavefields backwards reached the checkpointed model to
+about $10^{-5}$ of the update over five iterations on Marmousi2's central part, in 45% less
+memory and about 16% more time (previous entry). Should it be the default for inversions,
+and does switching move any baseline?
+
+**Method.** `[inversion] reconstruct` now defaults to `true` (`false` replays checkpoints, bit
+for bit as before); `gradient` is unchanged and still replays unless given `--reconstruct`.
+The unit tests that compared the two ways now name checkpoints explicitly
+(`rebuilding_the_wavefield_inverts_alike`, the memory plan's variants in
+`counts_what_an_inversion_allocates`), and the Marmousi2 study `l2_rebuilt` became
+`l2_checkpointed`, the other way round. `just physics` on main (`3c68b63`) and on the change,
+both on gauss, compared line by line with timings set aside; then `just ci`.
+
+**Results.** The 143 lines `just physics` prints are identical, including the sphere
+inversion (17.9% of its misfit and 91.9% of the $v_s$ anomaly left after 3 iterations, now
+with the wavefields rebuilt) and the inversion's finite-difference check ($4.9 \times
+10^{-6}$ at $h = 10^{-2}$). `just ci` passes.
+
+**Decision.** The maintainer's: inversions rebuild by default. The baselines in `AGENTS.md`
+stand. A plan made with `memory --invert` now shows the rebuilt peak first and the
+checkpointed one second ("with reconstruct = false"). The whole section's inversion needs 22
+GiB by default, 48 with checkpoints.
+
+**Reproduce:** `just physics` before and after, compared with
+`diff <(grep -v '^test ' before.log | sort) <(grep -v '^test ' after.log | sort)` once
+timings are masked; `just memory examples/marmousi2/central.toml --invert`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model

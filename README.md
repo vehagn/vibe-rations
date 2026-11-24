@@ -152,7 +152,7 @@ a free surface $z = 0$ is the surface.
 | `[receivers]` | `components` (`vx`, `vy`, `vz`, `p`), `[[receivers.line]]`s and `[[receivers.point]]`s |
 | `[[snapshot]]` | `field`, `plane` (`xy`, `xz`, `yz` or `volume`), `at`, `interval`, `formats` (`png`, `npy`) |
 | `[output]` | `dir`, `record_every` |
-| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, `reconstruct` (rebuild the forward wavefields, as `gradient --reconstruct`), bounds `vp_range`, `vs_range`, `rho_range` |
+| `[inversion]` | For `invert`: `observed` traces, `parameters` (`vp`, `vs`, `rho`), `iterations`, `misfit` (`l2`, `traveltime`, `phase`), `max_shift`, `filter_order`, `memory`, `initial_step`, `max_step`, `balance`, `fixed_above`, `precondition`, `water_level`, `receiver_runs`, `reconstruct` (rebuild the forward wavefields, as `gradient --reconstruct`; on by default, `false` replays checkpoints), bounds `vp_range`, `vs_range`, `rho_range` |
 | `[inversion.scale]` | Relative factors on the inverted parameters' steps: `vp`, `vs`, `rho` (1 by default; only their ratios matter) |
 | `[[inversion.stage]]` | Frequency continuation: `max_frequency` (low-pass corner, Hz), `iterations`, `misfit` |
 | `[[inversion.mute]]` | A mute or one side of a window, in every stage (`[[inversion.stage.mute]]`: one stage's): `keep` (`before` or `after` the line $t = x/$`velocity`$ + $`delay`, $x$ the horizontal offset), `taper` (s), `weight` on the other side (0 by default), `shape` (`cosine`, or `exponential` damping with `taper` its time constant) |
@@ -456,7 +456,7 @@ The peak is the resident memory measured, the plan `vibe-rations memory`'s. Orde
 faster on the same grid, but at 4 points per wavelength it is outside its range; for order 8's
 accuracy it would take about four times as long. A gradient holds 26 times the forward run's
 memory, so one of the whole section (15 GiB) doesn't fit the container, and the gradient runs
-use the central part. Five iterations of `invert` from the smoothed start (40 minutes, 4.4 GiB)
+use the central part. Five iterations of `invert` from the smoothed start (40 minutes, 2.4 GiB; 4.4 with checkpoints)
 bring the misfit to 58% of the start's, but not the model nearer the truth. The slow waves
 along the seafloor (about 300 m/s, mispredicted by a cycle or more) are why: four fifths of the
 misfit is within 1 km of the sources and more than half arrives after a 400 m/s line, and below
@@ -776,8 +776,10 @@ Planned next, following Fichtner (2011), ch. 7–11:
    replayed from a checkpoint at its start, it halves a gradient's memory on
    `examples/layered.toml` (1.68 against 3.64 GiB) and cuts it by two thirds on a
    $1001 \times 1001 \times 401$ grid, for about 15% more time. It isn't bit-exact, so
-   checkpoints stay the default; an inversion rebuilds with `[inversion] reconstruct = true`
-   (2.44 against 4.41 GiB for `examples/marmousi2/central.toml`).
+   `gradient` replays checkpoints unless asked; an inversion rebuilds by default
+   (`[inversion] reconstruct`, since 2026-11-24, when five iterations on
+   `examples/marmousi2/central.toml` matched the checkpointed ones to about $10^{-5}$ of the
+   update, in 2.44 against 4.41 GiB).
 4. **Error propagation.** How numerical error in the forward field (dispersion, the
    interface, free-surface and boundary errors above) and in the reconstruction carries into
    the adjoint field, the gradient and the inversion. The reconstruction's part is measured
