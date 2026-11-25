@@ -3640,6 +3640,130 @@ GiB by default, 48 with checkpoints.
 `diff <(grep -v '^test ' before.log | sort) <(grep -v '^test ' after.log | sort)` once
 timings are masked; `just memory examples/marmousi2/central.toml --invert`.
 
+## 2026-11-25 — Faster updates: AVX2 chosen at run time, bands of rows, one correlation pass
+
+**Question.** The solver is said to be limited by memory bandwidth (gauss ran
+`examples/layered.toml` at about 90 Mcells/s from the image, 104 built for its CPU). Where can
+the time go without changing a bit of the results: compiling the loops for AVX2 at run time,
+so that the default build still runs on any x86-64 CPU; reading each plane fewer times; and
+the gradient's own passes?
+
+**Method.** Three changes, each kept only if bit for bit:
+
+1. *AVX2 at run time* (`src/simd.rs`, `solver::sweep`): the update loops and strain rates
+   compiled twice, for the target and under `#[target_feature(enable = "avx2")]` without FMA,
+   chosen by `is_x86_feature_detected!`; everything called in the loops `#[inline(always)]`,
+   so the AVX2 copy compiles it with AVX2. Rust never contracts $a b + c$, so both copies round
+   alike. `VIBE_RATIONS_SIMD=off` runs the plain copy; `run.json` and the set-up summary say
+   which ran (`kernels`).
+2. *Bands of rows* (`solver::blocks`, `block_size`): the updates split the interior into
+   blocks of whole rows, four rows a band, each a whole column of planes worked through
+   upwards, instead of one plane per task, so that of the $2L$ planes of three fields the
+   $z$-derivatives read for one plane all but one were read for the previous plane a moment
+   before. The tasks write disjoint rows of shared arrays through a small unsafe wrapper
+   (`Shared`, `Outputs::row`), sound because the blocks tile the interior (a unit test checks
+   every output and CPML memory value is handed out exactly once).
+3. *The gradient's correlations in one pass* (`gradient.rs`): the stiffness terms, the density
+   terms and the illumination read and wrote the 64-byte-per-node sums in three passes; the
+   adjoint step leaves the adjoint strain alone, so one pass after it does all three, and the
+   adjoint strain rate is added into the adjoint strain in place
+   (`Solver::add_strain_rate`).
+
+*Bit for bit.* At each commit, on gauss: `just test`; `just physics` with AVX2 and with
+`VIBE_RATIONS_SIMD=off`, every line identical to main's (`f23c598`) once timings are masked;
+and every output file of seven runs identical byte for byte to main's binary's (`run.json`
+apart from its new `kernels` line): `examples/layered.toml` (free surface, snapshots), a
+sphere survey `run --shots` and all at once, its `gradient` replayed and rebuilt
+(`--reconstruct`), a two-iteration `invert`, and the central Marmousi2 gradient: 110 files,
+with AVX2 and with the plain loops, on 12 threads, and the 99 besides the central gradient's
+on 1 thread, either way (the same at the earlier commits, but for the plain loops on 1 thread
+at the second). Unit tests run both copies and
+compare every value: a run with sources, a free surface and layers with their sponge, its
+strain rates and its steps back; a gradient, replayed and rebuilt; blocks of several shapes
+against whole planes; the strain rate added in place against written first.
+
+*Timing.* On gauss (Xeon E5-1650 v3, 6 cores, 12 threads, 15 MiB L3, 4 × DDR4-2133), idle: a
+driver waited until nothing else ran before each run and discarded any run that something
+else overlapped. Cases: `examples/layered.toml` as it is (129 × 129 × 81, 1,666 steps,
+snapshots); Marmousi2's central part forward (`central-true.toml`, 241 × 41 × 141, 1,750
+steps, five sources at once); the whole section's grid for 300 steps (`whole-true.toml` at
+0.6 s, 681 × 201 × 141); and the central part's gradient (`central.toml` against
+`central-true.toml`'s traces, checkpoints). Mcells/s are the run's own (interior nodes ×
+steps / time stepping), the gradient's its wall time. Builds: the default (no `RUSTFLAGS`, as
+the image) and the host's (`-C target-cpu=native`), of main and of each commit; three runs
+each, medians with the range where it isn't a single value.
+
+**Results.** Forward, 12 threads, Mcells/s:
+
+| Build | `layered.toml` | central part | whole section |
+|---|---|---|---|
+| main, default | 91 | 102 | 85 (85–86) |
+| main, native | 103 (103–104) | 118 | 108 |
+| AVX2 at run time | 101 (101–102) | 117 (116–117) | 108 |
+| the same, `VIBE_RATIONS_SIMD=off` | 91 | 102 (101–102) | 85 |
+| and bands of rows (final), default | **111** | **117** (117–118) | **114** (114–115) |
+| the same, `VIBE_RATIONS_SIMD=off` | 99 | 100 | 85 |
+| the same, native | 112 | 117 | 114 (114–115) |
+
+On 6 threads, one per core, `layered.toml` runs at 74 (main, default), 95 (main, native) and
+106 (final, default or native). The central part's gradient, wall time: main 119.4 s
+(default; 119.3–119.4) and 106.9 s (native); AVX2 at run time 107.3 s; and bands of rows
+107.1 s (107.1–107.3); and one correlation pass **102.5 s** (102.1–102.5), plain 116.9 s,
+native 99.7 s.
+
+- *The default build gains 15–34% forward* (22% on `layered.toml`, 15% on the central part,
+  34% on the whole section), 43% on 6 threads, and 14% on a gradient. Built for the CPU it
+  is now within 1–3% of that, so a native build no longer pays.
+- *AVX2 gives the native build's gain* (11–27%) with the default build: the copy compiled for
+  AVX2 is what `target-cpu=native` was buying. So the default build was limited by its
+  arithmetic as much as by memory.
+- *The bands pay on the grids whose planes leave the cache*: with AVX2 the whole section
+  108 → 114 and `layered.toml` 101 → 111; the central part, whose planes are small (about
+  50 KB a field) and whose 41 rows make only 11 bands for 12 threads, 117 → 117, and its
+  gradient 107.3 → 107.1 s. The whole section is
+  now faster than `layered.toml` instead of slower. With the plain loops they gain on
+  `layered.toml` (91 → 99) and nothing elsewhere (central 102 → 100, whole 85 → 85).
+- *The correlation pass* takes 4.3% off a gradient (107.1 → 102.5 s).
+
+What didn't pay (one run each unless marked; [x, y, z] the block's nodes, whole columns
+unless said):
+
+- *Parts of rows* (x-tiles): the whole section 114 (whole rows, bands of 4) against 101 and
+  92 for rows cut in 2 and 3, and 89, 82, 77 and 65 cut in 4 to 11 with wider bands; the
+  central part 117 against 91 for halves. Shorter rows defeat the hardware prefetchers, and
+  every part of a row reads its $x$-halo again.
+- *Other bands*: of 2 rows, 108, 111 and 112 on `layered.toml`, the central part and the
+  whole section (three runs each) against 111, 117 and 114 for 4; of 6 rows on the whole
+  section, 111. Wider bands in whole columns leave too few tasks for 12 threads: 8 rows give
+  `layered.toml` 17 and ran at 82, 16 rows in two columns 86, 12 rows in two columns 104; in
+  columns of 27 planes, 8 rows ran at 112 against 116 for 4.
+- *Shorter columns*, for more tasks: `layered.toml` gains in columns of 27 planes (116
+  against 111, three runs each), the central part loses (108 in columns of 47, 105 with bands
+  of 3 rows in columns of 71, three runs each, against 117). Whole columns are kept: the
+  bigger grids matter more, and a rule by grid would be tuned to three grids.
+- Not tried: fusing the velocity and stress sweeps a few planes apart (the sources, the free
+  surface's mirrors, the sponge and `step_back_with` make it delicate, and the measured case
+  for it isn't there yet); anything that changes the layout, the precision or the rounding
+  (FMA), which would change the results.
+
+**Decision.** All three changes are in: results identical bit for bit, the default build as
+fast as a native one, 15–34% faster forward and 14% on a gradient on gauss. The solver image
+needs no change: built for baseline x86-64, it picks AVX2 itself. Keep every function called
+in the loops `#[inline(always)]` (a call left out of line runs the plain code inside the
+AVX2 copy, silently slower) and never use `mul_add` or enable FMA there. Apple silicon and
+the browser run only the plain loops, with the bands; not measured on the Mac yet, where the
+plain loops gained on `layered.toml` and lost 2% on the central part on gauss. gauss's
+`/srv/data/bin/vibe-rations-native` was rebuilt from this branch (the old one kept as
+`.before-perf`), though the default build now does as well.
+
+**Reproduce.** On gauss, build main and each commit with `cargo build --release` and with
+`RUSTFLAGS="-C target-cpu=native"`; then three times each, nothing else running:
+`vibe-rations run examples/layered.toml`, `run examples/marmousi2/central-true.toml`, `run` a
+copy of `whole-true.toml` with `duration = 0.6`, and `gradient examples/marmousi2/central.toml
+--observed <central-true's run>`, with and without `VIBE_RATIONS_SIMD=off`, and with
+`RAYON_NUM_THREADS=6`. For identity: `just physics` with and without `VIBE_RATIONS_SIMD=off`
+against main's, timings masked, and `cmp` on every output file of the runs above.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
