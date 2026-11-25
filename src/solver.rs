@@ -624,6 +624,16 @@ impl Solver {
     /// zero, since the update replaces it there. Without the CPML: inside the absorbing
     /// layers these are not what the update uses.
     pub fn strain_rate(&self, v: [&[f32]; 3], out: &mut [Vec<f32>; 6]) {
+        self.strain_rate_into(v, out, false);
+    }
+
+    /// Adds [`Solver::strain_rate`] to `sum`: the same values added as if made first, in one
+    /// pass instead of two.
+    pub fn add_strain_rate(&self, v: [&[f32]; 3], sum: &mut [Vec<f32>; 6]) {
+        self.strain_rate_into(v, sum, true);
+    }
+
+    fn strain_rate_into(&self, v: [&[f32]; 3], out: &mut [Vec<f32>; 6], add: bool) {
         let g = self.grid;
         let update = StrainRate {
             g,
@@ -631,6 +641,7 @@ impl Solver {
             free_surface: self.free_surface,
             v,
             st: &self.stencil,
+            add,
         };
         let [exx, eyy, ezz, exy, exz, eyz] = out;
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
@@ -1672,6 +1683,8 @@ struct StrainRate<'a> {
     /// vx, vy, vz.
     v: [&'a [f32]; 3],
     st: &'a Stencil,
+    /// Whether to add them to the output instead of writing them.
+    add: bool,
 }
 
 impl Update<6> for StrainRate<'_> {
@@ -1683,6 +1696,7 @@ impl Update<6> for StrainRate<'_> {
             free_surface,
             v: [vx, vy, vz],
             st,
+            add,
         } = self;
         let [_, sy, sz] = g.strides();
         let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
@@ -1702,14 +1716,26 @@ impl Update<6> for StrainRate<'_> {
         st.forward(d7, vy, r, sz, ih[2]);
         st.forward(d8, vz, r, sy, ih[1]);
         let [exx, eyy, ezz, exy, exz, eyz] = row.out;
-        exx.copy_from_slice(d0);
-        eyy.copy_from_slice(d1);
-        ezz.copy_from_slice(d2);
         let (exy, exz, eyz) = (&mut exy[..n], &mut exz[..n], &mut eyz[..n]);
-        for i in 0..n {
-            exy[i] = d3[i] + d4[i];
-            exz[i] = d5[i] + d6[i];
-            eyz[i] = d7[i] + d8[i];
+        if *add {
+            // Each sum of two derivatives is rounded before it is added, as if written first.
+            for i in 0..n {
+                exx[i] += d0[i];
+                eyy[i] += d1[i];
+                ezz[i] += d2[i];
+                exy[i] += d3[i] + d4[i];
+                exz[i] += d5[i] + d6[i];
+                eyz[i] += d7[i] + d8[i];
+            }
+        } else {
+            exx.copy_from_slice(d0);
+            eyy.copy_from_slice(d1);
+            ezz.copy_from_slice(d2);
+            for i in 0..n {
+                exy[i] = d3[i] + d4[i];
+                exz[i] = d5[i] + d6[i];
+                eyz[i] = d7[i] + d8[i];
+            }
         }
     }
 }
@@ -2161,6 +2187,38 @@ mod tests {
             let run = bits_of_a_run(kernels, Some(size));
             for (a, (r, v)) in reference.iter().zip(&run).enumerate() {
                 assert!(r == v, "{size:?}: array {a} differs");
+            }
+        }
+    }
+
+    /// Adding the strain rates to a sum in the sweep gives what writing them and adding them
+    /// gave, bit for bit, free surface included.
+    #[test]
+    fn adds_strain_rates_as_if_written_first() {
+        let g = Grid::new([13, 11, 9], [10.0, 7.0, 5.0]).with_halo(4);
+        let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+        let s = Solver::new(model, 1e-4, 0, true, &pml()).with_stencil(Stencil::taylor(8).unwrap());
+        let wave = |seed: f32| -> Vec<f32> {
+            (0..g.padded_len())
+                .map(|p| (p as f32 * 0.731 + seed).sin() * 1e-3)
+                .collect()
+        };
+        let v = [wave(0.1), wave(1.7), wave(2.9)];
+        let v = [&v[0][..], &v[1][..], &v[2][..]];
+        let start: [Vec<f32>; 6] = std::array::from_fn(|c| wave(5.0 + c as f32));
+        let mut strain: [Vec<f32>; 6] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
+        s.strain_rate(v, &mut strain);
+        let mut added = start.clone();
+        s.add_strain_rate(v, &mut added);
+        for c in 0..6 {
+            for k in 0..9 {
+                for j in 0..11 {
+                    for i in 0..13 {
+                        let p = g.idx(i, j, k);
+                        let want = start[c][p] + strain[c][p];
+                        assert_eq!(added[c][p].to_bits(), want.to_bits(), "{c} at {i} {j} {k}");
+                    }
+                }
             }
         }
     }

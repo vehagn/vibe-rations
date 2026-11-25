@@ -429,10 +429,8 @@ impl Correlator {
     /// Correlates forward step `n`, whose velocities were `before` and `after` it, with the
     /// adjoint step that pairs with it, which it takes.
     fn step(&mut self, forward: &Solver, n: usize, before: [&[f32]; 3], after: [&[f32]; 3]) {
-        let g = forward.grid;
         // λ̂σ⁽ⁿ⁺¹⁾ = -W ε̃⁽ⁿ⁺¹⁾ with the forward strain rate at n + ½.
         forward.strain_rate(after, &mut self.strain);
-        correlate_stiffness(forward, &mut self.sums, &self.adjoint_strain, &self.strain);
         // ṽ⁽ⁿ⁺½⁾ with the forward velocity change over step n.
         self.adjoint.step();
         assert_eq!(
@@ -440,15 +438,20 @@ impl Correlator {
             Some(n),
             "adjoint and forward out of step"
         );
-        correlate_density(&self.adjoint.solver, &mut self.sums, before, after);
-        illuminate(&g, &mut self.illumination, after);
+        // Both, and the illumination, in one pass over the sums: the adjoint step leaves
+        // ε̃⁽ⁿ⁺¹⁾ as it was.
+        correlate(
+            forward,
+            &self.adjoint.solver,
+            &mut self.sums,
+            &mut self.illumination,
+            [&self.adjoint_strain, &self.strain],
+            before,
+            after,
+        );
         // ε̃⁽ⁿ⁾ = ε̃⁽ⁿ⁺¹⁾ + e(ṽ⁽ⁿ⁺½⁾) - W⁻¹ r_σ⁽ⁿ⁾.
         let adjoint = &self.adjoint.solver;
-        adjoint.strain_rate(adjoint.fields.velocities(), &mut self.strain);
-        self.adjoint_strain
-            .par_iter_mut()
-            .zip(&self.strain)
-            .for_each(|(a, e)| a.iter_mut().zip(e).for_each(|(a, e)| *a += e));
+        adjoint.add_strain_rate(adjoint.fields.velocities(), &mut self.adjoint_strain);
         self.pressure.add(&mut self.adjoint_strain, n);
     }
 
@@ -556,22 +559,34 @@ fn weight(s: &Solver, field: Field, k: usize) -> f64 {
     s.grid.cell_volume() * s.cell_share(field, k) as f64
 }
 
-/// Adds -W ε̃ ⊗ e for the stiffness at every stress position.
-fn correlate_stiffness(
+/// Adds -W ε̃ ⊗ e for the stiffness at every stress position, `strains` holding ε̃ and e;
+/// ṽ (v⁽ⁿ⁺½⁾ - v⁽ⁿ⁻½⁾) for the density at every velocity position, with ṽ the adjoint
+/// velocities `adjoint` holds now; and |v⁽ⁿ⁺½⁾|² to the illumination. One pass, since the sums
+/// take 64 bytes a node and the pass is limited by memory: in three passes they were read and
+/// written twice, and `after` read twice. Each sum gets the same terms in the same order as
+/// before, so the gradient is the same bit for bit. The weight and buoyancy of the density
+/// terms come in when the sums go to the nodes.
+fn correlate(
     s: &Solver,
+    adjoint: &Solver,
     sums: &mut Sums,
-    adjoint_strain: &[Vec<f32>; 6],
-    strain: &[Vec<f32>; 6],
+    illumination: &mut [f64],
+    strains: [&[Vec<f32>; 6]; 2],
+    before: [&[f32]; 3],
+    after: [&[f32]; 3],
 ) {
     let g = s.grid;
     let [nx, ny, nz] = g.n;
     let len = g.plane_len();
     let halo = g.halo;
     let surface = s.free_surface;
+    let [adjoint_strain, strain] = strains;
+    let back = adjoint.fields.velocities();
     sums[halo * len..(halo + nz) * len]
         .par_chunks_mut(len)
+        .zip(illumination.par_chunks_mut(nx * ny))
         .enumerate()
-        .for_each(|(k, plane)| {
+        .for_each(|(k, (plane, lit))| {
             let w_normal = weight(s, Field::Sxx, k);
             let w_xy = weight(s, Field::Sxy, k);
             let w_xz = weight(s, Field::Sxz, k);
@@ -598,35 +613,19 @@ fn correlate_stiffness(
                     sum[5] += -w_xy * a(3) * e(3);
                     sum[6] += -w_xz * a(4) * e(4);
                     sum[7] += -w_yz * a(5) * e(5);
+                    for c in 0..3 {
+                        sum[c] += back[c][p] as f64 * (after[c][p] - before[c][p]) as f64;
+                    }
+                    lit[j * nx + i] += energy(after, p);
                 }
             }
         });
 }
 
-/// Adds ṽ (v⁽ⁿ⁺½⁾ - v⁽ⁿ⁻½⁾), with ṽ the adjoint velocities `adjoint` holds now, for every
-/// velocity position. The weight and buoyancy come in when the sums go to the nodes.
-fn correlate_density(adjoint: &Solver, sums: &mut Sums, before: [&[f32]; 3], after: [&[f32]; 3]) {
-    let g = adjoint.grid;
-    let [nx, ny, nz] = g.n;
-    let len = g.plane_len();
-    let halo = g.halo;
-    let back = adjoint.fields.velocities();
-    sums[halo * len..(halo + nz) * len]
-        .par_chunks_mut(len)
-        .enumerate()
-        .for_each(|(k, plane)| {
-            for j in 0..ny {
-                let row = g.idx(0, j, k);
-                let local = row - (halo + k) * len;
-                for i in 0..nx {
-                    let p = row + i;
-                    let sum = &mut plane[local + i];
-                    for c in 0..3 {
-                        sum[c] += back[c][p] as f64 * (after[c][p] - before[c][p]) as f64;
-                    }
-                }
-            }
-        });
+/// |v|² at padded index `p`, each component of `v` taken where it is stored.
+#[inline(always)]
+fn energy(v: [&[f32]; 3], p: usize) -> f64 {
+    v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>()
 }
 
 /// Adds |v|² at every interior node of `g`, each component of `v` taken where it is stored.
@@ -639,8 +638,7 @@ pub(crate) fn illuminate(g: &Grid, illumination: &mut [f64], v: [&[f32]; 3]) {
             for j in 0..ny {
                 let row = g.idx(0, j, k);
                 for i in 0..nx {
-                    let p = row + i;
-                    plane[j * nx + i] += v.iter().map(|c| (c[p] as f64).powi(2)).sum::<f64>();
+                    plane[j * nx + i] += energy(v, row + i);
                 }
             }
         });
