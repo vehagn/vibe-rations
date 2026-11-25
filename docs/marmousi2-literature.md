@@ -284,6 +284,12 @@ choice no longer depends on the part. A mute that ends at an offset per stage ne
 offset limit on `[[inversion.stage.mute]]` (a misfit change, not a solver one); the QC
 itself is study code.
 
+*Done* (the research log's 2026-11-25 entry, "Marmousi2: the slow-wave phase check"): the
+check finds 300–1,021 m in the centre at 1.2 Hz and almost every offset in the west, and
+its mutes keep the west's L2 result, but in the centre recover only a third to a half of the
+plain mute's gain for $v_s$ below 750 m: one rule doesn't yet give the better variant on both
+parts.
+
 ## Benchmarks for held-out checks
 
 The maintainer's caution against tuning to one dataset is what Modrak & Tromp (2016) argue

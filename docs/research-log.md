@@ -3640,6 +3640,194 @@ GiB by default, 48 with checkpoints.
 `diff <(grep -v '^test ' before.log | sort) <(grep -v '^test ' after.log | sort)` once
 timings are masked; `just memory examples/marmousi2/central.toml --invert`.
 
+## 2026-11-25 — Marmousi2: the slow-wave phase check
+
+**Question.** The slow seafloor waves help $v_s$ where the start predicts them within half a
+cycle and hurt it where it doesn't: on the western part L2 alone does best, on the central
+part muting them does (2026-11-23, "Marmousi2: the held-out western part"), and the whole
+section shows both region by region (2026-11-23, "Marmousi2: the whole section, muted L2").
+Can the observed data and the start's synthetics alone, without the truth, decide where to
+keep them, and does one such rule give the better variant on both parts? The test is the one
+the literature note proposes ("Keep or mute the slow waves", "A test for both parts"): the
+phase difference at a low frequency after the slow waves' line, continuous along offset
+[@shah2012], within half a cycle [@fichtner2011].
+
+**Method.**
+
+- *The check* (`tests/marmousi2_study.rs`: `phase_check`, `phase_limits`,
+  `continuous_limit`). For each part, the observed traces (the truth's runs, as the
+  inversions make them) and the start's synthetics, five shots each. The window is the
+  complement of the slow waves' mute: what it would remove after the line `slow_waves_mute`
+  works out from each part's start and source (616 m/s on the central part, 690 on the
+  western, from 0.87 s with a 0.42 s taper), tapered over the record's last 0.42 s. That line,
+  not the 600 m/s one the central runs used, because the rule must come from the start alone,
+  and the window should hold exactly what the mute removes. For each trace and component
+  $c$, $Z_c = \sum_m w_m d_m e^{-i\omega t_m}$; the phase difference is
+  $\Delta\varphi = \arg \sum_c w_c Z^\text{syn}_c \bar Z^\text{obs}_c$, with $w_c$ the
+  components' balancing weights from the observed traces. That sum is the cross term of the
+  balanced L2 misfit at that frequency, so both components count as the misfit weighs them;
+  positive means the observed arrivals lag. Along each side of each shot, from the first
+  receiver beside the source (25 m; the source's own, where $v_x$ vanishes, is left out)
+  outwards, the phase is unwrapped, and the limit is the offset where it reaches $\pm\pi$
+  (interpolated), or the last before a step of more than $\pi/2$ between neighbours 25 m
+  apart (a drift of even 0.8 s/km moves it 0.15 rad per receiver at 1.2 Hz), or 25 m if
+  it already exceeds $\pi/2$ there. Past the offset where the line meets the record's end
+  (about 1.6 km on the central part, 1.8 on the western) the window is empty: nothing to judge
+  and nothing for the mute to remove. Frequencies: 0.6 and 1.0 Hz (the stages' corners),
+  1.2 Hz (the source's peak, standing for the unfiltered traces), and 2.4 Hz (where the
+  Ricker's amplitude is a fifth of its peak's). Each component alone is printed too.
+- *The check of the check* (`predicted_limits`, uses the truth): the phase $2\pi f\tau$ a
+  wave along the seafloor gathers from the shot to each receiver, $\tau$ the sum over the
+  columns between of the harmonic mean slowness in the 250 m under the seafloor, true less
+  start's (as `seafloor_speeds`), and where it reaches $\pi$.
+- *The misfit change* (`[[inversion.mute]]` and `[[inversion.stage.mute]]`: `shot`, `spare`,
+  `spare_taper`; `misfit::mute_weight`, `misfit::for_shot`). A mute can act on one shot only
+  and spare signed offsets $[a, b]$ (negative towards $-x$; `misfit::offsets` now carries the
+  side as its sign, and the line goes by the distance), coming in beyond them over
+  `spare_taper` metres with a half cosine: with $s(x)$ rising from 0 to 1, the weight is
+  $1 - s(x)\,(1 - w(t, x))$. It is still a fixed weight by time and receiver, decided before
+  the stage and held through it, so the misfit stays smooth and its adjoint exact: the
+  pair $\langle FMx, y\rangle = \langle x, MFy\rangle$ holds to $10^{-12}$ with spared
+  offsets (`spared_offsets_keep_the_transpose`), the weights are checked
+  (`mutes_spare_offsets_and_shots`), and without the new keys they are computed as before,
+  bit for bit. A mute for another shot weighs 1 rather than being dropped, so every shot
+  holds what the memory plan counts. Per shot and per side, because the check's limits
+  differ that much (below: 300 to 1,500 m on the central part at 1.2 Hz, the two sides of
+  one shot 300 and 1,500 m).
+- *The rule* (`phase_mutes`). For each shot with a side cut short, one mute for that shot:
+  the slow waves' line, sparing each side out to its limit less the offset taper, which is
+  the distance the line moves over its time taper ($616 \times 0.42 = 259$ m; 290 m in the
+  west), so that what it keeps whole lies within $\pm\pi$. A side passed to its window's end
+  is spared entirely; a shot passed on both sides gets no mute.
+- *The inversions*, as `muted_l2` and `west_muted_l2`: five L2 iterations from the start
+  smoothed over 250 m, with the rule's mutes from the 1.2 Hz limits (`central_phase_checked_l2`,
+  `west_phase_checked_l2`); the frequency stages (0.6 Hz twice, 1.0 Hz twice, all once) with
+  each stage's mutes from its own frequency's limits (`central_phase_checked_stages`,
+  `west_phase_checked_stages`); and, after the first results, L2 with the 2.4 Hz limits
+  (`central_phase_checked_l2_at_2f0`, `west_phase_checked_l2_at_2f0`). The limits are from
+  the start's synthetics, once, not re-measured at each stage's start. The wavefields were
+  rebuilt backwards (`reconstruct = true`, the default since 2026-11-24, which agrees with
+  checkpoints to about $10^{-5}$ of the update). Run on gauss in the dev container, one at a
+  time.
+
+**Results: the check.** Limits by shot (source at 1–5 km) and side, left / right, in metres,
+for both components together; "all" is every offset whose window holds anything; π: the
+phase reached it; jump: a step over $\pi/2$; then what the truth's delays predict, capped at
+the window's end.
+
+| part | f (Hz) | shot 0 | shot 1 | shot 2 | shot 3 | shot 4 |
+|---|---|---|---|---|---|---|
+| central | 0.6 | all / 1100 π | all / 1175 jump | 937 π / 1188 π | 1109 π / all | 1484 π / all |
+| | truth | 500 / 1600 | 1500 / 1600 | 1600 / 1600 | 1600 / 1500 | 1600 / 500 |
+| | 1.0 | all / 769 π | all / 749 π | 641 π / 627 π | 1074 π / all | 1484 π / all |
+| | truth | 500 / 1600 | 1500 / 1178 | 1500 / 1360 | 1104 / 1191 | 1509 / 500 |
+| | 1.2 | all / 764 π | all / 300 jump | 609 π / 580 π | 1021 π / 513 π | 391 π / all |
+| | truth | 500 / 1591 | 1500 / 1072 | 1201 / 813 | 926 / 1050 | 1197 / 500 |
+| | 2.4 | all / 275 jump | all / 575 jump | 350 jump / 550 jump | 550 jump / 487 π | 934 π / all |
+| | truth | 500 / 924 | 885 / 650 | 529 / 288 | 640 / 618 | 440 / 348 |
+| west | 0.6 | all / all | all / all | all / all | all / all | all / all |
+| | 1.0, 1.2 | all / all | all / 1700 jump | all / all | 750 jump / all | all / all |
+| | 2.4 | all / all | all / 1700 jump | all / all | 675 jump / all | all / all |
+| | truth | all at every frequency, except 1737 m on shot 0's right at 2.4 Hz | | | | |
+
+The windows reach 500 m left of shot 0 and right of shot 4, 1.5 km on the other short sides,
+1.6 km (central) and 1.8 km (west) elsewhere. The check took 124–127 s per part (five forward
+runs of the start and the spectra), and 8.4 minutes with the truth's runs.
+
+- *It tells the parts apart.* In the west it passes 8 of 10 sides to the window's end at
+  every frequency, as the truth predicts; in the centre it cuts 6 of 10 sides short at 1.2
+  Hz (300–1,021 m) and 4 even at 0.6 Hz (937–1,484 m), and the truth predicts cuts at 1.0 Hz
+  and above.
+- *It is conservative against the truth's delays in the centre at 1.2 Hz*: 300–1,021 m where
+  the delays give 813–1,591 m. At 1.0 Hz on shots 3 and 4 they agree within 30 m (1,074 against
+  1,104, 1,484 against 1,509 m). The window holds whatever arrives after the line, not the
+  slow waves alone, and the delays are a 1D estimate of the slow waves only, so neither is
+  exact; the literature note's linear estimate (1.1 km at 1.2 Hz, 2.2 km at 0.6) is of the
+  same order.
+- *Two false cuts in the west*: shot 1's right side at 1.7 km, at the window's end where the
+  window is shorter than a period, and shot 3's left at 750 m (the phase goes +0.68 at 500 m,
+  +2.08 at 750 m, then jumps), where the truth predicts no cycle skip; the phase there is of
+  another arrival, or of interference, not traced.
+- *Each component alone* is noisier: $v_x$ alone fails at once on several sides ("start"),
+  because near the source it is small and its phase meaningless; summed with the balancing
+  weights, $v_z$ carries the near offsets and $v_x$ the far.
+
+**Results: the inversions.** Error ratio and cosine with the true update after five
+iterations ($v_p$ / $v_s$ error ratio by band; full rows in the logs):
+
+| | part | L2 left | 500–750 m | 750–1000 m | 1000–1500 m |
+|---|---|---|---|---|---|
+| L2 | central | 57.9% | 0.900 / 0.973 | 0.994 / 1.095 | 1.020 / 1.070 |
+| | west | 17.3% | 1.227 / 0.714 | 0.988 / 1.018 | 0.986 / 0.935 |
+| L2, muted | central | 85.7% | 0.916 / 0.970 | 0.971 / 1.004 | 0.999 / 1.001 |
+| | west | 41.3% | 1.167 / 0.791 | 1.055 / 0.978 | 1.013 / 0.999 |
+| L2, the check's mutes at 1.2 Hz | central | 64.3% | 0.907 / 0.968 | 0.982 / 1.062 | 1.007 / 1.037 |
+| | west | 17.4% | 1.226 / 0.714 | 0.988 / 1.013 | 0.985 / 0.938 |
+| L2, the check's mutes at 2.4 Hz | central | 63.7% | 0.903 / 0.966 | 0.980 / 1.059 | 1.011 / 1.036 |
+| stages (central: unmuted; west: muted after 0.6 Hz) | central | 93.2% | 0.976 / 0.946 | 1.001 / 0.987 | 1.020 / 1.044 |
+| | west | 64.0% | 1.006 / 0.911 | 0.987 / 0.993 | 0.992 / 0.983 |
+| stages, the check's mutes per stage | central | 92.9% | 0.975 / 0.949 | 1.000 / 0.988 | 1.017 / 1.034 |
+| | west | 64.9% | 1.010 / 0.934 | 0.989 / 0.989 | 0.991 / 0.978 |
+
+Cosines, central / west, for the check's L2 at 1.2 Hz: $v_p$ +0.42, +0.19, −0.08 / +0.05,
++0.26, +0.19; $v_s$ +0.26, −0.11, −0.16 / +0.70, +0.31, +0.35. Over every free node $v_p$
+1.000 / 1.002, $v_s$ 1.002 / 0.998. Every step was the full one at the first trial. Wall
+times: 5,296 s (central L2), 6,498 s (west L2, with other work on gauss for most of it),
+6,756 s and 6,943 s (the stages), and 6,986 s (central L2 at 2.4 Hz, gauss shared with other work); the central part's earlier runs took about
+2,800 s on the Mac's container, so gauss runs these about twice as long (its 6 cores, and
+rebuilding the wavefields).
+
+- *In the west the rule keeps the slow waves, and so does what L2 does there*: it mutes two
+  sides of 10, beyond 1.4 km and 460 m, and the result is L2's to within 0.005 (1.226 / 0.714,
+  0.988 / 1.013, 0.985 / 0.938). The plain mute's losses ($v_p$ 1.167 at the top, 1.055 at
+  750–1000 m; $v_s$ 0.791) don't happen.
+- *In the centre it goes part of the way from L2 to the mute.* $v_s$ below 750 m moves away
+  less than with L2 (1.062 and 1.037 against 1.095 and 1.070) but still away (cosines −0.11,
+  −0.16), where the plain mute holds it (1.004, 1.001); $v_p$ at 750–1000 m gains a little
+  (0.982, between 0.994 and 0.971). So the slow waves the check keeps, within $\pm\pi$ at
+  1.2 Hz out to 300–1,000 m, still turn $v_s$ the wrong way below 750 m. The full-band misfit
+  also fits frequencies above 1.2 Hz, for which those offsets are already beyond half a cycle:
+  at 2.4 Hz the check's limits fall to 275–934 m on the cut sides.
+- *With the stages the mutes change little*: on the central part the 0.6 and 1.0 Hz limits keep
+  most of what the stages see, and the result is the unmuted stages' within 0.01; in the west
+  (two sides muted from 1.0 Hz on) it lies near the stages muted after 0.6 Hz, $v_s$ a little
+  worse at the top (0.934 against 0.911) and a little better below.
+- *Cutting at 2.4 Hz instead changes nothing that matters* on the central part (spares of
+  16–675 m on the cut sides instead of 41–762 m): $v_s$ 1.059 and 1.036 below 750 m, against
+  1.062 and 1.037; $v_p$ 0.903, 0.980, 1.011. So it isn't that the 1.2 Hz limits were too
+  generous: what still turns $v_s$ away is in the slow waves the check passes at every
+  frequency, on the sides it keeps whole (shot 1's left to 1.5 km, shots 0's left and 4's right
+  to 500 m) or at the shortest offsets, or it isn't in the slow waves. Not split further.
+  The western run at 2.4 Hz (`west_phase_checked_l2_at_2f0`) was stopped unfinished: its mutes
+  differ from the 1.2 Hz run's on one side by 75 m (spare 385 against 460 m), and with the
+  central result unchanged it couldn't decide anything.
+
+**Decision.** The check does what it was built for: from the data and the start alone it
+tells the western part, where the start predicts the slow waves within half a cycle, from the
+central part, where it doesn't, shot by shot and side by side, and its limits are of the order
+the truth's delays give (shorter in the centre at 1.2 Hz). As a rule for the mute it is safe:
+on neither part is the result worse than L2's by more than 0.007 in any band, and in the west it keeps what made L2 the best
+variant there, which the plain mute lost. But it doesn't give the better variant on both
+parts: in the centre it recovers only a third to a half of what the plain mute gained for $v_s$
+below 750 m (1.062 / 1.037 against L2's 1.095 / 1.070 and the mute's 1.004 / 1.001), at 1.2 or
+2.4 Hz alike. Within half a cycle is necessary for the slow waves to help, not sufficient:
+in the centre the slow waves the check passes still push $v_s$ below 750 m the wrong way,
+plausibly because the start's shallow $v_s$ is 18% fast and an L2 update of the slow waves
+puts part of that error deeper, which no phase test of the data can see. So no mute default
+still; the check is worth keeping as a QC (eight minutes) and as the way to place a mute
+where one is wanted. The whole section (25 hours) is not yet worth running with this rule:
+it would keep the west's gain where the start is good and recover a third to a half of the loss
+where it isn't. Next, cheaper: split the central gradient by the check's mutes (as
+`misfit_by_mute` did by the line), to find which kept slow waves turn $v_s$ away; and a
+better shallow start (slowness averaged, as the literature note suggests), which would make
+the check pass more often for the right reason.
+
+**Reproduce:** `just in marmousi2-study phase_check` (8.4 minutes on gauss), then
+`central_phase_checked_l2`, `west_phase_checked_l2`, `central_phase_checked_stages`,
+`west_phase_checked_stages`, `central_phase_checked_l2_at_2f0` and
+`west_phase_checked_l2_at_2f0` (90–115 minutes each on gauss; each runs the check first);
+`cargo test --release --lib spare` for the mutes' unit tests.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -3679,9 +3867,12 @@ timings are masked; `just memory examples/marmousi2/central.toml --invert`.
   (`muted_l2_with_receivers_side`), time shifts in a window around the early arrivals, then L2
   (`windowed_time_shifts_then_l2`) and muted L2 for twenty iterations (`muted_l2_longer`);
   L2 with the wavefields rebuilt (`l2_rebuilt`) has since matched L2 with checkpoints
-  (2026-11-24). Not written: a test from the data of whether
-  the slow waves are within half a cycle, measured at each stage's start, to decide the mute
-  offset by offset; the phase misfit with the mute; a
+  (2026-11-24). A test from the data of whether the slow
+  waves are within half a cycle (2026-11-25, "Marmousi2: the slow-wave phase check") tells
+  the parts apart, and the mutes it decides keep the west's L2 result, but in the centre
+  recover only a third to a half of the plain mute's gain for $v_s$ below 750 m: what turns $v_s$ away
+  there is not only cycle skipping. Not split further. Not written: the phase misfit with
+  the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
   which stacks and f-k spectra within 1 km couldn't do; and a better shallow start. Nor
