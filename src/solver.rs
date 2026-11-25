@@ -14,9 +14,11 @@
 //! | σyz                | (i, j + ½, k + ½)         |
 //!
 //! Each step advances velocity from t - dt/2 to t + dt/2 using stress at t, then stress from
-//! t to t + dt using the new velocity. The work is split across threads by z-plane, and each
-//! plane is processed a row (constant j) at a time: the nine derivatives a row needs go into
-//! scratch rows, the CPML corrects those in a layer, and the fields are updated from them.
+//! t to t + dt using the new velocity. The work is split across threads into blocks of rows,
+//! each worked through a row (constant j and k) at a time, plane by plane upwards: the nine
+//! derivatives a row needs go into scratch rows, the CPML corrects those in a layer, and the
+//! fields are updated from them. Every node's arithmetic is the same however the work is
+//! split, so the results are too, bit for bit.
 //!
 //! The free surface sits on the σzz plane k = 0, with stress imaging (Levander 1988; Graves
 //! 1996): σzz is zero there, σxx and σyy are updated as if it were (∂z vz = -λ/(λ+2μ)
@@ -32,6 +34,9 @@
 //! adjoint sources needs).
 
 #![allow(clippy::needless_range_loop)]
+
+use std::marker::PhantomData;
+use std::ops::Range;
 
 use rayon::prelude::*;
 
@@ -306,7 +311,7 @@ pub struct Solver {
     /// The layers along x, y and z.
     pub cpml: [CpmlAxis; 3],
     /// CPML memory per axis, for the derivatives of stress (velocity update) and of
-    /// velocity (stress update). See [`planes`] for the layout.
+    /// velocity (stress update). See [`Outputs::row`] for the layout.
     psi_v: [Vec<f32>; 3],
     psi_s: [Vec<f32>; 3],
     /// The spatial derivative operator.
@@ -320,6 +325,8 @@ pub struct Solver {
     pub step: usize,
     /// The compiled update loops it runs, which this CPU can ([`Solver::set_kernels`]).
     kernels: Kernels,
+    /// How the updates split the nodes between tasks ([`blocks`]).
+    blocks: Vec<Block>,
 }
 
 impl Solver {
@@ -366,6 +373,7 @@ impl Solver {
             surface_slope: false,
             step: 0,
             kernels: Kernels::chosen(),
+            blocks: blocks(&g, block_size(&g)),
         }
     }
 
@@ -422,6 +430,7 @@ impl Solver {
             surface_slope: self.surface_slope,
             step: 0,
             kernels: self.kernels,
+            blocks: self.blocks.clone(),
         }
     }
 
@@ -574,11 +583,8 @@ impl Solver {
         };
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
         let psi = if layers { &mut self.psi_v } else { &mut none };
-        sweep(
-            self.kernels,
-            &update,
-            planes(&g, [vx, vy, vz], psi, &self.cpml),
-        );
+        let outputs = Outputs::new([vx, vy, vz], psi);
+        sweep(self.kernels, &update, &g, &self.cpml, &self.blocks, outputs);
     }
 
     /// Adds `sign` times the stress increment; with `layers` false, without the CPML.
@@ -607,11 +613,8 @@ impl Solver {
         };
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
         let psi = if layers { &mut self.psi_s } else { &mut none };
-        sweep(
-            self.kernels,
-            &update,
-            planes(&g, [sxx, syy, szz, sxy, sxz, syz], psi, &self.cpml),
-        );
+        let outputs = Outputs::new([sxx, syy, szz, sxy, sxz, syz], psi);
+        sweep(self.kernels, &update, &g, &self.cpml, &self.blocks, outputs);
     }
 
     /// The strain rates the stress update applies the stiffness to, from the velocities
@@ -631,11 +634,8 @@ impl Solver {
         };
         let [exx, eyy, ezz, exy, exz, eyz] = out;
         let mut none = [Vec::new(), Vec::new(), Vec::new()];
-        sweep(
-            self.kernels,
-            &update,
-            planes(&g, [exx, eyy, ezz, exy, exz, eyz], &mut none, &self.cpml),
-        );
+        let outputs = Outputs::new([exx, eyy, ezz, exy, exz, eyz], &mut none);
+        sweep(self.kernels, &update, &g, &self.cpml, &self.blocks, outputs);
     }
 
     /// Damps every field inside the side layers by the sponge factors.
@@ -1248,14 +1248,6 @@ fn add_sum2(out: &mut [f32], sign: f32, m: &[f32], x: &[f32], y: &[f32]) {
     }
 }
 
-#[inline(always)]
-fn split3(v: &mut [f32]) -> [&mut [f32]; 3] {
-    let n = v.len() / 3;
-    let (a, rest) = v.split_at_mut(n);
-    let (b, c) = rest.split_at_mut(n);
-    [a, b, c]
-}
-
 /// Scratch rows for one thread: the nine derivatives of the row being updated.
 struct Rows {
     d: [Vec<f32>; 9],
@@ -1267,90 +1259,256 @@ impl Rows {
             d: std::array::from_fn(|_| vec![0.0; n]),
         }
     }
+
+    /// The nine rows, `n` values each.
+    #[inline(always)]
+    fn take(&mut self, n: usize) -> [&mut [f32]; 9] {
+        self.d.each_mut().map(|d| &mut d[..n])
+    }
 }
 
-/// What one thread may write while it updates interior z-plane `kz`.
-struct Plane<'a, const N: usize> {
-    kz: usize,
-    /// Interior nodes along x: the length of a row.
-    nx: usize,
-    /// The plane of each output field, padded.
-    out: [&'a mut [f32]; N],
-    /// CPML memory for the plane: along x, rows j of [3 terms][slab]; along y, slab rows of
-    /// [3 terms][nx]; along z (planes in the slab only), rows j of [3 terms][nx].
-    psi_x: Option<&'a mut [f32]>,
-    psi_y: Option<&'a mut [f32]>,
-    psi_z: Option<&'a mut [f32]>,
+/// The nodes one task of a sweep updates: nodes `i` of rows `j` of interior planes `k`,
+/// plane by plane upwards, so that what the z-derivatives read of one plane is still in the
+/// cache for the next ([`block_size`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Block {
+    i: Range<usize>,
+    j: Range<usize>,
+    k: Range<usize>,
 }
 
-/// Splits the output fields and CPML memory into one disjoint [`Plane`] per interior z-plane.
-fn planes<'a, const N: usize>(
-    g: &Grid,
-    out: [&'a mut Vec<f32>; N],
-    psi: &'a mut [Vec<f32>; 3],
-    cpml: &[CpmlAxis; 3],
-) -> Vec<Plane<'a, N>> {
+/// Rows in a block's band: see [`block_size`].
+const BAND_ROWS: usize = 4;
+
+/// Nodes along x, y and z of the blocks the updates split the interior of `g` into: whole
+/// rows, bands of [`BAND_ROWS`] rows, and whole columns of planes.
+///
+/// A block is worked through plane by plane upwards, so of the 2L planes of three fields that
+/// the z-derivatives read for a plane, all but one are read again for the next a moment later
+/// and come from the cache instead of memory. Updated a whole plane at a time, as before, a
+/// large grid's planes had left the cache by then. Narrow bands keep what a block reads per
+/// plane small; the y-derivatives read 2L rows more than the band's own, so very narrow ones
+/// read more again. Measured on gauss (Xeon E5-1650 v3, 15 MiB L3, 12 threads; the research
+/// log's 2026-11-25 entry), bands of 2–4 whole rows were fastest on every grid tried, and
+/// parts of rows slower: shorter rows defeat the hardware prefetchers.
+fn block_size(g: &Grid) -> [usize; 3] {
+    [g.n[0], BAND_ROWS.min(g.n[1]), g.n[2]]
+}
+
+/// Splits `0..n` into the fewest nearly equal parts of at most `size`.
+fn split(n: usize, size: usize) -> impl Iterator<Item = Range<usize>> + Clone {
+    let parts = n.div_ceil(size.max(1)).max(1);
+    (0..parts).map(move |p| p * n / parts..(p + 1) * n / parts)
+}
+
+/// The blocks of at most `size` nodes along each axis that tile the interior of `g`, each
+/// node in exactly one: what makes [`Outputs::row`] sound. Within a column of blocks the
+/// planes come in order, so a thread that takes consecutive blocks marches up the column.
+fn blocks(g: &Grid, size: [usize; 3]) -> Vec<Block> {
     let [nx, ny, nz] = g.n;
-    let len = g.plane_len();
-    let halo = g.halo;
-    let mut out = out.map(|v| v[halo * len..(halo + nz) * len].chunks_mut(len));
-    let [px, py, pz] = psi;
-    let mut px = (!px.is_empty()).then(move || px.chunks_mut(ny * 3 * cpml[0].width()));
-    let mut py = (!py.is_empty()).then(move || py.chunks_mut(cpml[1].width() * 3 * nx));
-    let mut pz = (!pz.is_empty()).then(move || pz.chunks_mut(ny * 3 * nx));
-    (0..nz)
-        .map(|kz| Plane {
-            kz,
-            nx,
-            out: std::array::from_fn(|f| out[f].next().expect("one chunk per plane")),
-            psi_x: px.as_mut().and_then(Iterator::next),
-            psi_y: py.as_mut().and_then(Iterator::next),
-            psi_z: cpml[2]
-                .slab(kz)
-                .and_then(|_| pz.as_mut().and_then(Iterator::next)),
-        })
-        .collect()
+    let mut out = Vec::new();
+    for i in split(nx, size[0]) {
+        for j in split(ny, size[1]) {
+            for k in split(nz, size[2]) {
+                out.push(Block {
+                    i: i.clone(),
+                    j: j.clone(),
+                    k,
+                });
+            }
+        }
+    }
+    out
 }
 
-/// One update's arithmetic on a z-plane. [`sweep`] compiles it once for each instruction set
+/// A mutable array whose disjoint parts the tasks of a sweep write at once. Splitting it
+/// ahead of time, as `chunks_mut` does whole planes, would take a slice per row of every
+/// block and every array, each update; handing the rows out as they are reached takes nothing.
+struct Shared<'a> {
+    ptr: *mut f32,
+    len: usize,
+    array: PhantomData<&'a mut [f32]>,
+}
+
+// SAFETY: it is a `&mut [f32]` whose parts go to different threads, each part to one only
+// (`Shared::part`'s contract).
+unsafe impl Send for Shared<'_> {}
+unsafe impl Sync for Shared<'_> {}
+
+impl<'a> Shared<'a> {
+    fn new(v: &'a mut [f32]) -> Self {
+        Self {
+            ptr: v.as_mut_ptr(),
+            len: v.len(),
+            array: PhantomData,
+        }
+    }
+
+    /// `len` values from `start`.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else may read or write them while the slice lives.
+    #[inline(always)]
+    unsafe fn part(&self, start: usize, len: usize) -> &'a mut [f32] {
+        assert!(
+            start <= self.len && len <= self.len - start,
+            "outside the array"
+        );
+        // SAFETY: inside the array, which outlives 'a, and the caller's alone.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.add(start), len) }
+    }
+}
+
+/// What a sweep writes: its output arrays, padded, and the CPML memory along x, y and z
+/// where it keeps any (see [`Outputs::row`] for the layout).
+struct Outputs<'a, const N: usize> {
+    out: [Shared<'a>; N],
+    psi: [Option<Shared<'a>>; 3],
+}
+
+/// What a row of a block writes: its nodes in each output array, and the CPML memory for
+/// them, each of three terms: along x if they reach into the x layers, along y if the row
+/// is in a y layer and along z if its plane is in a z layer, these two with the slab index.
+struct RowOut<'a, const N: usize> {
+    out: [&'a mut [f32]; N],
+    x: Option<[&'a mut [f32]; 3]>,
+    y: Option<(usize, [&'a mut [f32]; 3])>,
+    z: Option<(usize, [&'a mut [f32]; 3])>,
+}
+
+impl<'a, const N: usize> Outputs<'a, N> {
+    /// `out` the padded output arrays; `psi` the CPML memory, empty where the sweep keeps
+    /// none.
+    fn new(out: [&'a mut Vec<f32>; N], psi: &'a mut [Vec<f32>; 3]) -> Self {
+        Self {
+            out: out.map(|v| Shared::new(v)),
+            psi: psi
+                .each_mut()
+                .map(|v| (!v.is_empty()).then(|| Shared::new(v))),
+        }
+    }
+
+    /// Nodes `i` of row `j` of interior plane `k`. The memory along x holds, per plane and
+    /// row, each term's slab ([3][slab]); along y, per plane and slab row, each term's row
+    /// ([3][nx]); along z, per slab plane and row, the same.
+    ///
+    /// # Safety
+    ///
+    /// No other task may hold any of the same nodes' values at the same time.
+    #[inline(always)]
+    unsafe fn row(
+        &self,
+        g: &Grid,
+        cpml: &[CpmlAxis; 3],
+        i: Range<usize>,
+        j: usize,
+        k: usize,
+    ) -> RowOut<'a, N> {
+        let [nx, ny, _] = g.n;
+        let n = i.len();
+        let start = g.idx(i.start, j, k);
+        // SAFETY (all four): these nodes' values, the caller's alone. A node's memory along x
+        // is at its slab index, along y and z at its x index, so other nodes' are elsewhere.
+        let out = self.out.each_ref().map(|a| unsafe { a.part(start, n) });
+        let terms = |a: &Shared<'a>, base: usize, term: usize, from: usize, len: usize| {
+            std::array::from_fn(|t| unsafe { a.part(base + t * term + from, len) })
+        };
+        let x = self.psi[0].as_ref().and_then(|a| {
+            let (w, slabs) = (cpml[0].width(), cpml[0].slabs(i.clone()));
+            (!slabs.is_empty()).then(|| terms(a, (k * ny + j) * 3 * w, w, slabs.start, slabs.len()))
+        });
+        let y = self.psi[1].as_ref().zip(cpml[1].slab(j)).map(|(a, s)| {
+            let base = (k * cpml[1].width() + s) * 3 * nx;
+            (s, terms(a, base, nx, i.start, n))
+        });
+        let z = self.psi[2]
+            .as_ref()
+            .zip(cpml[2].slab(k))
+            .map(|(a, s)| (s, terms(a, (s * ny + j) * 3 * nx, nx, i.start, n)));
+        RowOut { out, x, y, z }
+    }
+}
+
+/// One update's arithmetic on nodes `i` of row `j` of interior plane `k`, with the scratch
+/// rows `d`, writing `row`. [`sweep`] compiles it once for each instruction set
 /// (crate::simd), inlining it, so it and everything it calls in its loops must be
 /// `#[inline(always)]`: a call left out of line would run the plain loops.
-trait PlaneUpdate<const N: usize>: Sync {
-    fn plane(&self, rows: &mut Rows, plane: Plane<'_, N>);
+trait Update<const N: usize>: Sync {
+    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, k: usize, row: RowOut<'_, N>);
 }
 
-/// Runs `update` on every plane, in parallel, with the loops `kernels` names.
+/// Runs `update` on every node of `blocks`, which tile the interior ([`blocks`]), in
+/// parallel and with the loops `kernels` names, writing `outputs`.
 fn sweep<const N: usize>(
     kernels: Kernels,
-    update: &impl PlaneUpdate<N>,
-    planes: Vec<Plane<'_, N>>,
+    update: &impl Update<N>,
+    g: &Grid,
+    cpml: &[CpmlAxis; 3],
+    blocks: &[Block],
+    outputs: Outputs<'_, N>,
 ) {
-    let nx = planes.first().map_or(0, |p| p.nx);
-    planes.into_par_iter().for_each_init(
-        || Rows::new(nx),
-        |rows, plane| {
+    let width = blocks.iter().map(|b| b.i.len()).max().unwrap_or(0);
+    blocks.par_iter().for_each_init(
+        || Rows::new(width),
+        |rows, block| {
             #[cfg(target_arch = "x86_64")]
             if kernels == Kernels::Avx2 {
                 // SAFETY: a solver holds Kernels::Avx2 only where the CPU has AVX2
                 // (Solver::set_kernels, Kernels::chosen).
-                return unsafe { plane_avx2(update, rows, plane) };
+                return unsafe { block_avx2(update, g, cpml, &outputs, rows, block) };
             }
             #[cfg(not(target_arch = "x86_64"))]
             debug_assert_eq!(kernels, Kernels::Plain);
-            plane_plain(update, rows, plane)
+            block_plain(update, g, cpml, &outputs, rows, block);
         },
     );
 }
 
-fn plane_plain<const N: usize>(update: &impl PlaneUpdate<N>, rows: &mut Rows, plane: Plane<'_, N>) {
-    update.plane(rows, plane);
+/// A block's rows, plane by plane upwards.
+#[inline(always)]
+fn block<const N: usize>(
+    update: &impl Update<N>,
+    g: &Grid,
+    cpml: &[CpmlAxis; 3],
+    outputs: &Outputs<'_, N>,
+    rows: &mut Rows,
+    block: &Block,
+) {
+    for k in block.k.clone() {
+        for j in block.j.clone() {
+            // SAFETY: the blocks tile the interior, so no other task holds these nodes, and
+            // this one holds a row at a time.
+            let row = unsafe { outputs.row(g, cpml, block.i.clone(), j, k) };
+            update.row(rows.take(block.i.len()), block.i.clone(), j, k, row);
+        }
+    }
 }
 
-/// [`plane_plain`] compiled with AVX2, without FMA: the same operations, eight values at a time.
+fn block_plain<const N: usize>(
+    update: &impl Update<N>,
+    g: &Grid,
+    cpml: &[CpmlAxis; 3],
+    outputs: &Outputs<'_, N>,
+    rows: &mut Rows,
+    b: &Block,
+) {
+    block(update, g, cpml, outputs, rows, b);
+}
+
+/// [`block_plain`] compiled with AVX2, without FMA: the same operations, eight values at a
+/// time.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-fn plane_avx2<const N: usize>(update: &impl PlaneUpdate<N>, rows: &mut Rows, plane: Plane<'_, N>) {
-    update.plane(rows, plane);
+fn block_avx2<const N: usize>(
+    update: &impl Update<N>,
+    g: &Grid,
+    cpml: &[CpmlAxis; 3],
+    outputs: &Outputs<'_, N>,
+    rows: &mut Rows,
+    b: &Block,
+) {
+    block(update, g, cpml, outputs, rows, b);
 }
 
 /// What the velocity update reads.
@@ -1366,9 +1524,9 @@ struct VelocityUpdate<'a> {
     cpml: &'a [CpmlAxis; 3],
 }
 
-impl PlaneUpdate<3> for VelocityUpdate<'_> {
+impl Update<3> for VelocityUpdate<'_> {
     #[inline(always)]
-    fn plane(&self, rows: &mut Rows, plane: Plane<'_, 3>) {
+    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, kz: usize, row: RowOut<'_, 3>) {
         let Self {
             g,
             sign,
@@ -1378,56 +1536,40 @@ impl PlaneUpdate<3> for VelocityUpdate<'_> {
             st,
             cpml: [cx, cy, cz],
         } = self;
-        let [nx, ny, _] = g.n;
         let [_, sy, sz] = g.strides();
-        let nxt = g.padded()[0];
-        let halo = g.halo;
-        let wx = cx.width();
-        let Plane {
-            kz,
-            out: [vx, vy, vz],
-            mut psi_x,
-            mut psi_y,
-            mut psi_z,
-            ..
-        } = plane;
-        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-        for j in 0..ny {
-            let r = g.idx(0, j, kz);
-            st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
-            st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
-            st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
-            st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
-            st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
-            st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
-            st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
-            st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
-            st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
+        let r = g.idx(i.start, j, kz);
+        let n = i.len();
+        st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
+        st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
+        st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
+        st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
+        st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
+        st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
+        st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
+        st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
+        st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
 
-            if let Some(p) = psi_x.as_deref_mut() {
-                let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
-                cx.apply_along(d0, p0, Stagger::Half);
-                cx.apply_along(d3, p1, Stagger::Node);
-                cx.apply_along(d6, p2, Stagger::Node);
-            }
-            if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
-                let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
-                cy.apply_across(s, d1, p0, Stagger::Node);
-                cy.apply_across(s, d4, p1, Stagger::Half);
-                cy.apply_across(s, d7, p2, Stagger::Node);
-            }
-            if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
-                let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
-                cz.apply_across(s, d2, p0, Stagger::Node);
-                cz.apply_across(s, d5, p1, Stagger::Node);
-                cz.apply_across(s, d8, p2, Stagger::Half);
-            }
-
-            let o = (j + halo) * nxt + halo;
-            add_sum(&mut vx[o..o + nx], *sign, &m.bx[r..r + nx], d0, d1, d2);
-            add_sum(&mut vy[o..o + nx], *sign, &m.by[r..r + nx], d3, d4, d5);
-            add_sum(&mut vz[o..o + nx], *sign, &m.bz[r..r + nx], d6, d7, d8);
+        if let Some([p0, p1, p2]) = row.x {
+            cx.apply_along(i.clone(), d0, p0, Stagger::Half);
+            cx.apply_along(i.clone(), d3, p1, Stagger::Node);
+            cx.apply_along(i.clone(), d6, p2, Stagger::Node);
         }
+        if let Some((s, [p0, p1, p2])) = row.y {
+            cy.apply_across(s, d1, p0, Stagger::Node);
+            cy.apply_across(s, d4, p1, Stagger::Half);
+            cy.apply_across(s, d7, p2, Stagger::Node);
+        }
+        if let Some((s, [p0, p1, p2])) = row.z {
+            cz.apply_across(s, d2, p0, Stagger::Node);
+            cz.apply_across(s, d5, p1, Stagger::Node);
+            cz.apply_across(s, d8, p2, Stagger::Half);
+        }
+
+        let [vx, vy, vz] = row.out;
+        add_sum(vx, *sign, &m.bx[r..r + n], d0, d1, d2);
+        add_sum(vy, *sign, &m.by[r..r + n], d3, d4, d5);
+        add_sum(vz, *sign, &m.bz[r..r + n], d6, d7, d8);
     }
 }
 
@@ -1444,9 +1586,9 @@ struct StressUpdate<'a> {
     cpml: &'a [CpmlAxis; 3],
 }
 
-impl PlaneUpdate<6> for StressUpdate<'_> {
+impl Update<6> for StressUpdate<'_> {
     #[inline(always)]
-    fn plane(&self, rows: &mut Rows, plane: Plane<'_, 6>) {
+    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, kz: usize, row: RowOut<'_, 6>) {
         let Self {
             g,
             sign,
@@ -1458,86 +1600,67 @@ impl PlaneUpdate<6> for StressUpdate<'_> {
             cpml: [cx, cy, cz],
         } = self;
         let sign = *sign;
-        let [nx, ny, _] = g.n;
         let [_, sy, sz] = g.strides();
-        let nxt = g.padded()[0];
-        let halo = g.halo;
-        let wx = cx.width();
-        let Plane {
-            kz,
-            out: [sxx, syy, szz, sxy, sxz, syz],
-            mut psi_x,
-            mut psi_y,
-            mut psi_z,
-            ..
-        } = plane;
         let surface = *free_surface && kz == 0;
-        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-        for j in 0..ny {
-            let r = g.idx(0, j, kz);
-            st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
-            st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
-            if surface {
-                d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
-            } else {
-                st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
-            }
-            st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
-            st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
-            st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
-            st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
-            st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
-            st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
-
-            if let Some(p) = psi_x.as_deref_mut() {
-                let [p0, p1, p2] = split3(&mut p[3 * wx * j..3 * wx * (j + 1)]);
-                cx.apply_along(d0, p0, Stagger::Node);
-                cx.apply_along(d4, p1, Stagger::Half);
-                cx.apply_along(d6, p2, Stagger::Half);
-            }
-            if let (Some(p), Some(s)) = (psi_y.as_deref_mut(), cy.slab(j)) {
-                let [p0, p1, p2] = split3(&mut p[3 * nx * s..3 * nx * (s + 1)]);
-                cy.apply_across(s, d1, p0, Stagger::Node);
-                cy.apply_across(s, d3, p1, Stagger::Half);
-                cy.apply_across(s, d8, p2, Stagger::Half);
-            }
-            if let (Some(p), Some(s)) = (psi_z.as_deref_mut(), cz.slab(kz)) {
-                let [p0, p1, p2] = split3(&mut p[3 * nx * j..3 * nx * (j + 1)]);
-                cz.apply_across(s, d2, p0, Stagger::Node);
-                cz.apply_across(s, d5, p1, Stagger::Half);
-                cz.apply_across(s, d7, p2, Stagger::Half);
-            }
-
-            let o = (j + halo) * nxt + halo;
-            let lam = &m.lam[r..r + nx];
-            let l2m = &m.l2m[r..r + nx];
-            let (sxx, syy, szz) = (
-                &mut sxx[o..o + nx],
-                &mut syy[o..o + nx],
-                &mut szz[o..o + nx],
-            );
-            if surface {
-                for i in 0..nx {
-                    // With σzz = 0, ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy).
-                    let (l, l2) = (lam[i], l2m[i]);
-                    let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
-                    let (a, b) = (l2 - q, l - q);
-                    sxx[i] += sign * (a * d0[i] + b * d1[i]);
-                    syy[i] += sign * (b * d0[i] + a * d1[i]);
-                    szz[i] = 0.0;
-                }
-            } else {
-                for i in 0..nx {
-                    let (l, l2) = (lam[i], l2m[i]);
-                    sxx[i] += sign * (l2 * d0[i] + l * (d1[i] + d2[i]));
-                    syy[i] += sign * (l2 * d1[i] + l * (d0[i] + d2[i]));
-                    szz[i] += sign * (l2 * d2[i] + l * (d0[i] + d1[i]));
-                }
-            }
-            add_sum2(&mut sxy[o..o + nx], sign, &m.mxy[r..r + nx], d3, d4);
-            add_sum2(&mut sxz[o..o + nx], sign, &m.mxz[r..r + nx], d5, d6);
-            add_sum2(&mut syz[o..o + nx], sign, &m.myz[r..r + nx], d7, d8);
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
+        let r = g.idx(i.start, j, kz);
+        let n = i.len();
+        st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
+        st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
+        if surface {
+            d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
+        } else {
+            st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
         }
+        st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
+        st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
+        st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
+        st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
+        st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
+        st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+
+        if let Some([p0, p1, p2]) = row.x {
+            cx.apply_along(i.clone(), d0, p0, Stagger::Node);
+            cx.apply_along(i.clone(), d4, p1, Stagger::Half);
+            cx.apply_along(i.clone(), d6, p2, Stagger::Half);
+        }
+        if let Some((s, [p0, p1, p2])) = row.y {
+            cy.apply_across(s, d1, p0, Stagger::Node);
+            cy.apply_across(s, d3, p1, Stagger::Half);
+            cy.apply_across(s, d8, p2, Stagger::Half);
+        }
+        if let Some((s, [p0, p1, p2])) = row.z {
+            cz.apply_across(s, d2, p0, Stagger::Node);
+            cz.apply_across(s, d5, p1, Stagger::Half);
+            cz.apply_across(s, d7, p2, Stagger::Half);
+        }
+
+        let [sxx, syy, szz, sxy, sxz, syz] = row.out;
+        let lam = &m.lam[r..r + n];
+        let l2m = &m.l2m[r..r + n];
+        let (sxx, syy, szz) = (&mut sxx[..n], &mut syy[..n], &mut szz[..n]);
+        let (d0, d1, d2) = (&d0[..n], &d1[..n], &d2[..n]);
+        if surface {
+            for i in 0..n {
+                // With σzz = 0, ∂z vz = -λ/(λ+2μ) (∂x vx + ∂y vy).
+                let (l, l2) = (lam[i], l2m[i]);
+                let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
+                let (a, b) = (l2 - q, l - q);
+                sxx[i] += sign * (a * d0[i] + b * d1[i]);
+                syy[i] += sign * (b * d0[i] + a * d1[i]);
+                szz[i] = 0.0;
+            }
+        } else {
+            for i in 0..n {
+                let (l, l2) = (lam[i], l2m[i]);
+                sxx[i] += sign * (l2 * d0[i] + l * (d1[i] + d2[i]));
+                syy[i] += sign * (l2 * d1[i] + l * (d0[i] + d2[i]));
+                szz[i] += sign * (l2 * d2[i] + l * (d0[i] + d1[i]));
+            }
+        }
+        add_sum2(sxy, sign, &m.mxy[r..r + n], d3, d4);
+        add_sum2(sxz, sign, &m.mxz[r..r + n], d5, d6);
+        add_sum2(syz, sign, &m.myz[r..r + n], d7, d8);
     }
 }
 
@@ -1551,9 +1674,9 @@ struct StrainRate<'a> {
     st: &'a Stencil,
 }
 
-impl PlaneUpdate<6> for StrainRate<'_> {
+impl Update<6> for StrainRate<'_> {
     #[inline(always)]
-    fn plane(&self, rows: &mut Rows, plane: Plane<'_, 6>) {
+    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, kz: usize, row: RowOut<'_, 6>) {
         let Self {
             g,
             ih,
@@ -1561,37 +1684,32 @@ impl PlaneUpdate<6> for StrainRate<'_> {
             v: [vx, vy, vz],
             st,
         } = self;
-        let [nx, ny, _] = g.n;
         let [_, sy, sz] = g.strides();
-        let nxt = g.padded()[0];
-        let halo = g.halo;
-        let kz = plane.kz;
-        let [exx, eyy, ezz, exy, exz, eyz] = plane.out;
-        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut rows.d;
-        for j in 0..ny {
-            let r = g.idx(0, j, kz);
-            let o = (j + halo) * nxt + halo;
-            st.backward(d0, vx, r, 1, ih[0]);
-            st.backward(d1, vy, r, sy, ih[1]);
-            if *free_surface && kz == 0 {
-                d2.fill(0.0);
-            } else {
-                st.backward(d2, vz, r, sz, ih[2]);
-            }
-            st.forward(d3, vx, r, sy, ih[1]);
-            st.forward(d4, vy, r, 1, ih[0]);
-            st.forward(d5, vx, r, sz, ih[2]);
-            st.forward(d6, vz, r, 1, ih[0]);
-            st.forward(d7, vy, r, sz, ih[2]);
-            st.forward(d8, vz, r, sy, ih[1]);
-            exx[o..o + nx].copy_from_slice(d0);
-            eyy[o..o + nx].copy_from_slice(d1);
-            ezz[o..o + nx].copy_from_slice(d2);
-            for i in 0..nx {
-                exy[o + i] = d3[i] + d4[i];
-                exz[o + i] = d5[i] + d6[i];
-                eyz[o + i] = d7[i] + d8[i];
-            }
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
+        let r = g.idx(i.start, j, kz);
+        let n = i.len();
+        st.backward(d0, vx, r, 1, ih[0]);
+        st.backward(d1, vy, r, sy, ih[1]);
+        if *free_surface && kz == 0 {
+            d2.fill(0.0);
+        } else {
+            st.backward(d2, vz, r, sz, ih[2]);
+        }
+        st.forward(d3, vx, r, sy, ih[1]);
+        st.forward(d4, vy, r, 1, ih[0]);
+        st.forward(d5, vx, r, sz, ih[2]);
+        st.forward(d6, vz, r, 1, ih[0]);
+        st.forward(d7, vy, r, sz, ih[2]);
+        st.forward(d8, vz, r, sy, ih[1]);
+        let [exx, eyy, ezz, exy, exz, eyz] = row.out;
+        exx.copy_from_slice(d0);
+        eyy.copy_from_slice(d1);
+        ezz.copy_from_slice(d2);
+        let (exy, exz, eyz) = (&mut exy[..n], &mut exz[..n], &mut eyz[..n]);
+        for i in 0..n {
+            exy[i] = d3[i] + d4[i];
+            exz[i] = d5[i] + d6[i];
+            eyz[i] = d7[i] + d8[i];
         }
     }
 }
@@ -1779,27 +1897,66 @@ mod tests {
         assert_eq!(s.stagger_weights(0, 2, 1.0).len(), 4);
     }
 
+    /// The blocks tile the interior, and the rows they hand out cover every interior value
+    /// of the output arrays and every value of the CPML memory exactly once, whatever their
+    /// size: what makes `Outputs::row` sound.
     #[test]
-    fn splits_every_plane_once() {
-        let g = Grid::new([9, 8, 12], [1.0; 3]);
+    fn blocks_hand_out_every_value_once() {
+        let g = Grid::new([19, 11, 13], [1.0; 3]);
+        let [nx, ny, nz] = g.n;
         let cpml: [CpmlAxis; 3] = std::array::from_fn(|a| {
             CpmlAxis::new(g.n[a], if a == 2 { 0 } else { 3 }, 3, 1.0, 1e-3, &pml())
         });
-        let mut a = vec![0.0; g.padded_len()];
-        let mut psi = [
-            vec![0.0; 12 * 8 * 3 * 6],
-            vec![0.0; 12 * 6 * 3 * 9],
-            vec![0.0; 3 * 8 * 3 * 9],
-        ];
-        let p = planes(&g, [&mut a], &mut psi, &cpml);
-        assert_eq!(p.len(), 12);
-        assert!(p.iter().all(|p| p.psi_x.is_some() && p.psi_y.is_some()));
-        let with_z: Vec<usize> = p
-            .iter()
-            .filter(|p| p.psi_z.is_some())
-            .map(|p| p.kz)
-            .collect();
-        assert_eq!(with_z, vec![9, 10, 11]);
+        for size in [
+            [19, 11, 1],
+            [5, 4, 3],
+            [8, 11, 13],
+            [1, 1, 1],
+            [100, 100, 100],
+        ] {
+            let mut a = vec![0.0f32; g.padded_len()];
+            let mut b = a.clone();
+            let mut psi = [
+                vec![0.0; nz * ny * 3 * 6],
+                vec![0.0; nz * 6 * 3 * nx],
+                vec![0.0; 3 * ny * 3 * nx],
+            ];
+            let outputs = Outputs::new([&mut a, &mut b], &mut psi);
+            for block in blocks(&g, size) {
+                let sizes = [&block.i, &block.j, &block.k].map(Range::len);
+                assert!(
+                    (0..3).all(|a| sizes[a] >= 1 && sizes[a] <= size[a]),
+                    "{block:?}"
+                );
+                for k in block.k.clone() {
+                    for j in block.j.clone() {
+                        // SAFETY: one row at a time, in one thread.
+                        let row = unsafe { outputs.row(&g, &cpml, block.i.clone(), j, k) };
+                        let y = row.y.into_iter().flat_map(|(_, t)| t);
+                        let z = row.z.into_iter().flat_map(|(_, t)| t);
+                        let parts = row.out.into_iter().chain(row.x.into_iter().flatten());
+                        for part in parts.chain(y).chain(z) {
+                            part.iter_mut().for_each(|v| *v += 1.0);
+                        }
+                    }
+                }
+            }
+            for v in [&a, &b] {
+                let interior = |p: usize| {
+                    let (i, j, k) = (
+                        p % g.padded()[0],
+                        p / g.padded()[0] % g.padded()[1],
+                        p / g.plane_len(),
+                    );
+                    [i, j, k]
+                        .iter()
+                        .zip(g.n)
+                        .all(|(&x, n)| x >= g.halo && x < g.halo + n)
+                };
+                assert!((0..v.len()).all(|p| v[p] == if interior(p) { 1.0 } else { 0.0 }));
+            }
+            assert!(psi.iter().flatten().all(|&v| v == 1.0), "{size:?}");
+        }
     }
 
     fn rel(a: f32, b: f64) -> bool {
@@ -1923,13 +2080,11 @@ mod tests {
         assert_eq!(s.at_rest().peak_velocity(), 0.0);
     }
 
-    /// The AVX2 loops do the plain loops' arithmetic eight values at a time (crate::simd), so
-    /// a run with a free surface, layers with their sponge, a force and a moment between nodes,
-    /// its strain rates and its steps back all come out the same bit for bit. Rows of 21 nodes
-    /// leave a remainder after the vectors. Without AVX2 there is nothing to compare, and the
-    /// plain loops run alone.
-    #[test]
-    fn the_avx2_loops_step_as_the_plain_ones_bit_for_bit() {
+    /// A run with a free surface over two media, layers with their sponge, a force and a
+    /// moment between nodes, with the update loops `kernels` names and the nodes split into
+    /// blocks of `size` (by default as the solver splits them): every value of its state, its
+    /// strain rates and its state after stepping back again, as bits.
+    fn bits_of_a_run(kernels: Kernels, size: Option<[usize; 3]>) -> Vec<Vec<u32>> {
         let g = Grid::new([21, 19, 17], [10.0; 3]).with_halo(4);
         let mut model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
         for n in 9 * 21 * 19..g.interior_len() {
@@ -1940,54 +2095,73 @@ mod tests {
             ..pml()
         };
         let steps = 40;
-        let run = |kernels: Kernels| {
-            let mut s = Solver::new(model.clone(), 5e-4, 5, true, &pml)
-                .with_stencil(Stencil::taylor(8).unwrap());
-            assert_eq!(s.set_kernels(kernels), kernels);
-            let force = s.receiver_op(Component::Vz, [10.3, 9.0, 2.6]);
-            let moment = s.receiver_op(Component::P, [9.0, 8.5, 0.0]);
-            let wavelet = |t: f64| (t * 400.0).sin() as f32 * 1e3;
-            let band = Band::new(&g, &s.interior(), true, s.stencil.half_length());
-            let len = band.len();
-            let mut records = vec![0.0; steps * len];
-            for n in 0..steps {
-                band.save(&s.fields, &mut records[n * len..(n + 1) * len]);
-                s.step_with(
-                    |f, t| force.inject(f, wavelet(t)),
-                    |f, t| moment.inject(f, wavelet(t)),
-                );
-            }
-            let state = s.state();
-            let mut strain: [Vec<f32>; 6] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
-            s.strain_rate(s.fields.velocities(), &mut strain);
-            for n in (0..steps).rev() {
-                s.step_back_with(
-                    &band,
-                    &records[n * len..(n + 1) * len],
-                    |f, t| force.inject(f, -wavelet(t)),
-                    |f, t| moment.inject(f, -wavelet(t)),
-                );
-            }
-            let arrays = state.fields.arrays().into_iter().chain(&state.psi_v);
-            let arrays = arrays.chain(&state.psi_s).chain(&strain);
-            let bits: Vec<Vec<u32>> = arrays
-                .chain(s.fields.arrays())
-                .map(|a| a.iter().map(|x| x.to_bits()).collect())
-                .collect();
-            (
-                bits,
-                state.fields.vz.iter().fold(0.0f32, |m, v| m.max(v.abs())),
-            )
-        };
-        let (plain, peak) = run(Kernels::Plain);
-        assert!(peak > 0.0);
-        if !Kernels::Avx2.available() {
-            return;
+        let mut s =
+            Solver::new(model, 5e-4, 5, true, &pml).with_stencil(Stencil::taylor(8).unwrap());
+        assert_eq!(s.set_kernels(kernels), kernels);
+        if let Some(size) = size {
+            s.blocks = blocks(&g, size);
         }
-        let (avx2, _) = run(Kernels::Avx2);
-        assert_eq!(plain.len(), avx2.len());
-        for (a, (p, v)) in plain.iter().zip(&avx2).enumerate() {
-            assert!(p == v, "array {a} differs");
+        let force = s.receiver_op(Component::Vz, [10.3, 9.0, 2.6]);
+        let moment = s.receiver_op(Component::P, [9.0, 8.5, 0.0]);
+        let wavelet = |t: f64| (t * 400.0).sin() as f32 * 1e3;
+        let band = Band::new(&g, &s.interior(), true, s.stencil.half_length());
+        let len = band.len();
+        let mut records = vec![0.0; steps * len];
+        for n in 0..steps {
+            band.save(&s.fields, &mut records[n * len..(n + 1) * len]);
+            s.step_with(
+                |f, t| force.inject(f, wavelet(t)),
+                |f, t| moment.inject(f, wavelet(t)),
+            );
+        }
+        let state = s.state();
+        assert!(state.fields.vz.iter().any(|&v| v != 0.0));
+        let mut strain: [Vec<f32>; 6] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
+        s.strain_rate(s.fields.velocities(), &mut strain);
+        for n in (0..steps).rev() {
+            s.step_back_with(
+                &band,
+                &records[n * len..(n + 1) * len],
+                |f, t| force.inject(f, -wavelet(t)),
+                |f, t| moment.inject(f, -wavelet(t)),
+            );
+        }
+        let arrays = state.fields.arrays().into_iter().chain(&state.psi_v);
+        let arrays = arrays.chain(&state.psi_s).chain(&strain);
+        arrays
+            .chain(s.fields.arrays())
+            .map(|a| a.iter().map(|x| x.to_bits()).collect())
+            .collect()
+    }
+
+    /// The AVX2 loops do the plain loops' arithmetic eight values at a time (crate::simd), so
+    /// they step, take strain rates and step back to the same values bit for bit; rows of 21
+    /// nodes leave a remainder after the vectors. Without AVX2 there is nothing to compare,
+    /// and the plain loops run alone.
+    #[test]
+    fn the_avx2_loops_step_as_the_plain_ones_bit_for_bit() {
+        let plain = bits_of_a_run(Kernels::Plain, None);
+        if Kernels::Avx2.available() {
+            let avx2 = bits_of_a_run(Kernels::Avx2, None);
+            assert_eq!(plain.len(), avx2.len());
+            for (a, (p, v)) in plain.iter().zip(&avx2).enumerate() {
+                assert!(p == v, "array {a} differs");
+            }
+        }
+    }
+
+    /// However the nodes are split into blocks, every node's arithmetic is the same, so the
+    /// results are too, bit for bit: a block per plane (as the solver split them before), per
+    /// node, uneven ones, and one for the whole grid.
+    #[test]
+    fn any_split_into_blocks_steps_the_same_bit_for_bit() {
+        let kernels = Kernels::chosen();
+        let reference = bits_of_a_run(kernels, Some([21, 19, 1]));
+        for size in [[1, 1, 1], [5, 4, 3], [8, 19, 17], [21, 2, 6], [64, 64, 64]] {
+            let run = bits_of_a_run(kernels, Some(size));
+            for (a, (r, v)) in reference.iter().zip(&run).enumerate() {
+                assert!(r == v, "{size:?}: array {a} differs");
+            }
         }
     }
 
