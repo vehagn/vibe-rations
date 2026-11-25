@@ -1578,9 +1578,10 @@ fn predicted_limits(case: &Case, frequencies: &[f64]) -> Vec<Vec<[f64; 2]>> {
         .collect()
 }
 
-/// The frequencies the check measures at: the stages' corners (`FREQUENCY_STAGES`) and the
-/// source's peak frequency, which stands for the unfiltered traces.
-const CHECK_FREQUENCIES: [f64; 3] = [0.6, 1.0, 1.2];
+/// The frequencies the check measures at: the stages' corners (`FREQUENCY_STAGES`), the
+/// source's peak frequency, which stands for the unfiltered traces, and twice that, where the
+/// Ricker's amplitude is a fifth of its peak's (reported, not used).
+const CHECK_FREQUENCIES: [f64; 4] = [0.6, 1.0, 1.2, 2.4];
 
 /// The slow waves' mutes one frequency's `limits` (by shot and side) call for, `mute` the
 /// line, as `[[table]]`s: for each shot with a side cut short, a mute for that shot alone,
@@ -1628,10 +1629,11 @@ fn checked(case: &Case) -> (MuteConfig, Vec<Vec<[Limit; 2]>>) {
 }
 
 /// L2 for five iterations with the slow waves muted only where the check finds them beyond
-/// half a cycle at the source's peak frequency, shot by shot and side by side.
-fn phase_checked_l2(part: &str) -> Case {
+/// half a cycle at `CHECK_FREQUENCIES[f]`, shot by shot and side by side: the source's peak
+/// frequency (2), or twice that (3), nearer the top of the band the unfiltered misfit fits.
+fn phase_checked_l2(part: &str, f: usize) -> Case {
     let (mute, limits) = checked(&Case::part(part, L2));
-    let mutes = phase_mutes("inversion.mute", &mute, &limits[2]);
+    let mutes = phase_mutes("inversion.mute", &mute, &limits[f]);
     println!("the mutes:\n{mutes}");
     Case::part(part, ("iterations = 5", leak(mutes)))
 }
@@ -1713,13 +1715,25 @@ fn phase_check() {
 #[test]
 #[ignore = "a study: `just marmousi2-study central_phase_checked_l2` (about 45 minutes)"]
 fn central_phase_checked_l2() {
-    invert("phase-checked-l2", &phase_checked_l2("central"));
+    invert("phase-checked-l2", &phase_checked_l2("central", 2));
 }
 
 #[test]
 #[ignore = "a study: `just marmousi2-study west_phase_checked_l2` (about 40 minutes)"]
 fn west_phase_checked_l2() {
-    invert("west-phase-checked-l2", &phase_checked_l2("west"));
+    invert("west-phase-checked-l2", &phase_checked_l2("west", 2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study central_phase_checked_l2_at_2f0` (about 90 minutes)"]
+fn central_phase_checked_l2_at_2f0() {
+    invert("phase-checked-l2-at-2f0", &phase_checked_l2("central", 3));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_phase_checked_l2_at_2f0` (about 90 minutes)"]
+fn west_phase_checked_l2_at_2f0() {
+    invert("west-phase-checked-l2-at-2f0", &phase_checked_l2("west", 3));
 }
 
 #[test]
