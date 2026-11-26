@@ -3952,6 +3952,150 @@ copy of `whole-true.toml` with `duration = 0.6`, and `gradient examples/marmousi
 `RAYON_NUM_THREADS=6`. For identity: `just physics` with and without `VIBE_RATIONS_SIMD=off`
 against main's, timings masked, and `cmp` on every output file of the runs above.
 
+## 2026-11-26 — Marmousi2: a start smoothed through its slownesses, the check's split, and a hard seabed
+
+**Question.** In the centre the slow seafloor waves turn $v_s$ below 750 m the wrong way even
+where the phase check keeps them (previous Marmousi2 entry). Three questions, each part-sized:
+does a start smoothed through its slownesses, which keeps vertical traveltimes, bring the
+central seafloor's $v_s$ within 10% of the truth's and stop that (Gate A of the day's plan);
+which of the slow waves the check keeps turn $v_s$ away; and does the survey on the model the
+published elastic inversions use, Poisson's ratio capped at 0.25 [@kohn2012; @jeong2012;
+@cao2022], move $v_s$ towards the truth below 750 m (2026-11-23, "Marmousi2 in the
+literature": if so, the soft seabed is what separates us from them).
+
+**Method.**
+
+- *The slowness start* (`vibe-rations extrude --smooth 250 --slowness`;
+  `examples/marmousi2/convert.sh`'s `25m-*-slowness`). The solid nodes' $1/v_p$ and $1/v_s$
+  are smoothed (the same Gaussian, $\sigma$ = 250 m, over the solid nodes) and inverted
+  back: harmonic means instead of arithmetic ones, so a thin slow layer over faster rock
+  doesn't come out fast. Density is smoothed as before. Gate A (`seafloor_speeds_by_start`):
+  the harmonic mean of $v_s$ over the 250 m below the seafloor within 10% of the truth's on
+  the central part.
+- *The split* (`central_split_by_check`). The central gradient at the smooth start
+  (`iterations = 0`), split as `misfit_by_mute` split it by the line, now by the check's
+  mutes at 1.2 Hz (`phase_mutes`, the slow waves' line at 616 m/s): everything; what the
+  check keeps; the same with the sides it passes whole muted too ("whole sides muted"); the
+  check with every side's spare capped at 300 m ("within 300 m"); the plain line. The
+  differences between sets are the gradients of the misfit's parts the bigger set keeps and
+  the smaller removes (`split_by_mutes`). For each, by depth band, the norm of
+  $m_0\,\partial\chi/\partial m$ and the cosine of $-\nabla\chi$ with the true update, and the
+  same divided by the illumination.
+- *The hard-seabed control* (`extrude --max-poisson 0.25`; the parts `central-hard` and
+  `west-hard`). $v_s$ is raised to $v_p\sqrt{(1 - 2\nu)/(2 - 2\nu)} = v_p/\sqrt3$ on each fine
+  sample before the averaging onto the nodes, in the truth and (before smoothing) in the
+  start alike. Five L2 iterations as `l2`, on both parts (`hard_l2`, `west_hard_l2`), and on
+  the central part with the 600 m/s mute (`hard_muted_l2`, as `muted_l2`), each judged
+  against its own (hard) truth.
+- Everything ran on gauss, one study at a time (inversions 4,490–4,590 s, of which about
+  830 s set-up and recording; the split 5,274 s; the check 451 s).
+
+**Results: the slowness start.**
+
+- *Gate A fails, narrowly.* Under the central seafloor the start's harmonic mean $v_s$ is
+  462 m/s against the truth's 414 (+11.4%; the smooth start +18.2%), and the slow waves'
+  delay over 1 km falls from 0.37 s on average (0.80 s at most) to 0.25 s (0.60). The west
+  was already close: +2.7% against +4.0%, 0.06 s against 0.09 s. The check's line from it
+  is 604 m/s in the centre and 676 in the west (616 and 690 from the smooth start), and at
+  1.2 Hz it still cuts a side of every central shot (limits of 300–1,475 m) and two western
+  sides (muted from 1,416 m on shot 1's right and 466 m on shot 3's left), the same two as
+  from the smooth start.
+- *L2 from it fits more and turns $v_s$ away more sharply, and shallower*: 53.2% of the
+  start's misfit left (57.9% from the smooth start); error ratio and cosine by band:
+
+| start | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|
+| slownesses | $v_p$ | 0.940, +0.35 | 0.998, +0.08 | 0.997, +0.08 | 1.000, +0.04 | 1.002, −0.18 |
+| | $v_s$ | 0.950, +0.32 | 1.147, −0.41 | 1.003, +0.04 | 0.997, +0.18 | 0.999, +0.20 |
+| values (`l2`) | $v_p$ | 0.900, +0.44 | 0.994, +0.12 | 1.020, −0.15 | 1.001, −0.02 | 1.003, −0.24 |
+| | $v_s$ | 0.973, +0.25 | 1.095, −0.15 | 1.070, −0.17 | 0.999, +0.04 | 0.999, +0.15 |
+
+  The ratios are each against their own start's error, which is smaller for the slowness
+  start, so they don't compare absolute errors; the cosines do compare directions. The
+  wrong-way part has moved up into 750–1000 m and strengthened there (−0.41 against −0.15),
+  and 1000–1500 m is now neutral. So a start that is less fast under the seafloor moves the
+  problem rather than removing it. Since Gate A failed, the slowness start's check-muted runs
+  were not run.
+
+**Results: the split.** The central gradient at the smooth start (misfit 0.660; $v_x$ 76.7%,
+$v_z$ 23.3%), norm and cosine (divided by the illumination: within 0.05 of these):
+
+| kept | share of the misfit | $v_p$ 750–1000 m | $v_p$ 1000–1500 m | $v_s$ 750–1000 m | $v_s$ 1000–1500 m |
+|---|---|---|---|---|---|
+| everything | 100% | 1.79e-3, +0.04 | 9.43e-4, −0.16 | 9.53e-3, −0.10 | 5.72e-3, −0.19 |
+| the check's mutes | 49.8% | 1.36e-3, +0.26 | 4.52e-4, −0.03 | 4.03e-3, −0.02 | 1.43e-3, −0.11 |
+| … and whole sides muted | 36.7% | 1.30e-3, +0.32 | 4.03e-4, +0.01 | 2.02e-3, +0.08 | 5.43e-4, −0.09 |
+| … spares capped at 300 m | 36.1% | 1.30e-3, +0.32 | 4.07e-4, +0.01 | 2.15e-3, +0.07 | 5.75e-4, −0.09 |
+| the line | 34.3% | 1.30e-3, +0.31 | 3.83e-4, +0.02 | 1.46e-3, +0.09 | 5.09e-4, −0.09 |
+| check less whole sides muted | 13.1% | 3.93e-4, −0.16 | 1.89e-4, −0.08 | 2.85e-3, −0.08 | 1.11e-3, −0.10 |
+| check less 300 m cap | 13.6% | 3.93e-4, −0.16 | 1.85e-4, −0.08 | 2.75e-3, −0.07 | 1.07e-3, −0.10 |
+| 300 m cap less the line | 1.9% | 2.80e-4, +0.05 | 1.45e-4, −0.04 | 1.56e-3, +0.01 | 4.25e-4, −0.01 |
+
+- *What turns the model away is the slow waves beyond 300 m on the sides the check passes
+  whole* (shot 1's left to 1.5 km, shots 0's left and 4's right to 500 m): 13% of the
+  misfit, pointing away for $v_p$ and $v_s$ alike at 750–1500 m. Muting those sides, or
+  capping every spare at 300 m, brings what the check keeps level with the line in every
+  band (cosines within 0.03). The two ways differ by 0.6% of the misfit (the cut sides'
+  spares beyond 300 m, up to 762 m, against the whole sides' first 300 m) and by at most
+  0.01 in cosine.
+- *The slow waves within 300 m are harmless*: the 1.9% the cap keeps and the line removes is
+  neutral below 750 m (cosines within ±0.05).
+- So the check passes, as within half a cycle at every frequency it tries, slow waves whose
+  gradient still points the wrong way. A plausible reading, not tested: at 1.2 Hz a slow
+  wave's sensitivity reaches a few hundred metres under the seafloor; it sees the start's
+  sediments as too fast on average and asks for slower $v_s$ over its whole depth, including
+  below 750 m, where the smooth start, averaging the soft sediments with the rock below, may
+  already be too slow. That is a depth ambiguity, not cycle skipping, and no phase test
+  can see it.
+
+**Results: the hard seabed.** Five L2 iterations against the hard truth (the start's misfit
+0.652 in the centre, 0.275 in the west; every step taken whole at the first trial):
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| central | 34.3% | $v_p$ | 0.870, +0.50 | 0.923, +0.39 | 1.012, +0.00 | 0.999, +0.04 | 1.004, −0.14 |
+| | | $v_s$ | 0.815, +0.63 | 1.039, +0.26 | 1.014, +0.22 | 0.984, +0.18 | 0.995, +0.19 |
+| central, muted | 57.2% | $v_p$ | 0.875, +0.49 | 0.922, +0.40 | 0.996, +0.10 | 1.000, +0.01 | 1.001, −0.04 |
+| | | $v_s$ | 0.808, +0.59 | 0.945, +0.33 | 1.000, +0.09 | 0.994, +0.12 | 0.999, +0.09 |
+| west | 22.6% | $v_p$ | 1.072, +0.03 | 1.057, +0.13 | 1.032, +0.19 | 1.010, −0.11 | 1.012, −0.45 |
+| | | $v_s$ | 1.028, +0.31 | 1.523, +0.36 | 1.243, +0.38 | 1.005, +0.04 | 1.002, −0.05 |
+
+- *Without the soft seabed, $v_s$ moves towards the truth at every depth in the centre*:
+  cosines +0.26 and +0.22 below 750 m, against −0.15 and −0.17 on the real model, and L2
+  fits more (34.3% left against 57.9%). The error ratios below 750 m are still a little
+  above 1 (1.039, 1.014): the update points the right way but is too long for its alignment
+  there. The mute helps on the hard model too (0.945 and 1.000), and costs nothing above
+  750 m.
+- *In the west the ratios below 750 m are large, 1.52 and 1.24, with positive cosines*
+  (+0.36, +0.38): from $r^2 = 1 - 2s\cos\theta + s^2$, the update there is about 1.6 and 1.2
+  times as long as the true update. The hard start's error there is probably small, which
+  makes any misdirected update look large; not checked in absolute terms.
+- So the answer to the literature entry's question is mostly yes: the soft seabed is what
+  turns the central $v_s$ the wrong way below 750 m, and on the published model the same
+  survey and inversion move it the right way, though not yet closer than the start below
+  750 m without a mute.
+
+**Decision.** Gate A failed and none of the day's runs meets G1 (a data-only start and mute
+that keep central $v_s$ at 750–1500 m at or below 1.00 with the west within 0.01 of plain
+L2), so Gate B says no whole-section run yet. Capping the spares at 300 m would reproduce the
+line's gradient in the centre, but it is a fixed offset chosen here on the central part, and
+in the west the slow waves beyond 300 m are what make L2 best; it isn't a recipe. The split
+and the hard-seabed control point the same way: the trouble is a soft layer under the
+seafloor whose error L2 spreads over the slow waves' whole depth. Next, layer stripping by
+depth (Masoni et al. strip by offset and frequency instead [@masoni2016]): `[inversion]
+fixed_below`, a new key, holds the model at and below a depth, so three L2 iterations with only the 250 m under
+the seafloor free (`fixed_below = 750`) can take up the shallow error first, then five with
+everything below 500 m free from that result (`shallow_first_l2`, `west_shallow_first_l2`,
+`slowness_shallow_first_l2`; about two hours each on gauss). If the shallow pass absorbs the
+error, the second should no longer push $v_s$ below 750 m away.
+
+**Reproduce:** `examples/marmousi2/convert.sh` (writes the slowness and hard directories),
+then `just in marmousi2-study <name>` for `seafloor_speeds_by_start` (12 s),
+`slowness_phase_check` (7.5 minutes), `slowness_l2`, `hard_l2`, `west_hard_l2`,
+`hard_muted_l2` (about 75 minutes each on gauss) and `central_split_by_check` (92 minutes);
+`cargo test --release --lib section::`, `--test cli` and `--lib frees_only` for the new
+options' tests.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -3995,14 +4139,17 @@ against main's, timings masked, and `cmp` on every output file of the runs above
   waves are within half a cycle (2026-11-25, "Marmousi2: the slow-wave phase check") tells
   the parts apart, and the mutes it decides keep the west's L2 result, but in the centre
   recover only a third to a half of the plain mute's gain for $v_s$ below 750 m: what turns $v_s$ away
-  there is not only cycle skipping. Not split further. Not written: the phase misfit with
+  there is not only cycle skipping. Split by the check's mutes (2026-11-26, "Marmousi2: a
+  start smoothed through its slownesses, the check's split, and a hard seabed"), it is the
+  slow waves beyond 300 m on the sides the check passes whole; a start smoothed through its
+  slownesses (+11.4% under the central seafloor against +18.2%) moves the wrong-way update
+  up rather than removing it; with Poisson's ratio capped at 0.25, as in the literature,
+  $v_s$ moves the right way at every depth. Layer stripping by depth (`fixed_below`) is
+  written, not run. Not written: the phase misfit with
   the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,
-  which stacks and f-k spectra within 1 km couldn't do; and a better shallow start. Nor
-  the comparison with the literature (2026-11-23, "Marmousi2 in the literature"): after the
-  phase check, the same survey with Poisson's ratio capped at 0.25, as every published
-  elastic Marmousi2 inversion read in full did.
+  which stacks and f-k spectra within 1 km couldn't do.
 - **Free surface for long stencils.** Replace stress imaging with a formulation of matching
   order [@mittet2002; @kristek2002], e.g. staggered summation-by-parts closures
   [@oreilly2017], which keep the exact discrete adjoint. Measured on Lamb's problem
