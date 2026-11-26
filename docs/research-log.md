@@ -4096,6 +4096,80 @@ then `just in marmousi2-study <name>` for `seafloor_speeds_by_start` (12 s),
 `cargo test --release --lib section::`, `--test cli` and `--lib frees_only` for the new
 options' tests.
 
+## 2026-11-26 — Marmousi2: layer stripping by depth
+
+**Question.** The previous entry read the central part's wrong-way $v_s$ update below 750 m as
+L2 spreading the error of the too fast sediments under the seafloor over the slow waves' whole
+depth. If the top 250 m under the seafloor is inverted first, alone, does it take up that
+error, and does an inversion of everything from there then leave $v_s$ below 750 m alone
+(G1: error ratio at most 1.00 at 750–1500 m in the centre, the west within 0.01 of plain
+L2)?
+
+**Method.** `[inversion] fixed_below` (new: the model is held at and below that depth, as
+`fixed_above` holds it above): three L2 iterations with only 500–725 m free (`fixed_below =
+750`, 10 of the 105 free depths, 37,620 unknowns), then five L2 iterations with everything
+below 500 m free (395,010 unknowns) from that result, the misfit otherwise as `l2`
+(`shallow_first`: `shallow_first_l2` and `west_shallow_first_l2` from the start smoothed over
+250 m, `slowness_shallow_first_l2` from the one smoothed through its slownesses). Judged
+after each part and, at the end, against the original start; the misfit reductions multiply
+(the second part's is against its own start). On gauss, one at a time: 7,540–7,720 s each.
+Masoni et al. strip by offset and frequency instead [@masoni2016]; this is the simplest
+version by depth.
+
+**Results.** Error ratio and cosine with the true update, against the original start, beside
+five iterations of L2 alone (previous entries):
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| central, shallow 3 | 81.2% | $v_p$ | 0.936, +0.42 | 1 | 1 | 1 | 1 |
+| | | $v_s$ | 0.990, +0.15 | 1 | 1 | 1 | 1 |
+| central, shallow 3 then all 5 | 54.4% | $v_p$ | 0.891, +0.45 | 0.988, +0.16 | 1.018, −0.13 | 1.001, −0.02 | 1.003, −0.24 |
+| | | $v_s$ | 0.975, +0.26 | 1.092, −0.17 | 1.066, −0.16 | 0.999, +0.06 | 0.999, +0.15 |
+| central, L2 5 | 57.9% | $v_p$ | 0.900, +0.44 | 0.994, +0.12 | 1.020, −0.15 | 1.001, −0.02 | 1.003, −0.24 |
+| | | $v_s$ | 0.973, +0.25 | 1.095, −0.15 | 1.070, −0.17 | 0.999, +0.04 | 0.999, +0.15 |
+| west, shallow 3 | 45.5% | $v_p$ | 1.038, +0.06 | 1 | 1 | 1 | 1 |
+| | | $v_s$ | 0.793, +0.65 | 1 | 1 | 1 | 1 |
+| west, shallow 3 then all 5 | 11.0% | $v_p$ | 1.474, +0.04 | 1.133, +0.21 | 1.022, +0.21 | 0.998, +0.07 | 1.008, −0.33 |
+| | | $v_s$ | 0.689, +0.73 | 1.070, +0.38 | 0.927, +0.38 | 0.999, +0.06 | 0.997, +0.29 |
+| west, L2 5 | 17.3% | $v_p$ | 1.227, +0.05 | 0.988, +0.26 | 0.986, +0.19 | 0.999, +0.06 | 1.004, −0.33 |
+| | | $v_s$ | 0.714, +0.70 | 1.018, +0.31 | 0.935, +0.36 | 1.000, +0.05 | 0.998, +0.28 |
+| slowness start, shallow 3 | 81.0% | $v_p$ | 0.964, +0.33 | 1 | 1 | 1 | 1 |
+| | | $v_s$ | 0.972, +0.24 | 1 | 1 | 1 | 1 |
+| slowness start, shallow 3 then all 5 | 40.8% | $v_p$ | 0.931, +0.37 | 0.993, +0.13 | 0.995, +0.10 | 0.999, +0.05 | 1.002, −0.19 |
+| | | $v_s$ | 0.936, +0.38 | 1.195, −0.40 | 1.003, +0.07 | 0.996, +0.17 | 0.999, +0.21 |
+| slowness start, L2 5 | 53.2% | $v_p$ | 0.940, +0.35 | 0.998, +0.08 | 0.997, +0.08 | 1.000, +0.04 | 1.002, −0.18 |
+| | | $v_s$ | 0.950, +0.32 | 1.147, −0.41 | 1.003, +0.04 | 0.997, +0.18 | 0.999, +0.20 |
+
+- *In the centre the shallow part alone barely moves $v_s$* (0.990, cosine +0.15: an update a
+  tenth to a fifth as long as the true one), though it fits a fifth of the misfit, mostly
+  through $v_p$ (0.936). From the slowness start likewise (0.972). So inverted alone, the
+  250 m under the seafloor doesn't take up its own $v_s$ error from these data.
+- *The full inversion afterwards ends where L2 alone does*: within 0.01 of `l2` in every band
+  in the centre ($v_s$ 1.092 and 1.066 below 750 m, against 1.095 and 1.070), with three more
+  iterations and 54.4% of the misfit left against 57.9%. From the slowness start it turns
+  $v_s$ at 750–1000 m further away (1.195 against 1.147).
+- *In the west, where the shallow part alone does recover $v_s$* (0.793, +0.65), the result
+  is mixed: $v_s$ better at the top and at 1000–1500 m (0.689, 0.927 against 0.714, 0.935) but
+  worse at 750–1000 m (1.070 against 1.018), $v_p$ much worse above 1 km (1.474, 1.133
+  against 1.227, 0.988), with 11.0% of the misfit left against 17.3%.
+
+**Decision.** Layer stripping by depth fails G1 on both counts and is not the recipe: it
+changes nothing in the centre and costs the west $v_p$. It also qualifies the previous
+entry's reading. The test assumed that the shallow part, held alone, would take up its own
+error; in the centre it doesn't (0.990), so the deeper update isn't simply the shallow error
+put in the wrong place, which a depth constraint could correct. Where the start predicts the
+slow waves within half a cycle (the west), the shallow part alone does recover its $v_s$.
+That points back to the start: in the centre the data can't fix the sediments' $v_s$ from this start, with or without
+depth constraints, and without the soft sediments (the hard-seabed control) the same
+inversion moves the right way. The whole section stays unrun. Next, a better shallow start
+from the data (the slow waves' dispersion inverted for $v_s$ under the seafloor, the
+literature note's "Scholte-wave dispersion first"), or the soft-seabed remedies of the
+literature (staging $v_p$ before $v_s$, $v_z$ before $v_x$); the plan's step 8 meanwhile.
+
+**Reproduce:** `just in marmousi2-study shallow_first_l2` (and `west_shallow_first_l2`,
+`slowness_shallow_first_l2`; about 2.1 hours each on gauss), after `convert.sh`;
+`cargo test --release --lib frees_only` for `fixed_below`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -4144,8 +4218,9 @@ options' tests.
   slow waves beyond 300 m on the sides the check passes whole; a start smoothed through its
   slownesses (+11.4% under the central seafloor against +18.2%) moves the wrong-way update
   up rather than removing it; with Poisson's ratio capped at 0.25, as in the literature,
-  $v_s$ moves the right way at every depth. Layer stripping by depth (`fixed_below`) is
-  written, not run. Not written: the phase misfit with
+  $v_s$ moves the right way at every depth. Layer stripping by depth (`fixed_below`; 2026-11-26,
+  "Marmousi2: layer stripping by depth") ends where L2 alone does in the centre, whose top
+  250 m inverted alone barely moves, and costs the west $v_p$. Not written: the phase misfit with
   the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,

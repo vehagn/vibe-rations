@@ -387,7 +387,8 @@ doesn't show.
   ratio capped at 0.25 (`extrude --max-poisson 0.25`, the model the published elastic
   inversions use) $v_s$ moves the right way at every depth, so the soft seabed is the
   difference. `[inversion] fixed_below` holds the model at and below a depth, for layer
-  stripping. Past the offset where the line meets the 3.5 s record's
+  stripping; the top 250 m inverted first, alone, barely moves in the centre, and the
+  inversion after it ends where L2 alone does (the log's "layer stripping by depth"). Past the offset where the line meets the 3.5 s record's
   end (about 1.6–1.8 km) the window is empty and the check judges nothing.
   Judge a variant by the error ratio and the cosine with the true update by depth band, not by
   the misfit, and on both parts, within four nodes of the receivers' plane (`ACROSS`: over the
