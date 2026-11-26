@@ -711,6 +711,10 @@ pub struct InversionConfig {
     pub balance: bool,
     /// Hold the model fixed above this depth in metres, e.g. a known water layer.
     pub fixed_above: Option<f64>,
+    /// Hold the model fixed at and below this depth in metres: an inversion of the shallow
+    /// part alone, as layer stripping starts, so that what the data say about it can't be
+    /// put deeper.
+    pub fixed_below: Option<f64>,
     /// Divide the gradient by the forward wavefield's energy at each node (a source-side
     /// pseudo-Hessian), so that poorly lit nodes aren't starved and the sources' surroundings
     /// don't take every update.
