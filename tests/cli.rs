@@ -559,6 +559,34 @@ wavelet = { kind = "ricker", frequency = 50.0 }
     let out = vibe(&["check", config.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("vs 0–"), "{}", stderr(&out));
+    // Smoothed through the slownesses, with Poisson's ratio capped: the cap raises the S
+    // speeds below vp/√3, 1443 m/s (the left two thirds), to it, and leaves the faster ones.
+    let hard = path("hard");
+    let mut args = common.to_vec();
+    args.extend([
+        "--speed-scale",
+        "1000",
+        "--rho-scale",
+        "1000",
+        "--smooth",
+        "4",
+        "--slowness",
+        "--max-poisson",
+        "0.25",
+        "--out",
+        &hard,
+    ]);
+    let out = vibe(&args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let (_, speeds) = vibe_rations::npy::read(&dir.join("hard/vs.npy")).unwrap();
+    let solid: Vec<f32> = speeds.into_iter().filter(|&v| v > 0.0).collect();
+    let cap = 2500.0 / 3f32.sqrt();
+    assert!((solid[0] - cap).abs() < 0.1, "{}", solid[0]);
+    assert!(solid.iter().all(|&v| v > cap - 0.1 && v < 1600.0));
+    // Slownesses need a smoothing length.
+    let mut args = common.to_vec();
+    args.extend(["--slowness", "--out", &hard]);
+    assert!(!vibe(&args).status.success());
     // Two numbers or none.
     let mut args = common.to_vec();
     args.extend(["--x", "10", "--out", &model]);

@@ -478,8 +478,10 @@ threads of an M1 Max), and `examples/marmousi2-central.toml`, its central 6 km a
 `extrude` reads a 2D section as SEG-Y (IBM or IEEE floats), averages it over each node's
 cell (density arithmetically, $\rho v_p^2$ and $\rho v_s^2$ harmonically, the long-wave
 averages across fine layers of Backus 1962; a node is fluid when most of its cell is),
-optionally smooths the solid part for a starting model, and writes sections, (nz, nx), which
-a run repeats along $y$: a 2.5D model through which the waves spread in 3D. `examples/marmousi2/` has the whole section
+optionally smooths the solid part for a starting model (its speeds, or with `--slowness` its
+slownesses, which keeps a thin slow layer slow), optionally caps Poisson's ratio first
+(`--max-poisson 0.25`, as the published elastic inversions of Marmousi2 did), and writes
+sections, (nz, nx), which a run repeats along $y$: a 2.5D model through which the waves spread in 3D. `examples/marmousi2/` has the whole section
 at 25 m (`marmousi2.toml`: an air gun in the water, ocean-bottom nodes along the seafloor)
 and its central 6 km for gradients and inversion (`central-true.toml`, the model as it is,
 and `central.toml`, the start: $v_p$ and $v_s$ smoothed over 250 m). The sediments under

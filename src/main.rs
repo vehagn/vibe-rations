@@ -160,6 +160,14 @@ enum Command {
         /// the fluid as it is: a starting model for an inversion.
         #[arg(long, value_name = "METRES")]
         smooth: Option<f64>,
+        /// With --smooth, smooth the slownesses 1/vp and 1/vs instead of the speeds (harmonic
+        /// means), which keeps the time waves take through thin slow layers.
+        #[arg(long, requires = "smooth")]
+        slowness: bool,
+        /// Raise vs wherever Poisson's ratio exceeds this (vs = vp/√3 at 0.25), sample by
+        /// sample before averaging; fluids stay fluid.
+        #[arg(long, value_name = "RATIO")]
+        max_poisson: Option<f64>,
         /// The directory to write the model files into.
         #[arg(long)]
         out: PathBuf,
@@ -460,6 +468,8 @@ fn run() -> Result<()> {
             speed_scale,
             rho_scale,
             smooth,
+            slowness,
+            max_poisson,
             out,
         } => {
             let pair = |v: Option<Vec<f64>>, name: &str| -> Result<Option<[f64; 2]>> {
@@ -478,6 +488,8 @@ fn run() -> Result<()> {
                 speed_scale,
                 rho_scale,
                 smooth,
+                slowness,
+                max_poisson,
             };
             let [vp, vs, rho] = [&vp, &vs, &rho].map(|p| section::read_segy(p));
             let m = section::extrude(&vp?, &vs?, &rho?, &e)?;
