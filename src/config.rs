@@ -611,7 +611,8 @@ pub enum MuteShape {
 /// t = x / velocity + delay, multiplies the other by `weight`, and goes from one to the other
 /// beginning at the line, over `taper` seconds with a half cosine or with an exponential of
 /// that time constant (`shape`). A mute keeping what comes after one line and another keeping
-/// what comes before a later one make a window.
+/// what comes before a later one make a window. It may act on one shot alone (`shot`) and
+/// spare a range of offsets (`spare`), which is still a fixed weight by time and receiver.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MuteConfig {
@@ -635,6 +636,16 @@ pub struct MuteConfig {
     /// `cosine` (the default) or `exponential`.
     #[serde(default)]
     pub shape: MuteShape,
+    /// Only this shot's traces, counting the `[[source]]`s from 0; every shot's by default.
+    pub shot: Option<usize>,
+    /// The signed offsets [a, b] (m, negative towards −x) the mute spares: within them it
+    /// takes nothing, and beyond them it comes in over `spare_taper`, so that it can remove
+    /// an arrival only where the data show the start predicts it too badly to fit.
+    pub spare: Option<[f64; 2]>,
+    /// How far beyond `spare`'s ends the mute takes to come in fully, m, with a half cosine:
+    /// 0 (the default) brings it in at once.
+    #[serde(default)]
+    pub spare_taper: f64,
 }
 
 /// One stage of an inversion: its iterations, on traces low-pass filtered up to

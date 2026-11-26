@@ -368,8 +368,16 @@ doesn't show.
   start's $v_s$ under the seafloor is within 4% of the truth's, against 18% fast in the centre
   (`seafloor_speeds`), so the slow waves stay within half a cycle. L2 alone recovers $v_s$
   best, and the mute makes $v_p$ worse near the seafloor. The slow waves help where they
-  aren't cycle-skipped and hurt where they are. So a mute is a per-dataset decision, and
-  nothing tests it from the data yet: don't make one a default.
+  aren't cycle-skipped and hurt where they are. So a mute is a per-dataset decision: don't make one a default.
+  **The slow-wave phase check** (`phase_check`, `phase_mutes`; the log's 2026-11-25 entry)
+  tests it from the data: the phase of the observed against the start's traces after the
+  slow waves' line, unwrapped along offset per shot and side, summed over components with the
+  balancing weights ($v_x$ alone is meaningless near the source). It tells the parts apart,
+  and its mutes (`[[inversion.mute]]` `shot`, `spare`, `spare_taper`: a fixed weight, so the
+  adjoint stays exact) keep the west's L2 result; in the centre they recover only a third to
+  a half of the plain mute's gain for $v_s$ below 750 m, at 1.2 or 2.4 Hz alike, so half a
+  cycle is necessary, not sufficient. Past the offset where the line meets the 3.5 s record's
+  end (about 1.6–1.8 km) the window is empty and the check judges nothing.
   Judge a variant by the error ratio and the cosine with the true update by depth band, not by
   the misfit, and on both parts, within four nodes of the receivers' plane (`ACROSS`: over the
   whole section's 5 km across, which one line of shots barely sees, every number is within 1%

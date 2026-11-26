@@ -18,6 +18,12 @@
 //!   `west_misfit_by_mute`: the western 6 km (`Case::part`), held out from the choices made
 //!   on the central part, with the slow waves' mute worked out from its own start
 //!   (`slow_waves_mute`).
+//! - `phase_check`: whether the start predicts the slow waves within half a cycle, from the
+//!   data: the phase of the observed traces against the start's after the slow waves' line,
+//!   unwrapped along offset shot by shot and side by side, at the stages' frequencies, next
+//!   to what the truth predicts. `central_phase_checked_l2`, `west_phase_checked_l2`,
+//!   `central_phase_checked_stages`, `west_phase_checked_stages`: inversions muting the slow
+//!   waves only beyond the offsets it passes (`phase_mutes`).
 //! - `whole_by_region`: the whole-section inversion's result (`examples/marmousi2/whole.toml`)
 //!   in 1 km windows along x, next to how far its start's seafloor vs is from the truth's.
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
@@ -1286,6 +1292,460 @@ fn mute_lines() {
         let (velocity, mute) = slow_waves_mute(&Case::part(part, L2), 425.0);
         println!("{part}: {velocity:.0} m/s\n{mute}");
     }
+}
+
+/// Which side of its shot a receiver lies on: towards smaller x, or larger (the shot's own
+/// column counts on both).
+const SIDES: [&str; 2] = ["left", "right"];
+
+/// How far along one side of a shot the slow-wave phase check lets the slow waves be kept.
+#[derive(Clone, Copy, Debug)]
+struct Limit {
+    /// The offset (m) out to which the phase difference grows continuously from the shot and
+    /// stays within ±π (interpolated to where it reaches π).
+    offset: f64,
+    /// The furthest offset on that side whose window holds anything.
+    furthest: f64,
+    /// Why it ends: `π` (reached), `jump` (more than π/2 between neighbours 25 m apart, which a
+    /// phase drifting with offset never does), `start` (beyond π/2 at the shot already) or
+    /// `end` (every offset whose window holds anything).
+    why: &'static str,
+}
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if self.why == "end" {
+            write!(f, "{:>5.0} all ", self.offset)
+        } else {
+            write!(f, "{:>5.0} {:<4}", self.offset, self.why)
+        }
+    }
+}
+
+/// `phase` wrapped into (-π, π].
+fn wrap(phase: f64) -> f64 {
+    let p = (phase + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI)
+        - std::f64::consts::PI;
+    if p <= -std::f64::consts::PI {
+        p + 2.0 * std::f64::consts::PI
+    } else {
+        p
+    }
+}
+
+/// Unwraps `phases` (wrapped, one per receiver, nearest the shot first, at `offsets`) along
+/// offset and finds where the unwrapped phase stops being continuous or reaches ±π: the check's
+/// limit for one side of a shot, and the unwrapped phases up to it.
+fn continuous_limit(offsets: &[f64], phases: &[f64]) -> (Limit, Vec<f64>) {
+    let pi = std::f64::consts::PI;
+    let furthest = *offsets.last().unwrap();
+    let mut unwrapped = vec![phases[0]];
+    if phases[0].abs() > 0.5 * pi {
+        let limit = Limit {
+            offset: offsets[0],
+            furthest,
+            why: "start",
+        };
+        return (limit, unwrapped);
+    }
+    for k in 1..offsets.len() {
+        let step = wrap(phases[k] - phases[k - 1]);
+        let last = unwrapped[k - 1];
+        if step.abs() > 0.5 * pi {
+            let limit = Limit {
+                offset: offsets[k - 1],
+                furthest,
+                why: "jump",
+            };
+            return (limit, unwrapped);
+        }
+        let next = last + step;
+        if next.abs() >= pi {
+            let between = (pi - last.abs()) / (next.abs() - last.abs());
+            let limit = Limit {
+                offset: offsets[k - 1] + between * (offsets[k] - offsets[k - 1]),
+                furthest,
+                why: "π",
+            };
+            return (limit, unwrapped);
+        }
+        unwrapped.push(next);
+    }
+    let limit = Limit {
+        offset: furthest,
+        furthest,
+        why: "end",
+    };
+    (limit, unwrapped)
+}
+
+/// One trace's spectrum at `f` Hz under the window `window` (one weight per sample):
+/// Σ_m w_m d_m e^{-iω t_m}, t_m = m Δ.
+fn spectrum(trace: &[f32], window: &[f64], f: f64, interval: f64) -> [f64; 2] {
+    let omega = 2.0 * std::f64::consts::PI * f;
+    let mut z = [0.0, 0.0];
+    for (m, (&d, &w)) in trace.iter().zip(window).enumerate() {
+        let (s, c) = (omega * m as f64 * interval).sin_cos();
+        let v = w * d as f64;
+        z[0] += v * c;
+        z[1] -= v * s;
+    }
+    z
+}
+
+/// The slow-wave phase check of one part, from the observed traces and the start's
+/// synthetics alone (no truth): in the window after the slow waves' line (the complement of
+/// `mute`, the very samples the mute would remove), tapered by half a period of the source's
+/// peak frequency before the record's end, each trace's spectrum at each of `frequencies`, and
+/// the phase difference Δφ = arg(Σ_c w_c Z_syn,c Z̄_obs,c), w_c the components' balancing
+/// weights from the observed traces: the cross-spectrum the balanced L2 misfit's alignment
+/// term sums at that frequency, positive where the observed arrivals lag the synthetic ones.
+/// Unwrapped along offset from the shot outwards on each side (`continuous_limit`), for both
+/// components together and each alone. Returns the limits of both together, by frequency,
+/// shot and side, and prints them with each component's and the phase profile every 250 m.
+fn phase_limits(
+    case: &Case,
+    mute: &MuteConfig,
+    frequencies: &[f64],
+    observed: &[Observed],
+) -> Vec<Vec<[Limit; 2]>> {
+    let t = Instant::now();
+    let f0 = 1.2;
+    let mut limits = vec![Vec::new(); frequencies.len()];
+    for (s, obs) in observed.iter().enumerate() {
+        let shot = case.start.shot(s).unwrap();
+        let mut sim = Simulation::new(&shot, &case.base).unwrap();
+        sim.run(None, false).unwrap();
+        let x = receiver_x(&sim);
+        let x_source = shot.sources[0].position[0];
+        let samples = sim.receivers.samples;
+        let interval = sim.info.sample_interval;
+        let duration = samples as f64 * interval;
+        let end_taper = 0.5 / f0;
+        let components = sim.receivers.components.clone();
+        let balance = balancing_weights(&obs.traces, &components);
+        let windows: Vec<Vec<f64>> = x
+            .iter()
+            .map(|&xr| {
+                (0..samples)
+                    .map(|m| {
+                        let t = m as f64 * interval;
+                        let end = ((duration - t) / end_taper).min(1.0);
+                        let end = 0.5 * (1.0 - (std::f64::consts::PI * end).cos());
+                        (1.0 - mute_weight(mute, t, xr - x_source)) * end
+                    })
+                    .collect()
+            })
+            .collect();
+        // Past the offset where the line meets the record's end the window is empty: there
+        // is nothing to judge, and nothing for the mute to remove.
+        let filled: Vec<bool> = windows.iter().map(|w| w.iter().any(|&v| v > 0.0)).collect();
+        for (fi, &f) in frequencies.iter().enumerate() {
+            // Each receiver's cross-spectrum, both components together and each alone.
+            let cross: Vec<Vec<[f64; 2]>> = windows
+                .iter()
+                .enumerate()
+                .map(|(r, window)| {
+                    let mut sum = [0.0, 0.0];
+                    let mut each = Vec::new();
+                    let range = r * samples..(r + 1) * samples;
+                    let traces = sim.receivers.traces.iter().zip(&obs.traces);
+                    for ((syn, obs), w) in traces.zip(&balance) {
+                        let zs = spectrum(&syn[range.clone()], window, f, interval);
+                        let zo = spectrum(&obs[range.clone()], window, f, interval);
+                        let z = [zs[0] * zo[0] + zs[1] * zo[1], zs[1] * zo[0] - zs[0] * zo[1]];
+                        sum[0] += w * z[0];
+                        sum[1] += w * z[1];
+                        each.push(z);
+                    }
+                    let mut all = vec![sum];
+                    all.extend(each);
+                    all
+                })
+                .collect();
+            let mut shot_limits = [None, None];
+            let mut lines = Vec::new();
+            for (side, name) in SIDES.iter().enumerate() {
+                // The side's receivers with something in their window, nearest the shot first;
+                // not the shot's own, where vx vanishes.
+                let mut on_side: Vec<usize> = (0..x.len())
+                    .filter(|&r| {
+                        filled[r]
+                            && if side == 0 {
+                                x[r] < x_source
+                            } else {
+                                x[r] > x_source
+                            }
+                    })
+                    .collect();
+                on_side
+                    .sort_by(|&a, &b| (x[a] - x_source).abs().total_cmp(&(x[b] - x_source).abs()));
+                let offsets: Vec<f64> = on_side.iter().map(|&r| (x[r] - x_source).abs()).collect();
+                let mut cells = Vec::new();
+                for (k, label) in ["both", "vx", "vz"].iter().enumerate() {
+                    let phases: Vec<f64> = on_side
+                        .iter()
+                        .map(|&r| cross[r][k][1].atan2(cross[r][k][0]))
+                        .collect();
+                    let (limit, unwrapped) = continuous_limit(&offsets, &phases);
+                    cells.push(format!("{label} {limit}"));
+                    if k == 0 {
+                        shot_limits[side] = Some(limit);
+                        let profile: Vec<String> = offsets
+                            .iter()
+                            .zip(&unwrapped)
+                            .filter(|(o, _)| (*o / 250.0 - (*o / 250.0).round()).abs() < 1e-6)
+                            .map(|(o, p)| format!("{:.0}:{p:+.2}", o))
+                            .collect();
+                        lines.push(format!(
+                            "    {name:>5} Δφ (rad) by offset (m): {}",
+                            profile.join(" ")
+                        ));
+                    }
+                }
+                println!(
+                    "  {f:.1} Hz, shot {s} at {x_source:.0} m, {name:>5} (window to {:.0} m): {}",
+                    offsets.last().unwrap(),
+                    cells.join(", ")
+                );
+            }
+            for line in lines {
+                println!("{line}");
+            }
+            limits[fi].push(shot_limits.map(Option::unwrap));
+        }
+    }
+    println!("  the check: {:.0} s", t.elapsed().as_secs_f64());
+    limits
+}
+
+/// What the truth says the check should find (a check of the check, never part of the rule):
+/// the phase 2πf τ a wave along the seafloor gathers between a shot and each receiver, τ the
+/// sum over the columns between of the difference of the harmonic mean slownesses over the
+/// 250 m below the seafloor, true less the start's (as `seafloor_speeds` works them out), and
+/// the offset on each side where it reaches π. By frequency, shot and side.
+fn predicted_limits(case: &Case, frequencies: &[f64]) -> Vec<Vec<[f64; 2]>> {
+    let (start, truth) = (case.model(&case.start), case.model(&case.truth));
+    let g = start.grid;
+    let receivers = case.start.receivers.positions().unwrap();
+    let [_, j, top] = g.nearest_node(receivers[0]).unwrap();
+    let slowness = |m: &Model, i: usize| {
+        (top..top + 10)
+            .map(|k| 1.0 / m.vs[g.interior_idx(i, j, k)] as f64)
+            .sum::<f64>()
+            / 10.0
+    };
+    let excess: Vec<f64> = (0..g.n[0])
+        .map(|i| g.h[0] * (slowness(&truth, i) - slowness(&start, i)))
+        .collect();
+    let furthest = |x_source: f64, side: usize| {
+        receivers
+            .iter()
+            .map(|p| p[0] - x_source)
+            .filter(|d| if side == 0 { *d <= 0.0 } else { *d >= 0.0 })
+            .fold(0.0f64, |m, d| m.max(d.abs()))
+    };
+    frequencies
+        .iter()
+        .map(|&f| {
+            case.start
+                .sources
+                .iter()
+                .map(|source| {
+                    let i0 = (source.position[0] / g.h[0]).round() as usize;
+                    [0, 1].map(|side| {
+                        let reach = furthest(source.position[0], side);
+                        let mut delay = 0.0;
+                        let mut i = i0;
+                        loop {
+                            let offset = (i as f64 - i0 as f64).abs() * g.h[0];
+                            if offset >= reach {
+                                return reach;
+                            }
+                            i = if side == 0 { i - 1 } else { i + 1 };
+                            let next = delay + excess[i];
+                            if (2.0 * std::f64::consts::PI * f * next).abs() >= std::f64::consts::PI
+                            {
+                                let crossing = (0.5 / f - delay.abs()) / (next.abs() - delay.abs());
+                                return offset + crossing * g.h[0];
+                            }
+                            delay = next;
+                        }
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The frequencies the check measures at: the stages' corners (`FREQUENCY_STAGES`), the
+/// source's peak frequency, which stands for the unfiltered traces, and twice that, where the
+/// Ricker's amplitude is a fifth of its peak's (reported, not used).
+const CHECK_FREQUENCIES: [f64; 4] = [0.6, 1.0, 1.2, 2.4];
+
+/// The slow waves' mutes one frequency's `limits` (by shot and side) call for, `mute` the
+/// line, as `[[table]]`s: for each shot with a side cut short, a mute for that shot alone,
+/// sparing the offsets out to each side's limit less `spare_taper`, so that what it keeps
+/// whole lies within ±π. The offset taper is the distance the line moves over its time taper,
+/// velocity × taper (259 m on the central part): as gradual along offset as in time. A side
+/// the check passes to its window's end is spared entirely.
+fn phase_mutes(table: &str, mute: &MuteConfig, limits: &[[Limit; 2]]) -> String {
+    let spare_taper = mute.velocity.unwrap() * mute.taper;
+    let end = |l: &Limit| {
+        if l.why == "end" {
+            1e6
+        } else {
+            (l.offset - spare_taper).max(0.0)
+        }
+    };
+    limits
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.iter().any(|l| l.why != "end"))
+        .map(|(s, [left, right])| {
+            format!(
+                "[[{table}]]\nkeep = \"before\"\nvelocity = {:.1}\ndelay = {:.2}\ntaper = {:.2}\n\
+                 shot = {s}\nspare = [{:.1}, {:.1}]\nspare_taper = {spare_taper:.1}",
+                mute.velocity.unwrap(),
+                mute.delay,
+                mute.taper,
+                -end(left),
+                end(right),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The check on `case` with its own mute line (`slow_waves_mute`): the line's mute, and the
+/// limits by frequency (`CHECK_FREQUENCIES`), shot and side. Forward runs of the truth (the
+/// observed traces) and of the start only.
+fn checked(case: &Case) -> (MuteConfig, Vec<Vec<[Limit; 2]>>) {
+    let (velocity, mute) = slow_waves_mute(case, 425.0);
+    let mute = mutes_of(muted_with("iterations = 0", false, &mute))[0].clone();
+    println!("the window after the line at {velocity:.0} m/s");
+    let limits = phase_limits(case, &mute, &CHECK_FREQUENCIES, &case.record());
+    (mute, limits)
+}
+
+/// L2 for five iterations with the slow waves muted only where the check finds them beyond
+/// half a cycle at `CHECK_FREQUENCIES[f]`, shot by shot and side by side: the source's peak
+/// frequency (2), or twice that (3), nearer the top of the band the unfiltered misfit fits.
+fn phase_checked_l2(part: &str, f: usize) -> Case {
+    let (mute, limits) = checked(&Case::part(part, L2));
+    let mutes = phase_mutes("inversion.mute", &mute, &limits[f]);
+    println!("the mutes:\n{mutes}");
+    Case::part(part, ("iterations = 5", leak(mutes)))
+}
+
+/// The frequency stages (0.6 Hz, 1.0 Hz, all) with each stage's mutes from the check at its
+/// own frequency.
+fn phase_checked_stages(part: &str) -> Case {
+    let (mute, limits) = checked(&Case::part(part, L2));
+    let stage = |f: usize| phase_mutes("inversion.stage.mute", &mute, &limits[f]);
+    let tables = format!(
+        "[[inversion.stage]]\nmax_frequency = 0.6\niterations = 2\n{}\n\
+         [[inversion.stage]]\nmax_frequency = 1.0\niterations = 2\n{}\n\
+         [[inversion.stage]]\niterations = 1\n{}",
+        stage(0),
+        stage(1),
+        stage(2)
+    );
+    println!("the stages:\n{tables}");
+    Case::part(part, ("", leak(tables)))
+}
+
+/// `phase_mutes` writes mutes that parse, one per shot cut short, for that shot alone and
+/// sparing what the check passed.
+#[test]
+fn phase_mutes_parse() {
+    let mute = mutes_of(muted(false, SLOW_WAVES_MUTED))[0].clone();
+    let limit = |offset: f64, why: &'static str| Limit {
+        offset,
+        furthest: 1500.0,
+        why,
+    };
+    let limits = [
+        [limit(1500.0, "end"), limit(1500.0, "end")],
+        [limit(800.0, "π"), limit(1500.0, "end")],
+        [limit(25.0, "start"), limit(300.0, "jump")],
+    ];
+    let mutes = phase_mutes("inversion.mute", &mute, &limits);
+    let cfg = Config::from_toml(&central_text(("iterations = 5", leak(mutes)))).unwrap();
+    let mutes = cfg.inversion.unwrap().mutes;
+    assert_eq!(mutes.len(), 2);
+    assert_eq!((mutes[0].shot, mutes[1].shot), (Some(1), Some(2)));
+    assert_eq!(mutes[0].spare, Some([-548.0, 1e6]));
+    assert_eq!(mutes[1].spare, Some([0.0, 48.0]));
+    assert_eq!(mutes[0].spare_taper, 252.0);
+}
+
+/// The slow-wave phase check on both parts, at 0.6, 1.0 and 1.2 Hz, with the mute line
+/// `slow_waves_mute` works out from each part's start, next to what the truth predicts.
+#[test]
+#[ignore = "a study: `just marmousi2-study phase_check` (about 3 minutes)"]
+fn phase_check() {
+    for part in ["central", "west"] {
+        let case = Case::part(part, L2);
+        println!("{part}:");
+        let (mute, limits) = checked(&case);
+        let predicted = predicted_limits(&case, &CHECK_FREQUENCIES);
+        println!(
+            "{part}: the limits (m) by shot, left / right, from the data; then from the truth's \
+             delays"
+        );
+        for (fi, f) in CHECK_FREQUENCIES.iter().enumerate() {
+            for (s, (l, p)) in limits[fi].iter().zip(&predicted[fi]).enumerate() {
+                println!(
+                    "  {f:.1} Hz, shot {s}: {} / {} (windows to {:.0} / {:.0}); truth {:.0} / \
+                     {:.0}",
+                    l[0],
+                    l[1],
+                    l[0].furthest,
+                    l[1].furthest,
+                    p[0].min(l[0].furthest),
+                    p[1].min(l[1].furthest)
+                );
+            }
+            println!("{}", phase_mutes(&format!("{f} Hz"), &mute, &limits[fi]));
+        }
+    }
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study central_phase_checked_l2` (about 45 minutes)"]
+fn central_phase_checked_l2() {
+    invert("phase-checked-l2", &phase_checked_l2("central", 2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_phase_checked_l2` (about 40 minutes)"]
+fn west_phase_checked_l2() {
+    invert("west-phase-checked-l2", &phase_checked_l2("west", 2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study central_phase_checked_l2_at_2f0` (about 90 minutes)"]
+fn central_phase_checked_l2_at_2f0() {
+    invert("phase-checked-l2-at-2f0", &phase_checked_l2("central", 3));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_phase_checked_l2_at_2f0` (about 90 minutes)"]
+fn west_phase_checked_l2_at_2f0() {
+    invert("west-phase-checked-l2-at-2f0", &phase_checked_l2("west", 3));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study central_phase_checked_stages` (about an hour)"]
+fn central_phase_checked_stages() {
+    invert("phase-checked-stages", &phase_checked_stages("central"));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_phase_checked_stages` (about an hour)"]
+fn west_phase_checked_stages() {
+    invert("west-phase-checked-stages", &phase_checked_stages("west"));
 }
 
 #[test]
