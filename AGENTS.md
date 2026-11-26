@@ -256,6 +256,9 @@ doesn't show.
   flattens it). The traces match the container's to 6e-12 of the peak but not bit for bit:
   dt differs in its last bit, most likely from macOS's maths library in the optimised
   coefficients' design, so don't expect bit-for-bit agreement between a Mac and a Linux run.
+  Run long jobs there under `caffeinate -i` (or `caffeinate -i -w <pid>` for one already
+  running): the Mac idle-sleeps and pauses them, as it did for 3.5 hours of an `l2` study on
+  2026-11-26. Rust's `Instant` on macOS leaves the sleep out; `/usr/bin/time` doesn't.
 
 - **The gradient against the exact kernels** (`tests/gradient_accuracy.rs`,
   `tests/common/stokes.rs`; the log's 2026-11-21 entry). In a homogeneous full space the
@@ -764,5 +767,12 @@ doesn't show.
   the whole Marmousi2 section's grid, a central gradient from 119 to 102 s, and a native
   build no longer pays (1–3%). AVX2 alone gave 11–27%, so the default build was limited by
   its arithmetic as much as by memory. Parts of rows were slower (prefetchers), and so were
-  wider bands in whole columns (too few tasks for 12 threads).
+  wider bands in whole columns (too few tasks for 12 threads). **On the Mac** (natively,
+  2026-11-26; the log's "The faster updates on the Mac"), with the plain loops and the bands,
+  the whole section's grid went from 282 to 318 Mcell/s and `layered.toml` from 211 to 229,
+  but Marmousi2's central part lost 16% forward (237 to 198) and its gradient 20% (51 to
+  62 s): 8% on one thread, where its planes already stay in cache, and the rest from its 41
+  rows making 11 tasks for 10 unequal cores. So the Marmousi2 studies run slower on the Mac
+  than before (`l2` 2,586 against 2,032 s, the same model byte for byte); don't compare
+  their wall times across the merge (`cf68d48`).
 - **Next:** elastic FWI; the README's roadmap lists the steps.

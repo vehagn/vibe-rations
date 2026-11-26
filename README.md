@@ -372,8 +372,21 @@ default build as the published image runs it, before and after (the research log
 | the central part's gradient, checkpoints | 1.39 M × 1,750 | 119 s | 102 s |
 
 A build for the CPU (`-C target-cpu=native`) is now within 1–3% of the default one. The plain
-loops alone run at 99, 100 and 85 Mcell/s on the three forward runs. The Mac's speeds quoted
-elsewhere here predate these changes and haven't been measured since.
+loops alone run at 99, 100 and 85 Mcell/s on the three forward runs.
+
+On an M1 Max (8 performance and 2 efficiency cores, 10 threads), natively (`just in mac`),
+which gets the bands and the correlation pass but has no AVX2 copy, the same runs, two each,
+with desktop apps running alongside (the research log's 2026-11-26 entry):
+
+| Run | Before | After |
+|---|---|---|
+| `examples/layered.toml` | 211 Mcell/s | 229 Mcell/s |
+| Marmousi2's central part forward | 237 Mcell/s | 198 Mcell/s |
+| the whole section's grid, 300 steps | 282 Mcell/s | 318 Mcell/s |
+| the central part's gradient, checkpoints | 51 s | 62 s |
+
+The bands pay on large grids there too, but the central part, whose planes stay in cache and
+whose 41 rows make only 11 bands for 10 unequal cores, lost 16%, and its gradient 20%.
 
 ## Remote runs
 
