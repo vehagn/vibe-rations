@@ -80,11 +80,27 @@ impl Measure {
 }
 
 /// The weight `mute` gives a sample at `t` seconds of a trace `offset` metres from its
-/// source: 1 on the side it keeps, its `weight` on the other, a half cosine between them over
-/// its `taper` (or an exponential of that time constant), beginning at the line
-/// t = offset / velocity + delay.
+/// source (signed, negative towards −x, as [`offsets`] gives them): 1 on the side it keeps,
+/// its `weight` on the other, a half cosine between them over its `taper` (or an exponential
+/// of that time constant), beginning at the line t = |offset| / velocity + delay. Within the
+/// offsets it spares it is 1; beyond them it comes in over `spare_taper` metres, as
+/// 1 - s (1 - w), s rising from 0 to 1 with a half cosine. It doesn't look at `shot`:
+/// [`for_shot`] does.
 pub fn mute_weight(mute: &MuteConfig, t: f64, offset: f64) -> f64 {
-    let line = mute.velocity.map_or(0.0, |v| offset / v) + mute.delay;
+    let strength = match mute.spare {
+        None => 1.0,
+        Some([from, to]) => {
+            let past = (from - offset).max(offset - to);
+            if past <= 0.0 {
+                return 1.0;
+            } else if past >= mute.spare_taper {
+                1.0
+            } else {
+                0.5 * (1.0 - (std::f64::consts::PI * past / mute.spare_taper).cos())
+            }
+        }
+    };
+    let line = mute.velocity.map_or(0.0, |v| offset.abs() / v) + mute.delay;
     // How far past the line towards the muted side.
     let past = match mute.keep {
         MuteSide::Before => t - line,
@@ -99,12 +115,36 @@ pub fn mute_weight(mute: &MuteConfig, t: f64, offset: f64) -> f64 {
             MuteShape::Cosine => 0.5 * (1.0 + (std::f64::consts::PI * past / mute.taper).cos()),
         }
     };
-    mute.weight + (1.0 - mute.weight) * kept
+    let w = mute.weight + (1.0 - mute.weight) * kept;
+    if strength < 1.0 {
+        1.0 - strength * (1.0 - w)
+    } else {
+        w
+    }
+}
+
+/// `mutes` as shot `shot` applies them: a mute meant for another shot weighs 1 everywhere
+/// (its `weight` set to 1), rather than dropped, so that every shot's misfit holds what the
+/// memory plan counts for a muted one.
+pub fn for_shot(mutes: &[MuteConfig], shot: usize) -> Vec<MuteConfig> {
+    mutes
+        .iter()
+        .map(|m| MuteConfig {
+            weight: if m.shot.is_none_or(|s| s == shot) {
+                m.weight
+            } else {
+                1.0
+            },
+            ..m.clone()
+        })
+        .collect()
 }
 
 /// Each receiver's horizontal distance from `cfg`'s source, both where a run puts them
 /// (exactly, between nodes too): the offsets the mutes go by. Horizontal, not slant: slow waves along the
-/// seafloor travel at the same offset whatever the source's depth. One source only (a shot).
+/// seafloor travel at the same offset whatever the source's depth. Signed by the side of the
+/// source the receiver lies on along x (negative towards −x), for the offsets a mute spares;
+/// its line goes by the distance alone. One source only (a shot).
 pub fn offsets(cfg: &Config) -> Result<Vec<f64>> {
     ensure!(
         cfg.sources.len() == 1,
@@ -128,7 +168,8 @@ pub fn offsets(cfg: &Config) -> Result<Vec<f64>> {
         .into_iter()
         .map(|p| {
             let r = at(p)?;
-            Ok((r[0] - source[0]).hypot(r[1] - source[1]))
+            let (dx, dy) = (r[0] - source[0], r[1] - source[1]);
+            Ok(dx.hypot(dy).copysign(dx))
         })
         .collect()
 }
@@ -327,6 +368,15 @@ impl Misfit {
                 ensure!(
                     (0.0..=1.0).contains(&m.weight),
                     "a mute's weight must lie between 0 and 1"
+                );
+                ensure!(
+                    m.spare
+                        .is_none_or(|[a, b]| a.is_finite() && b.is_finite() && a <= b),
+                    "a mute's spared offsets must be finite, the smaller first"
+                );
+                ensure!(
+                    m.spare_taper.is_finite() && m.spare_taper >= 0.0,
+                    "a mute's spare_taper must not be negative"
                 );
             }
             let receivers = observed.first().map_or(0, |o| o.len() / samples);
@@ -1151,6 +1201,9 @@ mod tests {
                 taper: 0.04,
                 weight: 0.0,
                 shape: MuteShape::Cosine,
+                shot: None,
+                spare: None,
+                spare_taper: 0.0,
             },
             MuteConfig {
                 keep: MuteSide::Before,
@@ -1159,6 +1212,9 @@ mod tests {
                 taper: 0.05,
                 weight: 0.1,
                 shape: MuteShape::Exponential,
+                shot: None,
+                spare: None,
+                spare_taper: 0.0,
             },
         ]
     }
@@ -1519,6 +1575,9 @@ mod tests {
             taper: 0.4,
             weight: 0.0,
             shape: MuteShape::Cosine,
+            shot: None,
+            spare: None,
+            spare_taper: 0.0,
         };
         let f = Lowpass::butterworth(0.6, dt, 4).unwrap();
         let shift = |first| {
@@ -1549,6 +1608,9 @@ mod tests {
             taper,
             weight,
             shape: MuteShape::Cosine,
+            shot: None,
+            spare: None,
+            spare_taper: 0.0,
         };
         // The order, with a strong arrival behind the line, and a kept arrival's distortion.
         let (s, d) = kept_and_strong_late(dt);
@@ -1738,6 +1800,9 @@ mod tests {
                 taper: 0.05,
                 weight: 0.0,
                 shape: MuteShape::Cosine,
+                shot: None,
+                spare: None,
+                spare_taper: 0.0,
             }],
             ..Measure::l2(true)
         };
@@ -1777,6 +1842,9 @@ mod tests {
             taper: 0.2,
             weight: 0.0,
             shape: MuteShape::Cosine,
+            shot: None,
+            spare: None,
+            spare_taper: 0.0,
         };
         // At 1000 m the line is at 2.1 s.
         assert_eq!(mute_weight(&before, 2.0, 1000.0), 1.0);
@@ -1815,6 +1883,124 @@ mod tests {
         }
     }
 
+    /// A mute spares the offsets it is told to, comes in beyond them over its offset taper,
+    /// goes by the distance alone for its line, and acts on its own shot only.
+    #[test]
+    fn mutes_spare_offsets_and_shots() {
+        let all = MuteConfig {
+            keep: MuteSide::Before,
+            velocity: Some(500.0),
+            delay: 0.1,
+            taper: 0.2,
+            weight: 0.1,
+            shape: MuteShape::Cosine,
+            shot: None,
+            spare: None,
+            spare_taper: 0.0,
+        };
+        let spared = MuteConfig {
+            spare: Some([-300.0, 500.0]),
+            spare_taper: 200.0,
+            ..all.clone()
+        };
+        for t in [0.0, 0.5, 1.0, 1.3, 2.0, 5.0] {
+            // The line goes by distance: the same either side.
+            assert_eq!(mute_weight(&all, t, -800.0), mute_weight(&all, t, 800.0));
+            // Within the spared offsets, nothing; past the taper, the whole mute.
+            for x in [-300.0, 0.0, 400.0, 500.0] {
+                assert_eq!(mute_weight(&spared, t, x), 1.0, "{t} {x}");
+            }
+            for x in [-500.0, -900.0, 700.0, 2000.0] {
+                assert_eq!(
+                    mute_weight(&spared, t, x),
+                    mute_weight(&all, t, x),
+                    "{t} {x}"
+                );
+            }
+            // Half way through the taper, half the mute.
+            let w = mute_weight(&all, t, 600.0);
+            let half = mute_weight(&spared, t, 600.0);
+            assert!(
+                (half - (1.0 - 0.5 * (1.0 - w))).abs() < 1e-12,
+                "{t}: {half} {w}"
+            );
+        }
+        // Continuous and monotone along offset at a time the mute removes.
+        let mut last = 1.0;
+        for i in 0..=300 {
+            let w = mute_weight(&spared, 4.0, 500.0 + i as f64);
+            assert!(w <= last && last - w < 0.02, "{w} after {last}");
+            last = w;
+        }
+        assert_eq!(last, 0.1);
+        // A mute for shot 1 weighs 1 on shot 0's traces, and is itself on shot 1's.
+        let one = MuteConfig {
+            shot: Some(1),
+            ..spared.clone()
+        };
+        let mutes = [all.clone(), one.clone()];
+        let zero = for_shot(&mutes, 0);
+        assert_eq!(zero[0], all);
+        assert!((0..50).all(|i| mute_weight(&zero[1], 0.1 * i as f64, 900.0) == 1.0));
+        assert_eq!(for_shot(&mutes, 1), mutes);
+    }
+
+    /// The offsets a mute spares and its offset taper keep F M and M F transposed: the
+    /// weights stay fixed by time and receiver.
+    #[test]
+    fn spared_offsets_keep_the_transpose() {
+        let dt = 2e-3;
+        let n = 300;
+        let offsets = [-700.0, -320.0, 100.0, 520.0, 650.0];
+        let obs = Arc::new(vec![vec![0.0f32; offsets.len() * n]]);
+        let mutes = window()
+            .into_iter()
+            .map(|m| MuteConfig {
+                spare: Some([-400.0, 500.0]),
+                spare_taper: 100.0,
+                velocity: m.velocity.map(|v| 3.0 * v),
+                ..m
+            })
+            .collect();
+        let measure = Measure {
+            max_frequency: Some(15.0),
+            mutes,
+            ..Measure::l2(false)
+        };
+        let m = Misfit::new(measure, &obs, &[Component::Vz], n, dt, &offsets).unwrap();
+        let x: Vec<f64> = (0..n).map(|i| ((i * 7919) % 101) as f64 - 50.0).collect();
+        let y: Vec<f64> = (0..n).map(|i| ((i * 104729) % 97) as f64 - 48.0).collect();
+        for receiver in 0..offsets.len() {
+            let (mut mx, mut my) = (x.clone(), y.clone());
+            m.transform(&mut mx, receiver);
+            m.transform_transpose(&mut my, receiver);
+            let a: f64 = mx.iter().zip(&y).map(|(a, b)| a * b).sum();
+            let b: f64 = x.iter().zip(&my).map(|(a, b)| a * b).sum();
+            assert!((a - b).abs() <= 1e-12 * a.abs().max(b.abs()), "{a} {b}");
+        }
+        // The spared receiver's weights are all 1, the one past the taper's are not.
+        assert!(m.mute(2).unwrap().iter().all(|&w| w == 1.0));
+        assert!(m.mute(0).unwrap().iter().any(|&w| w < 0.5));
+        // Spared offsets the wrong way round, or a negative taper, are refused.
+        for bad in [
+            MuteConfig {
+                spare: Some([500.0, -400.0]),
+                ..window()[0].clone()
+            },
+            MuteConfig {
+                spare: Some([-400.0, 500.0]),
+                spare_taper: -1.0,
+                ..window()[0].clone()
+            },
+        ] {
+            let measure = Measure {
+                mutes: vec![bad],
+                ..Measure::l2(false)
+            };
+            assert!(Misfit::new(measure, &obs, &[Component::Vz], n, dt, &offsets).is_err());
+        }
+    }
+
     /// What a mute removes no longer counts: changing a synthetic only where it is muted
     /// changes neither the misfit nor its adjoint source; where it is down-weighted, a misfit
     /// there counts by the weight squared.
@@ -1831,6 +2017,9 @@ mod tests {
             taper: 0.05,
             weight,
             shape: MuteShape::Cosine,
+            shot: None,
+            spare: None,
+            spare_taper: 0.0,
         };
         let measure = |weight| Measure {
             mutes: vec![mute(weight)],
@@ -1934,6 +2123,17 @@ mod tests {
             toml::from_str::<InversionConfig>("observed = \"o\"\n[[mute]]\nkeep = \"before\"")
                 .is_err()
         );
+        // One shot's mute, sparing a range of offsets.
+        let one: InversionConfig = toml::from_str(
+            "observed = \"o\"\n[[stage]]\niterations = 1\n[[stage.mute]]\nkeep = \"before\"\n\
+             taper = 0.5\nshot = 2\nspare = [-300.0, 500.0]\nspare_taper = 250.0",
+        )
+        .unwrap();
+        let mute = &one.stages[0].mutes[0];
+        assert_eq!(
+            (mute.shot, mute.spare, mute.spare_taper),
+            (Some(2), Some([-300.0, 500.0]), 250.0)
+        );
     }
 
     /// Offsets are horizontal, between where a run puts the source and receivers.
@@ -1969,7 +2169,7 @@ mod tests {
         // Where a run puts them, between nodes too: the source at x = 52 m, not 50.
         let x = offsets(&cfg).unwrap();
         assert_eq!(x.len(), 3);
-        assert!((x[0] - 2.0).abs() < 1e-12, "{}", x[0]);
+        assert!((x[0] + 2.0).abs() < 1e-12, "{}", x[0]);
         assert!((x[1] - 79.0).abs() < 1e-12, "{}", x[1]);
         assert!((x[2] - 2384f64.sqrt()).abs() < 1e-12, "{}", x[2]);
     }

@@ -329,6 +329,8 @@ pub fn shared_operator(start: &Config, truth: &Config, base: &Path) -> Result<Op
 /// layers) and observed traces, with the misfit the current stage measures them by.
 #[derive(Clone, Debug)]
 pub struct Shot {
+    /// Which of the configuration's sources this shot fires, counting from 0.
+    pub index: usize,
     pub config: Config,
     pub observed: Arc<Vec<Vec<f32>>>,
     pub misfit: Misfit,
@@ -343,6 +345,7 @@ impl Shot {
     fn measured(&self, measure: Measure) -> Result<Misfit> {
         shot_misfit(
             measure,
+            self.index,
             &self.config,
             &self.observed,
             &self.components,
@@ -499,6 +502,18 @@ impl Inversion {
                 .unwrap_or_else(|| start.vp_range()[1]),
         );
         let stages = settings.stages()?;
+        for mute in settings
+            .mutes
+            .iter()
+            .chain(stages.iter().flat_map(|s| &s.mutes))
+        {
+            ensure!(
+                mute.shot.is_none_or(|s| s < cfg.sources.len()),
+                "a mute is for shot {}, and there are {} (counting from 0)",
+                mute.shot.unwrap_or_default(),
+                cfg.sources.len()
+            );
+        }
         let source_frequency = Measure::source_frequency(cfg)?;
         let measure = Measure::of(&stages[0], settings, source_frequency);
         let mut shots = Vec::with_capacity(cfg.sources.len());
@@ -512,6 +527,7 @@ impl Inversion {
             let interval = sim.info.sample_interval;
             let misfit = shot_misfit(
                 measure.clone(),
+                s,
                 &config,
                 &observed,
                 &components,
@@ -520,6 +536,7 @@ impl Inversion {
             )
             .with_context(|| format!("shot {s}"))?;
             shots.push(Shot {
+                index: s,
                 config,
                 observed,
                 misfit,
@@ -1125,10 +1142,11 @@ impl Inversion {
     }
 }
 
-/// The misfit `measure` sets up for one shot, run as `config` says, with the receivers'
-/// offsets from its source if it mutes.
+/// The misfit `measure` sets up for shot `shot`, run as `config` says, with the receivers'
+/// offsets from its source and the mutes as that shot applies them, if it mutes.
 fn shot_misfit(
-    measure: Measure,
+    mut measure: Measure,
+    shot: usize,
     config: &Config,
     observed: &Arc<Vec<Vec<f32>>>,
     components: &[crate::receiver::Component],
@@ -1138,6 +1156,7 @@ fn shot_misfit(
     let offsets = if measure.mutes.is_empty() {
         Vec::new()
     } else {
+        measure.mutes = crate::misfit::for_shot(&measure.mutes, shot);
         crate::misfit::offsets(config)?
     };
     Misfit::new(measure, observed, components, samples, interval, &offsets)

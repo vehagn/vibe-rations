@@ -176,12 +176,14 @@ marmousi2:
     examples/marmousi2/convert.sh
 
 # A Marmousi2 inversion study (after `just marmousi2`; tests/marmousi2_study.rs): `misfit_by_arrival`,
-# `misfit_by_mute`, `l2`, `l2_rebuilt`, `frequency_stages`, `time_shifts_then_l2`,
+# `misfit_by_mute`, `l2`, `l2_checkpointed`, `frequency_stages`, `time_shifts_then_l2`,
 # `phase_then_l2`, `stages_with_receivers_side`, `muted_l2`, `muted_stages`,
 # `down_weighted_l2`, `down_weighted_stages`, `stages_muted_after_the_first`,
 # `windowed_time_shifts_then_l2`, `muted_l2_with_receivers_side`, and on the held-out western
 # part `west_l2`, `west_muted_l2`, `west_stages_muted_after_the_first`, each 15-65 minutes,
-# `muted_l2_longer` (20 iterations, about 2.5 hours), or `mute_lines` (seconds)
+# `muted_l2_longer` (20 iterations, about 2.5 hours), `mute_lines` (seconds), the slow-wave
+# phase check `phase_check` (8 minutes) and the mutes it decides, `central_phase_checked_l2`,
+# `west_phase_checked_l2`, `central_phase_checked_stages`, `west_phase_checked_stages`
 [group("simulate")]
 marmousi2-study name:
     cargo test --release --test marmousi2_study {{ name }} -- --ignored --exact --nocapture --test-threads 1
