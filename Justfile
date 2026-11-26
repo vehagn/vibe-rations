@@ -187,7 +187,8 @@ marmousi2:
 # the start smoothed through its slownesses `seafloor_speeds_by_start`, `slowness_phase_check`,
 # `slowness_l2`, `west_slowness_l2`, `slowness_phase_checked_l2`,
 # `west_slowness_phase_checked_l2`, `slowness_muted_l2`; `central_split_by_check`; and the
-# hard-seabed control `hard_l2`, `west_hard_l2`, `hard_muted_l2`
+# hard-seabed control `hard_l2`, `west_hard_l2`, `hard_muted_l2`; layer stripping
+# `shallow_first_l2`, `west_shallow_first_l2`, `slowness_shallow_first_l2` (about 2 hours each)
 [group("simulate")]
 marmousi2-study name:
     cargo test --release --test marmousi2_study {{ name }} -- --ignored --exact --nocapture --test-threads 1

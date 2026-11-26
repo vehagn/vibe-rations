@@ -31,7 +31,8 @@
 //!   (inversions from it); `central_split_by_check` (what the check's mutes keep of the
 //!   gradient, split by side, offset and line); `hard_l2`, `west_hard_l2`, `hard_muted_l2`
 //!   (the hard-seabed control: Poisson's ratio capped at 0.25, the parts `central-hard` and
-//!   `west-hard`).
+//!   `west-hard`); `shallow_first_l2`, `west_shallow_first_l2`, `slowness_shallow_first_l2`
+//!   (layer stripping: the 250 m under the seafloor first, then everything).
 //! - `whole_by_region`: the whole-section inversion's result (`examples/marmousi2/whole.toml`)
 //!   in 1 km windows along x, next to how far its start's seafloor vs is from the truth's.
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
@@ -80,14 +81,19 @@ impl Case {
     /// over 250 m; `slowness`: the slownesses). The hard-seabed parts, Poisson's ratio capped
     /// at 0.25, are the parts `central-hard` and `west-hard`.
     fn part_from(part: &str, start: &str, variant: Variant) -> Case {
+        Case::part_with(part, &format!("25m-{part}-{start}"), variant)
+    }
+
+    /// [`Case::part`] with the start's vp and vs read from `dir`, relative to
+    /// `examples/marmousi2`: a start's directory, or another inversion's result
+    /// (`../../out/marmousi2/study/<name>/stage-<s>`).
+    fn part_with(part: &str, dir: &str, variant: Variant) -> Case {
         let base = PathBuf::from("examples/marmousi2");
         let on_part = |text: String| text.replace("25m-central", &format!("25m-{part}"));
-        let start_text = on_part(central_text(variant)).replace(
-            &format!("25m-{part}-smooth/"),
-            &format!("25m-{part}-{start}/"),
-        );
+        let start_text = on_part(central_text(variant))
+            .replace(&format!("25m-{part}-smooth/"), &format!("{dir}/"));
         let truth = on_part(std::fs::read_to_string(base.join("central-true.toml")).unwrap());
-        for dir in [format!("25m-{part}"), format!("25m-{part}-{start}")] {
+        for dir in [format!("25m-{part}"), dir.to_string()] {
             let missing = base.join(dir).join("vp.npy");
             assert!(
                 missing.is_file(),
@@ -1911,6 +1917,49 @@ fn central_split_by_check() {
         ],
         &[(1, 2), (1, 3), (3, 4)],
     );
+}
+
+/// Layer stripping (the 2026-11-26 plan's next step): three L2 iterations with only the 250 m
+/// under the seafloor free (`fixed_below = 750`), where the slow waves are most sensitive, so
+/// that what they say about the start's too fast sediments can't be put deeper; then five with
+/// everything below 500 m free, from that result. Reported after each part, and at the end
+/// against the original start, beside `l2`'s five iterations.
+fn shallow_first(name: &str, part: &str, start: &str) {
+    let shallow = format!("{name}-shallow");
+    invert(
+        &shallow,
+        &Case::part_from(part, start, ("iterations = 3\nfixed_below = 750.0", "")),
+    );
+    let result = |name: &str| format!("../../out/marmousi2/study/{name}/stage-0");
+    invert(name, &Case::part_with(part, &result(&shallow), L2));
+    let original = Case::part_from(part, start, L2);
+    let end = Case::part_with(part, &result(name), L2);
+    println!("{name}: both parts, against the original start");
+    print_bands(
+        name,
+        &original,
+        &end.model(&end.start),
+        &original.model(&original.start),
+        &original.model(&original.truth),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study shallow_first_l2` (about 2 hours)"]
+fn shallow_first_l2() {
+    shallow_first("shallow-first-l2", "central", "smooth");
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_shallow_first_l2` (about 2 hours)"]
+fn west_shallow_first_l2() {
+    shallow_first("west-shallow-first-l2", "west", "smooth");
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study slowness_shallow_first_l2` (about 2 hours)"]
+fn slowness_shallow_first_l2() {
+    shallow_first("slowness-shallow-first-l2", "central", "slowness");
 }
 
 /// L2 from the start smoothed through its slownesses, on the central part.
