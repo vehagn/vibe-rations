@@ -183,7 +183,11 @@ marmousi2:
 # part `west_l2`, `west_muted_l2`, `west_stages_muted_after_the_first`, each 15-65 minutes,
 # `muted_l2_longer` (20 iterations, about 2.5 hours), `mute_lines` (seconds), the slow-wave
 # phase check `phase_check` (8 minutes) and the mutes it decides, `central_phase_checked_l2`,
-# `west_phase_checked_l2`, `central_phase_checked_stages`, `west_phase_checked_stages`
+# `west_phase_checked_l2`, `central_phase_checked_stages`, `west_phase_checked_stages`; from
+# the start smoothed through its slownesses `seafloor_speeds_by_start`, `slowness_phase_check`,
+# `slowness_l2`, `west_slowness_l2`, `slowness_phase_checked_l2`,
+# `west_slowness_phase_checked_l2`, `slowness_muted_l2`; `central_split_by_check`; and the
+# hard-seabed control `hard_l2`, `west_hard_l2`, `hard_muted_l2`
 [group("simulate")]
 marmousi2-study name:
     cargo test --release --test marmousi2_study {{ name }} -- --ignored --exact --nocapture --test-threads 1
