@@ -68,7 +68,10 @@ src/
   grid.rs        the grid and its halo (as wide as the stencil), indexing
   memory.rs      the memory a run needs, from its configuration alone
   model.rs       vp, vs, rho on the nodes: layers, .npy files (on disk or in memory), spheres
-  solver.rs      fields, staggered material, the update kernels, free surface, PointOp
+  solver.rs      fields, staggered material, the update kernels (bands of rows marching up),
+                 free surface, PointOp
+  simd.rs        which compiled update loops run: AVX2 chosen at run time, or the plain ones
+                 (`VIBE_RATIONS_SIMD=off`)
   fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid
@@ -158,10 +161,11 @@ doesn't show.
   (`--remote gauss`, `just tunnel gauss`) with its runs on the 2 TB data disk
   (`/srv/data/runs`), and a clone with its dev container in `/srv/data/vibe-rations` for the
   studies, which can use the memory the Mac's container hasn't got (the whole Marmousi2
-  section's gradient, 15 GiB). It runs `examples/layered.toml` at 90 Mcells/s from the image,
+  section's gradient, 15 GiB). It ran `examples/layered.toml` at 90 Mcells/s from the image,
   104 built for its CPU (AVX2), half the Mac's native speed: it frees the Mac rather than
-  outruns it. Record everything installed there in its README; `setup.sh` must stay able to
-  redo it. `just mac` removes the old binary before copying the new: macOS killed one
+  outruns it. Since the run-time AVX2 and the bands (2026-11-25) either build runs it at
+  111. Record everything installed there in its README; `setup.sh` must stay able to redo
+  it. `just mac` removes the old binary before copying the new: macOS killed one
   rewritten in place (SIGKILL, exit 137).
 
 - **Sources and receivers sit where they are** (`Grid::coordinates`, `Solver::axis_weights`,
@@ -679,7 +683,19 @@ doesn't show.
 - **Performance** on the container's 4 cores (Apple Silicon, Colima VM with 8 GiB): order 4
   about 220 Mcell/s, 8 about 160, 12 about 130, 16 about 105. With 8 CPUs and 24 GiB
   (2026-11-23) order 8 runs `examples/layered.toml` at 176 against 156: memory bandwidth,
-  not cores, limits it. Memory is 17 padded f32
-  arrays plus CPML memory: the examples need 0.1–0.2 GiB. The work splits by $z$-plane, each
-  plane a row at a time through nine scratch rows.
+  not cores, limits it. (Both before the bands below; not measured on the Mac since.) Memory
+  is 17 padded f32 arrays plus CPML memory: the examples need 0.1–0.2 GiB. **Since
+  2026-11-25** (`solver::sweep`, `src/simd.rs`; the log's "Faster updates") the work splits
+  into bands of four whole rows (`BAND_ROWS`), each task marching up its column of planes a
+  row at a time through nine scratch rows, so the $2L$ planes the $z$-derivatives read come
+  from the cache; and on x86-64 the loops are compiled twice, plain and with AVX2 without
+  FMA, picked at run time (`VIBE_RATIONS_SIMD=off`: the plain ones; `kernels` in `run.json`).
+  Results are bit for bit the same either way and however the work is split, and must stay
+  so: everything called in the loops is `#[inline(always)]` (a call left out of line runs
+  plain code inside the AVX2 copy), and no `mul_add` or FMA there (it rounds differently).
+  On gauss the default build went from 91 to 111 Mcell/s on `layered.toml` and 85 to 114 on
+  the whole Marmousi2 section's grid, a central gradient from 119 to 102 s, and a native
+  build no longer pays (1–3%). AVX2 alone gave 11–27%, so the default build was limited by
+  its arithmetic as much as by memory. Parts of rows were slower (prefetchers), and so were
+  wider bands in whole columns (too few tasks for 12 threads).
 - **Next:** elastic FWI; the README's roadmap lists the steps.

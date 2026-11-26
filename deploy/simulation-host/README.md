@@ -53,7 +53,9 @@ Before the metered line, `prefetch.sh` fetched what later work may need:
   `examples/marmousi2/25m-smooth`, the whole section smoothed over 250 m (`whole.toml`'s
   start).
 - The command line built for gauss's CPU (`-C target-cpu=native`: AVX2) as
-  `/srv/data/bin/vibe-rations-native`, 15% faster than the image's.
+  `/srv/data/bin/vibe-rations-native`, 15% faster than the image's. Rebuilt on 2026-11-25
+  from the branch that added the run-time AVX2 and the bands (`perf/kernels`), the old one
+  kept as `vibe-rations-native.before-perf`; the default build is now as fast.
 - numpy 2.5.5 and matplotlib 3.11.2 in `out/venv` in the clone, for the dev container's
   Python (`out/venv/bin/python`).
 - The solver image built from the clone once (`vibe-rations-solver:local`), which caches its
@@ -112,7 +114,14 @@ gauss's line is metered, so what crosses it is kept small, within reason:
 | gauss, built for its CPU (`RUSTFLAGS="-C target-cpu=native"`: AVX2) | 104 | 93 |
 | the M1 Max natively (`just mac`), 10 threads | 193 | |
 | the M1 Max's dev container, 4 cores | 156 | |
+| gauss, the default build since 2026-11-25 (AVX2 at run time, bands of rows) | 111 | 106 |
+| the same, `VIBE_RATIONS_SIMD=off` (SSE2) | 99 | |
+| the same, built for its CPU | 112 | 106 |
 
-The solver is limited by memory bandwidth, and a 2014 Xeon's is about half an M1 Max's; gauss
-is for long and large runs, with 62 GiB, and frees the Mac. Building the image for x86-64-v3
-(AVX2, every x86 server CPU since 2013) would give the server the 15–25%.
+The first four rows are from before the changes of 2026-11-25 (the research log's "Faster
+updates"); the Mac hasn't been measured since. Measured again that day with main's binaries,
+the first two rows were 91 and 74, 103 and 95. Since then the default build, which
+the image is, picks the AVX2 loops itself and runs as fast as one built for the CPU; on the
+whole Marmousi2 section's grid it went from 85 to 114 Mcell/s (108 built for the CPU before).
+The solver is still limited by memory bandwidth, and a 2014 Xeon's is about half an M1
+Max's; gauss is for long and large runs, with 62 GiB, and frees the Mac.

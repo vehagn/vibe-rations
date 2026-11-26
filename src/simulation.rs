@@ -19,6 +19,7 @@ use crate::memory::{Memory, Plan, human};
 use crate::model::{Files, Model};
 use crate::npy;
 use crate::receiver::{Component, Receivers};
+use crate::simd::Kernels;
 use crate::snapshot::Snapshot;
 use crate::solver::{Band, Fields, Solver};
 use crate::source::{Mechanism, Source, Wavelet};
@@ -93,6 +94,8 @@ pub struct RunInfo {
     /// they were designed for.
     pub coefficients: Coefficients,
     pub band: Option<f64>,
+    /// The compiled update loops it runs (crate::simd): AVX2 or plain, the same results.
+    pub kernels: Kernels,
     /// The most memory the run holds at once (`memory.peak`).
     pub memory_bytes: usize,
     /// What it holds, part by part (crate::memory).
@@ -369,6 +372,9 @@ impl Simulation {
             );
         }
         let receivers = Receivers::new(&solver, points, cfg.receivers.components.clone(), samples);
+        if let Some(w) = Kernels::warning() {
+            warnings.push(w.to_string());
+        }
 
         let mut snapshots = Vec::new();
         for s in &cfg.snapshots {
@@ -424,6 +430,7 @@ impl Simulation {
             remove_time_dispersion: cfg.scheme.remove_time_dispersion,
             coefficients: cfg.scheme.coefficients,
             band: solver.stencil.band(),
+            kernels: solver.kernels(),
             memory_bytes: memory.peak as usize,
             memory,
             sources: source_info,
@@ -785,6 +792,12 @@ impl RunInfo {
             self.components.join(", "),
             self.snapshots
         );
+        let why = match self.kernels {
+            Kernels::Plain if Kernels::Avx2.available() => " (AVX2 turned off)",
+            Kernels::Plain if cfg!(target_arch = "x86_64") => " (no AVX2 on this CPU)",
+            _ => "",
+        };
+        let _ = writeln!(s, "kernels   {}{why}", self.kernels);
         let _ = write!(
             s,
             "memory    {} at most; `vibe-rations memory` itemises it",

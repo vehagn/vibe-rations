@@ -6,8 +6,9 @@ waveform inversion (FWI).
 It solves the isotropic elastic wave equation in velocity–stress form on a staggered grid
 (Virieux 1986; Levander 1988; Graves 1996), eighth order in space by default (any even order
 from 2 to 16) and second order in time, with convolutional PML absorbing layers (Komatitsch &
-Martin 2007) and a free surface. The update loops run in parallel across $z$-planes with
-rayon.
+Martin 2007) and a free surface. The update loops run in parallel with rayon, in bands of rows
+marching up through the planes, and on x86-64 CPUs with AVX2 in a copy compiled for it (see
+"Speed").
 
 Citations use the keys of [`docs/references.bib`](docs/references.bib); the
 [research log](docs/research-log.md) records the experiments behind the design, for the
@@ -330,6 +331,49 @@ a real inversion.
 (Linux's `MemAvailable`, or a container's memory limit) before allocating anything. The web
 app shows the estimate under the configuration as it is edited, and refuses runs above the
 4 GiB a browser gives WebAssembly; the server below has no such limit.
+
+## Speed
+
+The solver is limited by memory bandwidth, and in a build for baseline x86-64 by its
+arithmetic too, so the update loops are arranged to read as little from memory as they can,
+and compiled to do their arithmetic as widely as the CPU allows, without changing a single
+bit of the results:
+
+- **Bands of rows, marching up.** Each update splits the interior into bands of four whole
+  rows, and each task works through its band's column plane by plane upwards. The
+  $z$-derivatives read $2L$ planes of three fields for every plane they update, $L$ the
+  stencil's half-length; marching upwards, all but one of those were read a plane earlier and
+  are still in the cache. Updated a whole plane at a time, as before, a large grid's planes
+  had left it by then.
+- **AVX2 where the CPU has it.** On x86-64 the update loops are compiled twice, for the
+  build's target (SSE2 for the default build, so it runs on any x86-64 CPU) and with AVX2,
+  and the run picks the AVX2 copy when the CPU has it. Without FMA, and since Rust never fuses
+  $a b + c$, both do the same operations in the same order, eight values at a time instead of
+  four, so the results are identical bit for bit; tests run both and compare every value.
+  `VIBE_RATIONS_SIMD=off` runs the plain copy, for comparisons, or where AVX2 misbehaves (in
+  a virtual machine, say). The set-up summary and `run.json` say which ran (`kernels avx2`,
+  or `kernels plain` with the reason). Apple silicon and the browser have only the plain
+  copy, compiled with NEON and SIMD128. A build for the host's CPU (`RUSTFLAGS="-C
+  target-cpu=native"`) compiles the plain copy with its features too, so to run without AVX2
+  use the default build with the variable.
+- **A gradient step's correlations in one pass** over the sums they add to, and the adjoint
+  strain rate added in place.
+
+On gauss (a 6-core Xeon E5-1650 v3 with AVX2; `deploy/simulation-host/`), order 8, the
+default build as the published image runs it, before and after (the research log's
+2026-11-25 entry):
+
+| Run | Nodes × steps | Before | After |
+|---|---|---|---|
+| `examples/layered.toml`, 12 threads | 1.35 M × 1,666 | 91 Mcell/s | 111 Mcell/s |
+| the same, 6 threads | | 74 Mcell/s | 106 Mcell/s |
+| Marmousi2's central part forward (`central-true.toml`) | 1.39 M × 1,750 | 102 Mcell/s | 117 Mcell/s |
+| the whole section's grid (`whole-true.toml`), 300 steps | 19.3 M × 300 | 85 Mcell/s | 114 Mcell/s |
+| the central part's gradient, checkpoints | 1.39 M × 1,750 | 119 s | 102 s |
+
+A build for the CPU (`-C target-cpu=native`) is now within 1–3% of the default one. The plain
+loops alone run at 99, 100 and 85 Mcell/s on the three forward runs. The Mac's speeds quoted
+elsewhere here predate these changes and haven't been measured since.
 
 ## Remote runs
 

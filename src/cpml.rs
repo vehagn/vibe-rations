@@ -129,7 +129,7 @@ impl CpmlAxis {
     }
 
     /// The slab index of node `p` along the axis, or None if it is not in a layer.
-    #[inline]
+    #[inline(always)]
     pub fn slab(&self, p: usize) -> Option<usize> {
         if p < self.lo {
             Some(p)
@@ -140,6 +140,7 @@ impl CpmlAxis {
         }
     }
 
+    #[inline(always)]
     pub fn profile(&self, at: Stagger) -> &Profile {
         match at {
             Stagger::Node => &self.node,
@@ -147,31 +148,54 @@ impl CpmlAxis {
         }
     }
 
-    /// Damps a row of derivatives taken along this axis: `d` holds all `n` nodes of the row
-    /// and `psi` the memory for its slab.
-    #[inline]
-    pub fn apply_along(&self, d: &mut [f32], psi: &mut [f32], at: Stagger) {
+    /// The slab indices of the nodes in `nodes` that are in a layer: contiguous, since nodes
+    /// that reach into both layers hold every node between them.
+    pub fn slabs(&self, nodes: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        let start = self.n - self.hi;
+        let low = nodes.start.min(self.lo)..nodes.end.min(self.lo);
+        let high = self.lo + nodes.start.max(start) - start..self.lo + nodes.end.max(start) - start;
+        match (low.is_empty(), high.is_empty()) {
+            (true, true) => 0..0,
+            (false, true) => low,
+            (true, false) => high,
+            (false, false) => low.start..high.end,
+        }
+    }
+
+    /// Damps derivatives taken along this axis at the consecutive nodes `nodes` of a row: `d`
+    /// holds them, and `psi` the memory of those in a layer ([`CpmlAxis::slabs`]). Always
+    /// inlined, like the rest of the update loops (crate::simd).
+    #[inline(always)]
+    pub fn apply_along(
+        &self,
+        nodes: std::ops::Range<usize>,
+        d: &mut [f32],
+        psi: &mut [f32],
+        at: Stagger,
+    ) {
         let p = self.profile(at);
         let (lo, start) = (self.lo, self.n - self.hi);
-        update(
-            &mut d[..lo],
-            &mut psi[..lo],
-            &p.a[..lo],
-            &p.b[..lo],
-            &p.inv_kappa[..lo],
-        );
-        update(
-            &mut d[start..],
-            &mut psi[lo..],
-            &p.a[lo..],
-            &p.b[lo..],
-            &p.inv_kappa[lo..],
-        );
+        let first = self.slabs(nodes.clone()).start;
+        // Nodes, as offsets into `d`, and their slab indices, in each layer.
+        let low = (nodes.start.min(lo), nodes.end.min(lo));
+        let high = (nodes.start.max(start), nodes.end.max(start));
+        for ((a, b), slab) in [(low, low.0), (high, lo + high.0 - start)] {
+            if b > a {
+                let s = slab..slab + (b - a);
+                update(
+                    &mut d[a - nodes.start..b - nodes.start],
+                    &mut psi[s.start - first..s.end - first],
+                    &p.a[s.clone()],
+                    &p.b[s.clone()],
+                    &p.inv_kappa[s],
+                );
+            }
+        }
     }
 
     /// Damps a row of derivatives taken along this axis while the row runs across it, so the
     /// whole row sits at slab index `slab`.
-    #[inline]
+    #[inline(always)]
     pub fn apply_across(&self, slab: usize, d: &mut [f32], psi: &mut [f32], at: Stagger) {
         let p = self.profile(at);
         let (a, b, k) = (p.a[slab], p.b[slab], p.inv_kappa[slab]);
@@ -182,7 +206,7 @@ impl CpmlAxis {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn update(d: &mut [f32], psi: &mut [f32], a: &[f32], b: &[f32], inv_kappa: &[f32]) {
     for ((((d, psi), a), b), k) in d.iter_mut().zip(psi).zip(a).zip(b).zip(inv_kappa) {
         *psi = b * *psi + a * *d;
@@ -265,8 +289,44 @@ mod tests {
         assert_eq!(c.width(), 0);
         assert_eq!(c.slab(0), None);
         let mut d = [1.0f32; 10];
-        c.apply_along(&mut d, &mut [], Stagger::Node);
+        assert_eq!(c.slabs(0..10), 0..0);
+        c.apply_along(0..10, &mut d, &mut [], Stagger::Node);
         assert_eq!(d, [1.0; 10]);
+    }
+
+    /// Damping a row in parts, each with its part of the memory, is damping it whole, bit
+    /// for bit, wherever the parts split it.
+    #[test]
+    fn damps_a_row_in_parts_as_a_whole() {
+        let c = CpmlAxis::new(40, 6, 5, 10.0, 1e-3, &settings());
+        assert_eq!(c.slabs(0..40), 0..11);
+        assert_eq!(c.slabs(3..20), 3..6);
+        assert_eq!(c.slabs(6..35), 0..0);
+        assert_eq!(c.slabs(30..38), 6..9);
+        assert_eq!(c.slabs(4..37), 4..8);
+        let row: Vec<f32> = (0..40).map(|i| (i as f32 * 0.37).sin()).collect();
+        let memory: Vec<f32> = (0..11).map(|s| (s as f32 * 1.3).cos()).collect();
+        let (mut whole, mut psi) = (row.clone(), memory.clone());
+        c.apply_along(0..40, &mut whole, &mut psi, Stagger::Half);
+        for cuts in [
+            vec![0, 40],
+            vec![0, 3, 7, 33, 36, 40],
+            vec![0, 6, 34, 40],
+            vec![0, 1, 39, 40],
+        ] {
+            let (mut parts, mut psi_parts) = (row.clone(), memory.clone());
+            for w in cuts.windows(2) {
+                let (nodes, slabs) = (w[0]..w[1], c.slabs(w[0]..w[1]));
+                c.apply_along(
+                    nodes.clone(),
+                    &mut parts[nodes],
+                    &mut psi_parts[slabs],
+                    Stagger::Half,
+                );
+            }
+            assert_eq!(parts, whole, "{cuts:?}");
+            assert_eq!(psi_parts, psi, "{cuts:?}");
+        }
     }
 
     #[test]

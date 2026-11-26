@@ -24,6 +24,7 @@ pub mod remote;
 pub mod section;
 #[cfg(feature = "cli")]
 pub mod server;
+pub mod simd;
 pub mod simulation;
 pub mod snapshot;
 pub mod solver;
