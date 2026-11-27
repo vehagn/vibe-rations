@@ -23,6 +23,7 @@ use crate::model::{Files, Model};
 use crate::receiver::Component;
 use crate::simulation::{Simulation, Timing, timing};
 use crate::solver::{Band, BandSize};
+use crate::surface::{Surface, SurfaceSize};
 
 /// One part of a run's memory.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -280,11 +281,68 @@ impl Plan {
         parts
     }
 
+    /// The memory of a gradient run that rebuilds the forward wavefield inside a surface
+    /// `inset` nodes in from the layers ([`Strategy::Surface`]), with the observed traces:
+    /// as [`Plan::reconstruction_memory`], but the surface's records, one more than the
+    /// segment's steps, and its operators instead of the band.
+    pub fn surface_memory(&self, segment: Option<usize>, inset: Option<usize>) -> Memory {
+        Memory::of(self.surface_parts(segment, inset, part("observed traces", self.trace_bytes())))
+    }
+
+    /// [`Plan::surface_memory`]'s parts, with `observed` traces.
+    fn surface_parts(
+        &self,
+        segment: Option<usize>,
+        inset: Option<usize>,
+        observed: Part,
+    ) -> Vec<Part> {
+        let padded = self.grid.padded_len() as u64;
+        // A surface that doesn't fit is refused by the run; counted, it holds nothing.
+        let size = Surface::size(&self.interior, self.free_surface, self.grid.halo, inset)
+            .unwrap_or(SurfaceSize {
+                values: 0,
+                operator_bytes: 0,
+            });
+        let record = 4 * size.values as u64;
+        let k = reconstruction_segment(
+            self.steps,
+            self.checkpoint_bytes() as usize,
+            record as usize,
+            segment,
+        );
+        let checkpoints = self.steps.div_ceil(k).saturating_sub(1);
+        let mut parts = self.adjoint_parts(observed);
+        parts.extend([
+            part(
+                format!(
+                    "checkpoints: {checkpoints}, at the starts of segments of {k} steps, of the \
+                     wavefield and layers' memory"
+                ),
+                checkpoints as u64 * self.checkpoint_bytes(),
+            ),
+            part(
+                format!(
+                    "the surface's records for {k} steps and one more, {} values each",
+                    size.values
+                ),
+                (k as u64 + 1) * record,
+            ),
+            part("the surface's operators", size.operator_bytes as u64),
+            part(
+                "the velocities after the step being taken back",
+                4 * 3 * padded,
+            ),
+        ]);
+        parts.extend(self.correlation_parts());
+        parts
+    }
+
     /// The memory of a gradient run that gets the forward wavefield back as `strategy` says.
     pub fn strategy_memory(&self, strategy: Strategy) -> Memory {
         match strategy {
             Strategy::Checkpoints { every } => self.gradient_memory(every),
             Strategy::Reconstruct { segment } => self.reconstruction_memory(segment),
+            Strategy::Surface { segment, inset } => self.surface_memory(segment, inset),
         }
     }
 
@@ -796,6 +854,44 @@ mod tests {
                 m.table()
             );
         }
+        // Rebuilt inside a surface: the same cases, and one further in.
+        for (text, segment, inset) in [
+            (BASE.to_string(), None, None),
+            (BASE.to_string(), Some(7), None),
+            (BASE.to_string(), Some(1 << 30), None),
+            (
+                BASE.replace("pml_width = 8", "pml_width = 8\nfree_surface = false"),
+                None,
+                None,
+            ),
+            (format!("{BASE}\n[scheme]\norder = 4"), Some(5), Some(3)),
+        ] {
+            let strategy = Strategy::Surface { segment, inset };
+            let cfg = Config::from_toml(&text).unwrap();
+            let m = estimate_gradient_with(&cfg, Path::new("."), strategy).unwrap();
+            let mut s = sim(&text);
+            let observed = s.receivers.traces.clone();
+            let weights = vec![1.0; observed.len()];
+            let run = gradient_with(
+                &mut s,
+                |r| l2_misfit(&r.traces, &observed, &weights),
+                strategy,
+            )
+            .unwrap();
+            let held = run.memory_bytes + 4 * observed.iter().map(Vec::len).sum::<usize>();
+            assert_eq!(m.peak, held as u64, "{segment:?} {inset:?}\n{}", m.table());
+            let Strategy::Surface {
+                segment: Some(k), ..
+            } = run.strategy
+            else {
+                panic!("{:?}", run.strategy)
+            };
+            assert!(
+                m.table().contains(&format!("records for {k} steps")),
+                "{}",
+                m.table()
+            );
+        }
         // Saved for the whole run, the band of this small grid outweighs the checkpoints it
         // spares; split into segments, it needs less than replaying from checkpoints.
         let cfg = Config::from_toml(BASE).unwrap();
@@ -813,6 +909,13 @@ mod tests {
             segments < replay && segments <= whole,
             "{segments} {replay} {whole}"
         );
+        // A surface's records are a quarter of the band's at order 8, so they need less
+        // still.
+        let surface = plan(Strategy::Surface {
+            segment: None,
+            inset: None,
+        });
+        assert!(surface < segments, "{surface} {segments}");
     }
 
     /// An inversion's plan counts what it holds at its peak, a gradient run after a step with

@@ -41,6 +41,7 @@ use crate::model::Model;
 use crate::receiver::{Component, Receivers};
 use crate::simulation::Simulation;
 use crate::solver::{Band, Field, Solver, State};
+use crate::surface::Surface;
 
 /// ½ Σ_c w_c Σ (d - d_obs)² over every recorded sample, and its derivative with respect to
 /// each sample, w_c (d - d_obs): the adjoint source. Traces in the layout of
@@ -174,6 +175,17 @@ pub enum Strategy {
     /// needs neither checkpoints nor replays. Exact outside the layers up to single-precision
     /// round-off, which accumulates over a segment; inside them it means nothing.
     Reconstruct { segment: Option<usize> },
+    /// Rebuild it inside a closed surface one node wide from the velocities and tractions
+    /// recorded on it, injected as sources into the time-reversed run (Aaker et al. 2020;
+    /// [`Surface`]), the surface `inset` nodes inside the layers (by default, and at least,
+    /// the stencil's half-length L): segments as for [`Strategy::Reconstruct`], each rebuilt
+    /// from its end truncated to the surface. Approximate: the one-node surface stands in for
+    /// the stencil's 2L-node reach, so the rebuilt field leaks a little; and the gradient
+    /// means something only L nodes inside the surface, 2L in from the layers.
+    Surface {
+        segment: Option<usize>,
+        inset: Option<usize>,
+    },
 }
 
 impl Default for Strategy {
@@ -255,6 +267,10 @@ pub fn gradient_with(
     ensure!(sim.solver.step == 0, "the forward run must start at rest");
     let steps = sim.steps;
     let band = matches!(strategy, Strategy::Reconstruct { .. }).then(|| sim.band());
+    let surface = match strategy {
+        Strategy::Surface { inset, .. } => Some(Surface::new(&sim.solver, inset)?),
+        _ => None,
+    };
     let (every, strategy) = match strategy {
         Strategy::Checkpoints { every } => {
             let every = checkpoint_interval(steps, every);
@@ -265,8 +281,20 @@ pub fn gradient_with(
             let k = reconstruction_segment(steps, sim.solver.state_bytes(), record, segment);
             (k, Strategy::Reconstruct { segment: Some(k) })
         }
+        Strategy::Surface { segment, inset } => {
+            let record = 4 * surface.as_ref().map_or(0, Surface::len);
+            let k = reconstruction_segment(steps, sim.solver.state_bytes(), record, segment);
+            let inset = inset.unwrap_or(sim.solver.stencil.half_length());
+            (
+                k,
+                Strategy::Surface {
+                    segment: Some(k),
+                    inset: Some(inset),
+                },
+            )
+        }
     };
-    let rebuild = matches!(strategy, Strategy::Reconstruct { .. });
+    let rebuild = !matches!(strategy, Strategy::Checkpoints { .. });
     let segments = steps.div_ceil(every);
     // The last segment rebuilt needs no checkpoint: its band is saved on the way forward.
     let last = if rebuild {
@@ -274,9 +302,13 @@ pub fn gradient_with(
     } else {
         steps
     };
-    let mut records = band
-        .as_ref()
-        .map_or(Vec::new(), |b| vec![0.0f32; every * b.len()]);
+    let mut records = match (&band, &surface) {
+        (Some(b), _) => vec![0.0f32; every * b.len()],
+        // A segment's records run from the state before its first step to the state after
+        // its last.
+        (_, Some(s)) => vec![0.0f32; (every + 1) * s.len()],
+        _ => Vec::new(),
+    };
 
     // Forward, keeping the state at the start of every segment.
     let mut checkpoints: Vec<State> = Vec::with_capacity(segments);
@@ -290,10 +322,20 @@ pub fn gradient_with(
             let r = (n - last) * b.len();
             b.save(&sim.solver.fields, &mut records[r..r + b.len()]);
         }
+        if let Some(s) = &surface
+            && n >= last
+        {
+            let r = (n - last) * s.len();
+            s.save(&sim.solver.fields, &mut records[r..r + s.len()]);
+        }
         sim.advance();
         if (n.is_multiple_of(100) || n + 1 == steps) && !sim.solver.peak_velocity().is_finite() {
             bail!("the forward wavefield blew up by step {}", n + 1);
         }
+    }
+    if let Some(s) = &surface {
+        let r = (steps - last) * s.len();
+        s.save(&sim.solver.fields, &mut records[r..r + s.len()]);
     }
     // The traces as `run` writes them, and as observed data from it are: un-warped when the
     // run removes time dispersion (crate::tdt). The misfit is of those, so its derivative goes
@@ -345,6 +387,40 @@ pub fn gradient_with(
                 let before = sim.solver.fields.velocities();
                 c.step(&sim.solver, n, before, after.each_ref().map(Vec::as_slice));
             }
+            c.check()?;
+        }
+    } else if let Some(surface) = &surface {
+        let slen = surface.len();
+        let ops = sim.truncated_sources(surface);
+        let mut after: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0f32; len]);
+        peak_bytes = fixed
+            + held_checkpoints
+            + 4 * records.len()
+            + surface.memory_bytes()
+            + 4 * after.iter().map(Vec::len).sum::<usize>();
+        for s in (0..segments).rev() {
+            let start = s * every;
+            let end = (start + every).min(steps);
+            let record = |n: usize| (n - start) * slen..(n - start + 1) * slen;
+            if start < last {
+                sim.solver.restore(&checkpoints[s]);
+                for n in start..end {
+                    surface.save(&sim.solver.fields, &mut records[record(n)]);
+                    sim.step();
+                }
+                surface.save(&sim.solver.fields, &mut records[record(end)]);
+            }
+            // From the segment's end, exact, truncated to the surface and reversed.
+            sim.begin_rebuild(surface, &ops, end, &records[record(end)]);
+            for n in (start..end).rev() {
+                for (a, v) in after.iter_mut().zip(sim.solver.fields.velocities()) {
+                    a.copy_from_slice(v);
+                }
+                sim.rebuild_step(surface, &ops, n, &records[record(n)]);
+                let before = sim.solver.fields.velocities();
+                c.step(&sim.solver, n, before, after.each_ref().map(Vec::as_slice));
+            }
+            sim.solver.step = start;
             c.check()?;
         }
     } else {
@@ -799,6 +875,143 @@ mod tests {
                     .fold(0.0f64, |m, &n| m.max((a[n] - b[n]).abs() / scale));
                 println!("rebuilt, segment {segment:?}, {name}: off by {worst:.1e} of the largest");
                 assert!(scale > 0.0 && worst < 1e-4, "{segment:?}, {name}: {worst}");
+            }
+        }
+    }
+
+    /// A two-layer model with a sphere, a force and an explosion inside the surface, for the
+    /// rebuild inside a surface (`order` and `boundary` lines as given).
+    fn surface_config(order: usize, boundary: &str, scheme: &str) -> crate::config::Config {
+        crate::config::Config::from_toml(&format!(
+            r#"
+            [grid]
+            points = [44, 40, 40]
+            spacing = 10.0
+            [time]
+            duration = 0.25
+            [boundary]
+            pml_width = 6
+            {boundary}
+            [scheme]
+            order = {order}
+            {scheme}
+            [[model.layer]]
+            top = 0.0
+            vp = 2000.0
+            vs = 1000.0
+            rho = 2000.0
+            [[model.layer]]
+            top = 230.0
+            vp = 2600.0
+            vs = 1400.0
+            rho = 2200.0
+            [[model.sphere]]
+            center = [220.0, 200.0, 190.0]
+            radius = 30.0
+            vp = 2300.0
+            vs = 1200.0
+            rho = 2100.0
+            [[source]]
+            position = [170.0, 180.0, 150.0]
+            force = [3e8, 0.0, 1e9]
+            wavelet = {{ kind = "ricker", frequency = 18.0 }}
+            [[source]]
+            position = [260.0, 220.0, 240.0]
+            explosion = 2e12
+            wavelet = {{ kind = "ricker", frequency = 18.0, delay = 0.06 }}
+            [receivers]
+            components = ["vx", "vz", "p"]
+            [[receivers.line]]
+            from = [140.0, 200.0, 40.0]
+            to = [300.0, 200.0, 40.0]
+            count = 5
+            [output]
+            record_every = 2
+            "#
+        ))
+        .unwrap()
+    }
+
+    /// Rebuilt inside a surface, the gradient approaches the replay's at the nodes whose
+    /// gradient reads only values inside it: exactly (to round-off) at second order, where
+    /// the one-node surface is the stencil's whole reach, and to about 10⁻³ of its largest
+    /// value at orders 4 and 8, where it stands in for 2L nodes.
+    ///
+    /// Measured, the largest difference relative to each parameter's largest value (default
+    /// segments; the whole run): order 2 with Taylor coefficients 4.5e-8–1.4e-7 with a free
+    /// surface or layers all round; order 8, free surface, 1.1–4.0e-3; all round 4.5e-4–1.5e-3;
+    /// order 4 3.4e-4–1.6e-3. The tolerances are about four times the largest.
+    #[test]
+    fn surface_gradients_approach_the_replay() {
+        let optimised = "optimised_for = 4.0";
+        let taylor = "coefficients = \"taylor\"";
+        let all_round = "free_surface = false";
+        for (label, order, boundary, scheme, tolerance) in [
+            ("free surface, order 8", 8, "", optimised, 1.6e-2),
+            ("layers all round, order 8", 8, all_round, optimised, 1.6e-2),
+            ("free surface, order 4", 4, "", optimised, 1.6e-2),
+            ("free surface, order 2, Taylor", 2, "", taylor, 1e-6),
+            (
+                "layers all round, order 2, Taylor",
+                2,
+                all_round,
+                taylor,
+                1e-6,
+            ),
+        ] {
+            let cfg = surface_config(order, boundary, scheme);
+            let run = |strategy| {
+                let mut sim = Simulation::new(&cfg, std::path::Path::new(".")).unwrap();
+                let zeros: Vec<Vec<f32>> = sim
+                    .receivers
+                    .traces
+                    .iter()
+                    .map(|t| vec![0.0; t.len()])
+                    .collect();
+                let weights = [1.0, 1.0, 1e-18];
+                let r = gradient_with(
+                    &mut sim,
+                    |r| l2_misfit(&r.traces, &zeros, &weights),
+                    strategy,
+                )
+                .unwrap();
+                (sim, r)
+            };
+            let (sim, reference) = run(Strategy::Checkpoints { every: None });
+            let surface = Surface::new(&sim.solver, None).unwrap();
+            let [x, y, z] = surface.bounds.region(sim.solver.stencil.half_length());
+            let g = sim.solver.grid;
+            let nodes: Vec<usize> = z
+                .flat_map(|k| {
+                    let x = x.clone();
+                    y.clone()
+                        .flat_map(move |j| x.clone().map(move |i| g.interior_idx(i, j, k)))
+                })
+                .collect();
+            for segment in [None, Some(usize::MAX)] {
+                let (_, r) = run(Strategy::Surface {
+                    segment,
+                    inset: None,
+                });
+                for (name, a, b) in [
+                    ("rho", &r.gradient.rho, &reference.gradient.rho),
+                    ("lambda", &r.gradient.lambda, &reference.gradient.lambda),
+                    ("mu", &r.gradient.mu, &reference.gradient.mu),
+                ] {
+                    let scale = nodes.iter().fold(0.0f64, |m, &n| m.max(b[n].abs()));
+                    let worst = nodes
+                        .iter()
+                        .fold(0.0f64, |m, &n| m.max((a[n] - b[n]).abs() / scale));
+                    let rms = (nodes.iter().map(|&n| (a[n] - b[n]).powi(2)).sum::<f64>()
+                        / nodes.iter().map(|&n| b[n].powi(2)).sum::<f64>())
+                    .sqrt();
+                    println!(
+                        "{label}, segments {:?}, {name}: off by {worst:.1e} of the largest, \
+                         {rms:.1e} rms",
+                        r.checkpoint_every
+                    );
+                    assert!(scale > 0.0 && worst < tolerance, "{label}, {name}: {worst}");
+                }
             }
         }
     }

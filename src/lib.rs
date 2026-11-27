@@ -29,5 +29,6 @@ pub mod simulation;
 pub mod snapshot;
 pub mod solver;
 pub mod source;
+pub mod surface;
 pub mod tdt;
 pub mod view;

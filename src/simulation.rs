@@ -21,8 +21,9 @@ use crate::npy;
 use crate::receiver::{Component, Receivers};
 use crate::simd::Kernels;
 use crate::snapshot::Snapshot;
-use crate::solver::{Band, Fields, Solver};
+use crate::solver::{Band, Fields, PointOp, Solver};
 use crate::source::{Mechanism, Source, Wavelet};
+use crate::surface::Surface;
 use crate::tdt::Warp;
 
 /// Fewer grid points than this per shortest wavelength and numerical dispersion shows: a few
@@ -514,6 +515,61 @@ impl Simulation {
         self.solver.step_back_with(band, before, force, moment);
     }
 
+    /// The sources' operators as the field truncated to `surface` feels them, for
+    /// [`Simulation::begin_rebuild`] and [`Simulation::rebuild_step`].
+    pub fn truncated_sources(&self, surface: &Surface) -> Vec<PointOp> {
+        let g = self.solver.grid;
+        self.sources
+            .iter()
+            .map(|s| surface.truncated_op(&g, &s.op))
+            .collect()
+    }
+
+    /// Starts rebuilding the run backwards inside `surface` ([`crate::surface`]) from the state
+    /// the solver holds, after step `end` - 1: truncates it to the surface and reverses it
+    /// (v, -σ), then undoes the stress update of step `end` - 1 with `record`, the surface's
+    /// record of this state. `ops` are [`Simulation::truncated_sources`]. The solver then
+    /// holds v⁽ᵉⁿᵈ⁻½⁾ and -σ⁽ᵉⁿᵈ⁻¹⁾ inside the surface.
+    pub fn begin_rebuild(
+        &mut self,
+        surface: &Surface,
+        ops: &[PointOp],
+        end: usize,
+        record: &[f32],
+    ) {
+        surface.truncate(&mut self.solver);
+        let (sources, dt) = (&self.sources, self.solver.dt);
+        self.solver.advance_stress_with(|f| {
+            surface.inject_stresses(f, record);
+            if let Some(n) = end.checked_sub(1) {
+                add_moments(sources, ops, f, n, dt);
+            }
+        });
+    }
+
+    /// Takes the rebuild back over step `n`'s velocity update and step `n` - 1's stress
+    /// update, the time-reversed run's forward step: `record` is the surface's record of the
+    /// state before step `n` (σ⁽ⁿ⁾ and v⁽ⁿ⁻½⁾ on it). Afterwards the solver holds v⁽ⁿ⁻½⁾ and
+    /// -σ⁽ⁿ⁻¹⁾ inside the surface, approximately; its step count means nothing.
+    pub fn rebuild_step(&mut self, surface: &Surface, ops: &[PointOp], n: usize, record: &[f32]) {
+        let (sources, dt) = (&self.sources, self.solver.dt);
+        self.solver.step_with(
+            |f, _| {
+                surface.inject_forces(f, record);
+                // A force of the forward run is withdrawn: ṽ = v.
+                for (s, op) in sources.iter().zip(ops).filter(|(s, _)| s.is_force()) {
+                    op.inject(f, -s.value(n, n as f64 * dt));
+                }
+            },
+            |f, _| {
+                surface.inject_stresses(f, record);
+                if let Some(m) = n.checked_sub(1) {
+                    add_moments(sources, ops, f, m, dt);
+                }
+            },
+        );
+    }
+
     /// Advances the wavefield one step, with the sources, without recording anything.
     pub fn step(&mut self) {
         let [force, moment] = acting(&self.sources, self.solver.step, Source::inject);
@@ -822,6 +878,14 @@ fn acting(
             }
         }
     })
+}
+
+/// Adds the moment tensors of step `n` through `ops`: taking a moment back adds it to the
+/// reversed stresses, -σ.
+fn add_moments(sources: &[Source], ops: &[PointOp], f: &mut Fields, n: usize, dt: f64) {
+    for (s, op) in sources.iter().zip(ops).filter(|(s, _)| !s.is_force()) {
+        op.inject(f, s.value(n, (n as f64 + 0.5) * dt));
+    }
 }
 
 /// Replaces each trace of `samples` values in `data` by `f` of it, taken in double precision.
