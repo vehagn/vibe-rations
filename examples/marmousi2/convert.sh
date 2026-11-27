@@ -10,6 +10,15 @@
 #   25m-west/            its western 6 km, x = 0–6 km      held out from the central part's
 #   25m-west-smooth/     the same smoothed over 250 m      inversion study (tests/marmousi2_study.rs)
 #   50m/                 the whole section at 50 m        ../marmousi2-50m.toml
+#
+# and for the inversion study's other starts and models:
+#
+#   25m-slowness/, 25m-central-slowness/, 25m-west-slowness/
+#                        smoothed over 250 m through the slownesses (harmonic means), which
+#                        keeps the slow sediments under the seafloor slow
+#   25m-central-hard/, 25m-west-hard/ and their -smooth/ starts
+#                        Poisson's ratio capped at 0.25, as the published elastic inversions
+#                        of Marmousi2 had it: no slow seafloor waves
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 raw=data/marmousi2
@@ -23,3 +32,11 @@ extrude=(cargo run --release --quiet --bin vibe-rations -- extrude
 "${extrude[@]}" --spacing 25 --x 0,6000 --out "$here/25m-west"
 "${extrude[@]}" --spacing 25 --x 0,6000 --smooth 250 --out "$here/25m-west-smooth"
 "${extrude[@]}" --spacing 50 --out "$here/50m"
+"${extrude[@]}" --spacing 25 --smooth 250 --slowness --out "$here/25m-slowness"
+"${extrude[@]}" --spacing 25 --x 6000,12000 --smooth 250 --slowness --out "$here/25m-central-slowness"
+"${extrude[@]}" --spacing 25 --x 0,6000 --smooth 250 --slowness --out "$here/25m-west-slowness"
+hard=(--max-poisson 0.25)
+"${extrude[@]}" --spacing 25 --x 6000,12000 "${hard[@]}" --out "$here/25m-central-hard"
+"${extrude[@]}" --spacing 25 --x 6000,12000 "${hard[@]}" --smooth 250 --out "$here/25m-central-hard-smooth"
+"${extrude[@]}" --spacing 25 --x 0,6000 "${hard[@]}" --out "$here/25m-west-hard"
+"${extrude[@]}" --spacing 25 --x 0,6000 "${hard[@]}" --smooth 250 --out "$here/25m-west-hard-smooth"

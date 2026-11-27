@@ -24,6 +24,15 @@
 //!   to what the truth predicts. `central_phase_checked_l2`, `west_phase_checked_l2`,
 //!   `central_phase_checked_stages`, `west_phase_checked_stages`: inversions muting the slow
 //!   waves only beyond the offsets it passes (`phase_mutes`).
+//! - The 2026-11-26 plan: `seafloor_speeds_by_start` and `slowness_phase_check` (Gate A: the
+//!   start smoothed through its slownesses, `Case::part_from(part, "slowness", …)`, under the
+//!   seafloor and against the data); `slowness_l2`, `slowness_phase_checked_l2`,
+//!   `slowness_muted_l2` and the west's `west_slowness_l2`, `west_slowness_phase_checked_l2`
+//!   (inversions from it); `central_split_by_check` (what the check's mutes keep of the
+//!   gradient, split by side, offset and line); `hard_l2`, `west_hard_l2`, `hard_muted_l2`
+//!   (the hard-seabed control: Poisson's ratio capped at 0.25, the parts `central-hard` and
+//!   `west-hard`); `shallow_first_l2`, `west_shallow_first_l2`, `slowness_shallow_first_l2`
+//!   (layer stripping: the 250 m under the seafloor first, then everything).
 //! - `whole_by_region`: the whole-section inversion's result (`examples/marmousi2/whole.toml`)
 //!   in 1 km windows along x, next to how far its start's seafloor vs is from the truth's.
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
@@ -65,16 +74,34 @@ impl Case {
     /// model below the same seafloor (`west`, x = 0–6 km, is held out from the choices made
     /// on the central part).
     fn part(part: &str, variant: Variant) -> Case {
+        Case::part_from(part, "smooth", variant)
+    }
+
+    /// [`Case::part`] from another start, `25m-<part>-<start>` (`smooth`: the speeds smoothed
+    /// over 250 m; `slowness`: the slownesses). The hard-seabed parts, Poisson's ratio capped
+    /// at 0.25, are the parts `central-hard` and `west-hard`.
+    fn part_from(part: &str, start: &str, variant: Variant) -> Case {
+        Case::part_with(part, &format!("25m-{part}-{start}"), variant)
+    }
+
+    /// [`Case::part`] with the start's vp and vs read from `dir`, relative to
+    /// `examples/marmousi2`: a start's directory, or another inversion's result
+    /// (`../../out/marmousi2/study/<name>/stage-<s>`).
+    fn part_with(part: &str, dir: &str, variant: Variant) -> Case {
         let base = PathBuf::from("examples/marmousi2");
         let on_part = |text: String| text.replace("25m-central", &format!("25m-{part}"));
-        let start = on_part(central_text(variant));
+        let start_text = on_part(central_text(variant))
+            .replace(&format!("25m-{part}-smooth/"), &format!("{dir}/"));
         let truth = on_part(std::fs::read_to_string(base.join("central-true.toml")).unwrap());
-        let missing = base.join(format!("25m-{part}/vp.npy"));
-        assert!(
-            missing.is_file(),
-            "{} is missing: run `just marmousi2` first",
-            missing.display()
-        );
+        for dir in [format!("25m-{part}"), dir.to_string()] {
+            let missing = base.join(dir).join("vp.npy");
+            assert!(
+                missing.is_file(),
+                "{} is missing: run `just marmousi2` first",
+                missing.display()
+            );
+        }
+        let start = start_text;
         Case {
             start: Config::from_toml(&start).unwrap(),
             truth: Config::from_toml(&truth).unwrap(),
@@ -705,6 +732,13 @@ fn gradient_cells(g: &[f64], m0: &[f32], truth: &[f32], p: &[f64], bands: &[Vec<
 /// with the inversion's water level, as its preconditioner divides. A set without mutes gives
 /// the whole misfit and gradient, by component; it must come first.
 fn split_by_mute(case: &Case, sets: &[(&str, Vec<MuteConfig>)]) {
+    split_by_mutes(case, sets, &[]);
+}
+
+/// [`split_by_mute`], printing besides the gradient of what set `a` keeps less what set `b`
+/// keeps, both components together, for each pair `(a, b)` of `differences`: the part of the
+/// data one keeps and the other doesn't.
+fn split_by_mutes(case: &Case, sets: &[(&str, Vec<MuteConfig>)], differences: &[(usize, usize)]) {
     assert!(sets[0].1.is_empty(), "the first set keeps everything");
     let t = Instant::now();
     let observed = case.record();
@@ -873,6 +907,24 @@ fn split_by_mute(case: &Case, sets: &[(&str, Vec<MuteConfig>)]) {
             });
             row(&format!("{name}, removed"), &removed);
         }
+    }
+    for &(a, b) in differences {
+        let (ka, kb) = (sum(&kept[a]), sum(&kept[b]));
+        let difference = [0, 1].map(|i| {
+            ka[i]
+                .iter()
+                .zip(&kb[i])
+                .map(|(x, y)| x - y)
+                .collect::<Vec<f64>>()
+        });
+        let misfit = |k: usize| kept_misfit[k].iter().sum::<f64>();
+        println!(
+            "{} less {}: {:.1}% of the misfit",
+            sets[a].0,
+            sets[b].0,
+            100.0 * (misfit(a) - misfit(b)) / all
+        );
+        row(&format!("{} less {}", sets[a].0, sets[b].0), &difference);
     }
     println!("{:.0} s in all", t.elapsed().as_secs_f64());
 }
@@ -1102,40 +1154,62 @@ fn west_misfit_by_mute() {
 #[ignore = "a study: `just marmousi2-study seafloor_speeds` (seconds)"]
 fn seafloor_speeds() {
     for part in ["central", "west"] {
-        let case = Case::part(part, L2);
-        let (start, truth) = (case.model(&case.start), case.model(&case.truth));
-        let g = start.grid;
-        let receiver = case.start.receivers.positions().unwrap()[0];
-        let [_, j, top] = g.nearest_node(receiver).unwrap();
-        let w = case.start.boundary.pml_width;
-        let columns: Vec<usize> = (w..g.n[0] - w).collect();
-        let vs = |m: &Model, i: usize, k: usize| m.vs[g.interior_idx(i, j, k)] as f64;
-        let slowness =
-            |m: &Model, i: usize| (top..top + 10).map(|k| 1.0 / vs(m, i, k)).sum::<f64>() / 10.0;
-        let range = |m: &Model| {
-            columns
-                .iter()
-                .map(|&i| vs(m, i, top))
-                .fold((f64::INFINITY, 0.0f64), |(lo, hi), v| {
-                    (lo.min(v), hi.max(v))
-                })
-        };
-        let mean = |f: &dyn Fn(usize) -> f64| {
-            columns.iter().map(|&i| f(i)).sum::<f64>() / columns.len() as f64
-        };
-        let delay = |i: usize| 1000.0 * (slowness(&truth, i) - slowness(&start, i));
-        let largest = columns.iter().map(|&i| delay(i)).fold(0.0f64, f64::max);
-        let ((tl, th), (sl, sh)) = (range(&truth), range(&start));
-        println!(
-            "{part}: vs at {:.0} m, true {tl:.0}–{th:.0} m/s, start {sl:.0}–{sh:.0}; over the \
-             250 m below, harmonic means true {:.0}, start {:.0} m/s; delay over 1 km {:.2} s \
-             on average, {largest:.2} s at most",
-            top as f64 * g.h[2],
-            1.0 / mean(&|i| slowness(&truth, i)),
-            1.0 / mean(&|i| slowness(&start, i)),
-            mean(&delay),
-        );
+        print_seafloor_speeds(part, &Case::part(part, L2));
     }
+}
+
+/// [`seafloor_speeds`] for both starts of each part: the speeds smoothed over 250 m, and the
+/// slownesses (Gate A of the 2026-11-26 plan: is the slowness start's shallow vs within about
+/// 10% of the truth's in the centre, where the other start's is 18% fast?).
+#[test]
+#[ignore = "a study: `just marmousi2-study seafloor_speeds_by_start` (seconds)"]
+fn seafloor_speeds_by_start() {
+    for part in ["central", "west"] {
+        for start in ["smooth", "slowness"] {
+            print_seafloor_speeds(
+                &format!("{part}, {start}"),
+                &Case::part_from(part, start, L2),
+            );
+        }
+    }
+}
+
+fn print_seafloor_speeds(part: &str, case: &Case) {
+    let (start, truth) = (case.model(&case.start), case.model(&case.truth));
+    let g = start.grid;
+    let receiver = case.start.receivers.positions().unwrap()[0];
+    let [_, j, top] = g.nearest_node(receiver).unwrap();
+    let w = case.start.boundary.pml_width;
+    let columns: Vec<usize> = (w..g.n[0] - w).collect();
+    let vs = |m: &Model, i: usize, k: usize| m.vs[g.interior_idx(i, j, k)] as f64;
+    let slowness =
+        |m: &Model, i: usize| (top..top + 10).map(|k| 1.0 / vs(m, i, k)).sum::<f64>() / 10.0;
+    let range = |m: &Model| {
+        columns
+            .iter()
+            .map(|&i| vs(m, i, top))
+            .fold((f64::INFINITY, 0.0f64), |(lo, hi), v| {
+                (lo.min(v), hi.max(v))
+            })
+    };
+    let mean = |f: &dyn Fn(usize) -> f64| {
+        columns.iter().map(|&i| f(i)).sum::<f64>() / columns.len() as f64
+    };
+    let delay = |i: usize| 1000.0 * (slowness(&truth, i) - slowness(&start, i));
+    let largest = columns.iter().map(|&i| delay(i)).fold(0.0f64, f64::max);
+    let ((tl, th), (sl, sh)) = (range(&truth), range(&start));
+    let (true_mean, start_mean) = (
+        1.0 / mean(&|i| slowness(&truth, i)),
+        1.0 / mean(&|i| slowness(&start, i)),
+    );
+    println!(
+        "{part}: vs at {:.0} m, true {tl:.0}–{th:.0} m/s, start {sl:.0}–{sh:.0}; over the \
+         250 m below, harmonic means true {true_mean:.0}, start {start_mean:.0} m/s \
+         ({:+.1}%); delay over 1 km {:.2} s on average, {largest:.2} s at most",
+        top as f64 * g.h[2],
+        100.0 * (start_mean / true_mean - 1.0),
+        mean(&delay),
+    );
 }
 
 /// The whole-section inversion (`examples/marmousi2/whole.toml`, run with `invert`, its
@@ -1632,10 +1706,15 @@ fn checked(case: &Case) -> (MuteConfig, Vec<Vec<[Limit; 2]>>) {
 /// half a cycle at `CHECK_FREQUENCIES[f]`, shot by shot and side by side: the source's peak
 /// frequency (2), or twice that (3), nearer the top of the band the unfiltered misfit fits.
 fn phase_checked_l2(part: &str, f: usize) -> Case {
-    let (mute, limits) = checked(&Case::part(part, L2));
+    phase_checked_l2_from(part, "smooth", f)
+}
+
+/// [`phase_checked_l2`] from another start (`Case::part_from`).
+fn phase_checked_l2_from(part: &str, start: &str, f: usize) -> Case {
+    let (mute, limits) = checked(&Case::part_from(part, start, L2));
     let mutes = phase_mutes("inversion.mute", &mute, &limits[f]);
     println!("the mutes:\n{mutes}");
-    Case::part(part, ("iterations = 5", leak(mutes)))
+    Case::part_from(part, start, ("iterations = 5", leak(mutes)))
 }
 
 /// The frequency stages (0.6 Hz, 1.0 Hz, all) with each stage's mutes from the check at its
@@ -1686,29 +1765,46 @@ fn phase_mutes_parse() {
 #[ignore = "a study: `just marmousi2-study phase_check` (about 3 minutes)"]
 fn phase_check() {
     for part in ["central", "west"] {
-        let case = Case::part(part, L2);
-        println!("{part}:");
-        let (mute, limits) = checked(&case);
-        let predicted = predicted_limits(&case, &CHECK_FREQUENCIES);
-        println!(
-            "{part}: the limits (m) by shot, left / right, from the data; then from the truth's \
-             delays"
+        phase_check_on(part, &Case::part(part, L2));
+    }
+}
+
+/// The phase check of the slow waves from the start smoothed through its slownesses (Gate A of
+/// the 2026-11-26 plan).
+#[test]
+#[ignore = "a study: `just marmousi2-study slowness_phase_check` (about 10 minutes)"]
+fn slowness_phase_check() {
+    for part in ["central", "west"] {
+        phase_check_on(
+            &format!("{part}, slowness start"),
+            &Case::part_from(part, "slowness", L2),
         );
-        for (fi, f) in CHECK_FREQUENCIES.iter().enumerate() {
-            for (s, (l, p)) in limits[fi].iter().zip(&predicted[fi]).enumerate() {
-                println!(
-                    "  {f:.1} Hz, shot {s}: {} / {} (windows to {:.0} / {:.0}); truth {:.0} / \
-                     {:.0}",
-                    l[0],
-                    l[1],
-                    l[0].furthest,
-                    l[1].furthest,
-                    p[0].min(l[0].furthest),
-                    p[1].min(l[1].furthest)
-                );
-            }
-            println!("{}", phase_mutes(&format!("{f} Hz"), &mute, &limits[fi]));
+    }
+}
+
+/// [`phase_check`] on one case, labelled `part`.
+fn phase_check_on(part: &str, case: &Case) {
+    println!("{part}:");
+    let (mute, limits) = checked(case);
+    let predicted = predicted_limits(case, &CHECK_FREQUENCIES);
+    println!(
+        "{part}: the limits (m) by shot, left / right, from the data; then from the truth's \
+         delays"
+    );
+    for (fi, f) in CHECK_FREQUENCIES.iter().enumerate() {
+        for (s, (l, p)) in limits[fi].iter().zip(&predicted[fi]).enumerate() {
+            println!(
+                "  {f:.1} Hz, shot {s}: {} / {} (windows to {:.0} / {:.0}); truth {:.0} / \
+                 {:.0}",
+                l[0],
+                l[1],
+                l[0].furthest,
+                l[1].furthest,
+                p[0].min(l[0].furthest),
+                p[1].min(l[1].furthest)
+            );
         }
+        println!("{}", phase_mutes(&format!("{f} Hz"), &mute, &limits[fi]));
     }
 }
 
@@ -1762,6 +1858,182 @@ fn west_muted_l2() {
     invert(
         "west-muted-l2",
         &Case::part("west", muted_with("iterations = 5", false, &mute)),
+    );
+}
+
+/// What the check's mutes (at the source's peak, 1.2 Hz) keep of the central start's misfit
+/// and gradient, split further, to find which kept arrivals turn vs away below 750 m (the
+/// research log's 2026-11-25 entry): the slow waves on the sides the check passes whole (the
+/// check less the same with those sides muted), those it keeps beyond 300 m (the check less
+/// the same with every side cut at 300 m), those within 300 m (that less the line alone), and
+/// what arrives before the line (the line's own kept part).
+#[test]
+#[ignore = "a study: `just marmousi2-study central_split_by_check` (about 90 minutes)"]
+fn central_split_by_check() {
+    let (mute, limits) = checked(&Case::part("central", L2));
+    let at_peak = &limits[2];
+    let whole_sides_muted: Vec<[Limit; 2]> = at_peak
+        .iter()
+        .map(|sides| {
+            sides.map(|l| match l.why {
+                "end" => Limit {
+                    offset: 0.0,
+                    why: "muted",
+                    ..l
+                },
+                _ => l,
+            })
+        })
+        .collect();
+    let within_300: Vec<[Limit; 2]> = at_peak
+        .iter()
+        .map(|sides| {
+            sides.map(|l| {
+                if l.why == "end" || l.offset > 300.0 {
+                    Limit {
+                        offset: 300.0,
+                        why: "300 m",
+                        ..l
+                    }
+                } else {
+                    l
+                }
+            })
+        })
+        .collect();
+    let mutes = |limits: &[[Limit; 2]]| {
+        let tables = phase_mutes("inversion.mute", &mute, limits);
+        println!("{tables}");
+        mutes_of(("iterations = 0", leak(tables)))
+    };
+    split_by_mutes(
+        &Case::part("central", ("iterations = 0", "")),
+        &[
+            ("all", Vec::new()),
+            ("check", mutes(at_peak)),
+            ("check, whole sides muted", mutes(&whole_sides_muted)),
+            ("check within 300 m", mutes(&within_300)),
+            ("line", vec![mute.clone()]),
+        ],
+        &[(1, 2), (1, 3), (3, 4)],
+    );
+}
+
+/// Layer stripping (the 2026-11-26 plan's next step): three L2 iterations with only the 250 m
+/// under the seafloor free (`fixed_below = 750`), where the slow waves are most sensitive, so
+/// that what they say about the start's too fast sediments can't be put deeper; then five with
+/// everything below 500 m free, from that result. Reported after each part, and at the end
+/// against the original start, beside `l2`'s five iterations.
+fn shallow_first(name: &str, part: &str, start: &str) {
+    let shallow = format!("{name}-shallow");
+    invert(
+        &shallow,
+        &Case::part_from(part, start, ("iterations = 3\nfixed_below = 750.0", "")),
+    );
+    let result = |name: &str| format!("../../out/marmousi2/study/{name}/stage-0");
+    invert(name, &Case::part_with(part, &result(&shallow), L2));
+    let original = Case::part_from(part, start, L2);
+    let end = Case::part_with(part, &result(name), L2);
+    println!("{name}: both parts, against the original start");
+    print_bands(
+        name,
+        &original,
+        &end.model(&end.start),
+        &original.model(&original.start),
+        &original.model(&original.truth),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study shallow_first_l2` (about 2 hours)"]
+fn shallow_first_l2() {
+    shallow_first("shallow-first-l2", "central", "smooth");
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_shallow_first_l2` (about 2 hours)"]
+fn west_shallow_first_l2() {
+    shallow_first("west-shallow-first-l2", "west", "smooth");
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study slowness_shallow_first_l2` (about 2 hours)"]
+fn slowness_shallow_first_l2() {
+    shallow_first("slowness-shallow-first-l2", "central", "slowness");
+}
+
+/// L2 from the start smoothed through its slownesses, on the central part.
+#[test]
+#[ignore = "a study: `just marmousi2-study slowness_l2` (about 45 minutes)"]
+fn slowness_l2() {
+    invert("slowness-l2", &Case::part_from("central", "slowness", L2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_slowness_l2` (about 45 minutes)"]
+fn west_slowness_l2() {
+    invert("west-slowness-l2", &Case::part_from("west", "slowness", L2));
+}
+
+/// The check's L2 (`central_phase_checked_l2`) from the slowness start, with the check made
+/// against that start's synthetics.
+#[test]
+#[ignore = "a study: `just marmousi2-study slowness_phase_checked_l2` (about 45 minutes)"]
+fn slowness_phase_checked_l2() {
+    invert(
+        "slowness-phase-checked-l2",
+        &phase_checked_l2_from("central", "slowness", 2),
+    );
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_slowness_phase_checked_l2` (about 45 minutes)"]
+fn west_slowness_phase_checked_l2() {
+    invert(
+        "west-slowness-phase-checked-l2",
+        &phase_checked_l2_from("west", "slowness", 2),
+    );
+}
+
+/// The slow waves muted from the line `slow_waves_mute` works out from the slowness start.
+#[test]
+#[ignore = "a study: `just marmousi2-study slowness_muted_l2` (about 45 minutes)"]
+fn slowness_muted_l2() {
+    let (velocity, mute) = slow_waves_mute(&Case::part_from("central", "slowness", L2), 425.0);
+    println!("the mute line: {velocity:.0} m/s");
+    invert(
+        "slowness-muted-l2",
+        &Case::part_from(
+            "central",
+            "slowness",
+            muted_with("iterations = 5", false, &mute),
+        ),
+    );
+}
+
+/// The hard-seabed control (the literature note's first comparison): truth and start with
+/// Poisson's ratio capped at 0.25 (the start capped, then smoothed), everything else as
+/// `l2`. With no slow seafloor waves, does L2 move vs towards the truth below 750 m?
+#[test]
+#[ignore = "a study: `just marmousi2-study hard_l2` (about 45 minutes)"]
+fn hard_l2() {
+    invert("hard-l2", &Case::part("central-hard", L2));
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_hard_l2` (about 45 minutes)"]
+fn west_hard_l2() {
+    invert("west-hard-l2", &Case::part("west-hard", L2));
+}
+
+/// `muted_l2`'s line (600 m/s) on the hard-seabed control: what the mute costs where there
+/// are no slow waves to remove.
+#[test]
+#[ignore = "a study: `just marmousi2-study hard_muted_l2` (about 45 minutes)"]
+fn hard_muted_l2() {
+    invert(
+        "hard-muted-l2",
+        &Case::part("central-hard", muted(false, SLOW_WAVES_MUTED)),
     );
 }
 
