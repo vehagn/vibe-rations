@@ -823,7 +823,13 @@ Planned next, following Fichtner (2011), ch. 7–11:
    `gradient` replays checkpoints unless asked; an inversion rebuilds by default
    (`[inversion] reconstruct`, since 2026-11-24, when five iterations on
    `examples/marmousi2/central.toml` matched the checkpointed ones to about $10^{-5}$ of the
-   update, in 2.44 against 4.41 GiB).
+   update, in 2.44 against 4.41 GiB). The alternative of Mittet (1994) in Aaker et al.'s
+   velocity–stress form (Geophys. J. Int., 2020) rebuilds the field inside a closed surface
+   one node wide from six values per surface node recorded on it, a quarter to a fifth of the
+   band's (`gradient --surface`; research log, "Rebuilding inside a surface"). It is exact at
+   second order, but at order 8 its gradient is off by $3 \times 10^{-4}$ to
+   $2 \times 10^{-3}$ of its largest value, a thousand times the band's, and it needs its
+   faces clear of the sources, the layers and the seabed, so the inversion keeps the band.
 4. **Error propagation.** How numerical error in the forward field (dispersion, the
    interface, free-surface and boundary errors above) and in the reconstruction carries into
    the adjoint field, the gradient and the inversion. The reconstruction's part is measured

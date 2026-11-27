@@ -21,7 +21,7 @@ opens a shell there instead.
 | `just accuracy [name]` | The stencil order and time step study, Lamb's problem on finer grids, and the free surface's excess by frequency and depth (prints tables) | ~11 min |
 | `just interfaces` | The interface study: plane waves at a planar interface, by its position between nodes, the layers' sampling and the order | ~3 min |
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
-| `just drift` | How far the rebuilt forward wavefield drifts (`gradient --reconstruct`) | ~3 min |
+| `just drift` | How far the rebuilt forward wavefield drifts, from the band (`gradient --reconstruct`) and inside a surface (`--surface`) | ~20 min |
 | `just gradient-accuracy [name]` | The solver's gradients against the exact kernels of a homogeneous full space | ~40 min |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
@@ -29,7 +29,7 @@ opens a shell there instead.
 | `just check <config>` / `just run <config>` | Set up / run a simulation | |
 | `just memory <config>` | The memory a run needs, part by part, without building it (`--gradient`, `--invert`: those runs') | instant |
 | `just remote-up <host>` / `just tunnel <host>` | On the host: start `vibe-rations serve` on a remote machine (Docker), and forward port 8089 to it | |
-| `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces (`--reconstruct`: rebuild the forward field backwards) | |
+| `just gradient <config> <observed>` | Misfit gradient for vp, vs, ρ against observed traces (`--reconstruct`: rebuild the forward field backwards; `--surface`: inside a surface, approximately) | |
 | `just invert <config>` | L-BFGS inversion as the configuration's `[inversion]` says | |
 | `just marmousi2` | Fetch Marmousi2 (467 MB, once) and make its model files, for `examples/marmousi2*` | ~2 min |
 | `just marmousi2-bench` | Time forward and gradient runs on it at orders 4 and 8, with their memory | ~10 min |
@@ -60,7 +60,7 @@ src/
   main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | extrude | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay or the field
-                 rebuilt backwards (Strategy), correlations
+                 rebuilt backwards from the band or inside a surface (Strategy), correlations
   inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search, stages
   misfit.rs      misfits and their exact derivatives: L2, time shifts, phase; zero-phase low-pass,
                  mutes and windows
@@ -75,6 +75,8 @@ src/
   fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid
+  surface.rs     a closed surface one node wide: the field recorded on it, injected to rebuild
+                 it inside (Aaker et al. 2020; `gradient --surface`, for comparison)
   tdt.rs         the time-dispersion transform: pre-warped sources, un-warped traces
   receiver.rs    recording traces through PointOps
   section.rs     model files from 2D SEG-Y sections: cell averages, smoothing, extrusion along y
@@ -111,7 +113,8 @@ tests/
   interfaces.rs  plane waves at a planar interface, by position, sampling and order (ignored;
                  `just interfaces`)
   inversion_study.rs  misfits, stages and preconditioning on small surveys (ignored; `just study`)
-  reconstruction.rs  the rebuilt wavefield's drift (ignored; `just drift`)
+  reconstruction.rs  the rebuilt wavefield's drift, from the band and inside a surface
+                 (ignored; `just drift`)
   gradient_accuracy.rs  gradients against the exact kernels (studies ignored; `just
                  gradient-accuracy`), and a baseline at the coarsest grid
   analytic_inversion.rs  the inversion against Born's Gauss–Newton solution in a full space:
@@ -156,6 +159,29 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **Rebuilding inside a surface** (`src/surface.rs`, `Strategy::Surface`, `gradient
+  --surface`; the log's "Rebuilding inside a surface", 2026-11-27). Aaker et al.'s method
+  (GJI 2020, `aaker2020gji`, not the GPU paper `aaker2020`), kept for comparison with the
+  band: six values per face node of a closed box one node wide, recorded forward and injected
+  into the time-reversed run, which is the solver's ordinary forward step with $\tilde v = v$,
+  $\tilde\sigma = -\sigma$, forces withdrawn and moments added, its layers absorbing what
+  leaks out. Each value is read onto the face's node plane, and spread back, with the
+  stencil's own interpolation along the normal; the product of the masks gives edges and
+  corners their shares. Exact at order 2 (the gradient to $1.4 \times 10^{-7}$ of the
+  replay's: the check on signs, timing and masks, so keep that test). At order 8 the field is
+  off by up to $6 \times 10^{-3}$ a node inside the faces ($3 \times 10^{-4}$ nine in), more
+  at higher orders and about the same at any sampling (the injection's shape, not
+  dispersion), and the gradient by $10^{-5}$–$10^{-3}$ of its largest value against the
+  band's $10^{-7}$–$10^{-6}$, for a fifth of the band's records (`examples/layered.toml`'s
+  gradient in 1.00 against 1.70 GiB, but 24–28% slower than checkpoints: the rebuild runs the
+  CPML, the band's step back doesn't). So `invert` doesn't offer it. What cost time: the
+  gradient is valid only $L + 1$ nodes inside the faces (`Bounds::region`; one node closer
+  and μ's read the faces' values, $10^{-2}$ off even at order 2); a source two nodes from a
+  face put errors of 0.3 into the rebuild; rigid walls send the leakage back; a face in water
+  multiplies the late error by thousands and one on the seabed gives the largest error
+  measured (keep faces in rock, the water outside); and short segments hurt it, unlike the
+  band, since each starts from its end truncated while the field may be loud at the faces.
+  The Marmousi2 configurations, 9 nodes across inside their layers, can't hold a surface.
 - **gauss, the simulation machine** (`deploy/simulation-host/`, 2026-11-22). A 6-core Xeon
   E5-1650 v3 with 62 GiB on Debian 13, reached as root by `ssh gauss`: the solver server
   (`--remote gauss`, `just tunnel gauss`) with its runs on the 2 TB data disk
@@ -351,7 +377,7 @@ doesn't show.
   rebuilt and checkpointed reach the same model to about $10^{-5}$ of the update and the same
   misfits to every printed digit, about 16% slower (the log's 2026-11-24 entries).
   `gradient` still replays checkpoints unless given `--reconstruct`, so it stays exact. When `gradient` gains an array, add it to
-  both `Plan::gradient_memory` and `Plan::reconstruction_memory`; when the step gains an
+  `Plan::gradient_memory`, `Plan::reconstruction_memory` and `Plan::surface_memory`; when the step gains an
   operation, `step_back_with` must undo it in reverse order (`steps_back_inside_the_band`
   and `the_rebuilt_wavefield_follows_the_run` catch a miss).
 - **Marmousi2** (`just marmousi2`, `examples/marmousi2*`, `vibe-rations extrude`; the log's
