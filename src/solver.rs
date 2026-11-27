@@ -40,7 +40,7 @@ use std::ops::Range;
 
 use rayon::prelude::*;
 
-use crate::cpml::{CpmlAxis, PmlSettings, Stagger};
+use crate::cpml::{CpmlAxis, PmlSettings, Stagger, layer_widths};
 use crate::fd::Stencil;
 use crate::grid::{AsPoint, Grid};
 use crate::model::Model;
@@ -331,7 +331,7 @@ pub struct Solver {
 
 impl Solver {
     /// A solver at rest. Layers `pml_width` nodes thick line every side but the top when
-    /// there is a free surface.
+    /// there is a free surface ([`layer_widths`]).
     pub fn new(
         model: Model,
         dt: f64,
@@ -341,9 +341,10 @@ impl Solver {
     ) -> Self {
         let g = model.grid;
         let [nx, ny, nz] = g.n;
+        let widths = layer_widths(&g, pml_width, free_surface);
         let cpml: [CpmlAxis; 3] = std::array::from_fn(|a| {
-            let lo = if a == 2 && free_surface { 0 } else { pml_width };
-            CpmlAxis::new(g.n[a], lo, pml_width, g.h[a], dt, pml)
+            let (lo, hi) = widths[a];
+            CpmlAxis::new(g.n[a], lo, hi, g.h[a], dt, pml)
         });
         // Only the side layers need it, and only along a free surface.
         let sponge = (free_surface && pml.sponge > 0.0 && pml_width > 0).then(|| {
@@ -674,18 +675,18 @@ impl Solver {
             return;
         };
         let g = self.grid;
-        let halo = g.halo;
+        let [hx, hy, hz] = g.halos();
         let [nx, ny, nz] = g.n;
         let (len, nxt) = (g.plane_len(), g.padded()[0]);
         let [fx, fy, fz] = factors;
         let x_ranges = self.cpml[0].ranges();
         for v in self.fields.arrays_mut() {
-            v[g.halo * len..(g.halo + nz) * len]
+            v[hz * len..(hz + nz) * len]
                 .par_chunks_mut(len)
                 .enumerate()
                 .for_each(|(kz, plane)| {
                     for j in 0..ny {
-                        let o = (j + halo) * nxt + halo;
+                        let o = (j + hy) * nxt + hx;
                         let row = &mut plane[o..o + nx];
                         let yz = fy[j] * fz[kz];
                         if yz < 1.0 {
@@ -845,6 +846,10 @@ impl Solver {
     /// Lagrange's from 2L values moved inwards near an end, and along z with a free surface
     /// the mirror images above it, with sign `parity`.
     pub fn axis_weights(&self, axis: usize, x: f64, shift: f64, parity: f32) -> Vec<(usize, f32)> {
+        if !self.grid.spans(axis) {
+            // The same at every y: vy, σxy and σyz half a node along it too.
+            return vec![(0, 1.0)];
+        }
         let n = self.grid.n[axis] as isize;
         let u = x - shift;
         if u >= 0.0 && u.fract() == 0.0 {
@@ -1050,7 +1055,8 @@ impl PointOp {
 /// the whole shell, edges included, since the gradient's strain rates just outside the region
 /// read them along its faces; each stress only on the faces across which the velocity update
 /// differentiates it (σxx on the x faces, σxy on the x and y faces, and so on). Above a free
-/// surface there is nothing to keep: the mirrors rebuild it.
+/// surface there is nothing to keep: the mirrors rebuild it; nor across a 2D grid, where
+/// nothing is differentiated along y.
 #[derive(Clone, Debug)]
 pub struct Band {
     /// Runs of padded indices, (start, length): the velocities' shell, shared by vx, vy and vz.
@@ -1079,7 +1085,8 @@ impl BandSize {
 }
 
 impl Band {
-    /// The band around `interior` on `grid`, `reach` nodes deep (the stencil's half-length).
+    /// The band around `interior` on `grid`, `reach` nodes deep (the stencil's half-length)
+    /// along every axis it spans ([`Grid::reach`]).
     pub fn new(
         grid: &Grid,
         interior: &[std::ops::Range<usize>; 3],
@@ -1088,11 +1095,11 @@ impl Band {
     ) -> Self {
         assert!(reach <= grid.halo, "the band reaches past the halo");
         let [_, sy, sz] = grid.strides();
-        let h = grid.halo as isize;
+        let [hx, hy, hz] = grid.halos().map(|h| h as isize);
         let at = |i: isize, j: isize, k: isize| {
-            ((i + h) as usize) + ((j + h) as usize) * sy + ((k + h) as usize) * sz
+            ((i + hx) as usize) + ((j + hy) as usize) * sy + ((k + hz) as usize) * sz
         };
-        let l = reach as isize;
+        let [l, ly, _] = grid.reach(reach).map(|l| l as isize);
         let [x, y, z] = interior
             .each_ref()
             .map(|r| (r.start as isize, r.end as isize));
@@ -1106,7 +1113,7 @@ impl Band {
         let inside = |v: isize, r: (isize, isize)| v >= r.0 && v < r.1;
         let mut shell = Vec::new();
         for k in z.0 - up..z.1 + l {
-            for j in y.0 - l..y.1 + l {
+            for j in y.0 - ly..y.1 + ly {
                 if inside(j, y) && inside(k, z) {
                     runs(&mut shell, j, k, x.0 - l, x.0);
                     runs(&mut shell, j, k, x.1, x.1 + l);
@@ -1121,7 +1128,7 @@ impl Band {
                 runs(&mut fx, j, k, x.0 - l, x.0);
                 runs(&mut fx, j, k, x.1, x.1 + l);
             }
-            for j in (y.0 - l..y.0).chain(y.1..y.1 + l) {
+            for j in (y.0 - ly..y.0).chain(y.1..y.1 + ly) {
                 runs(&mut fy, j, k, x.0, x.1);
             }
         }
@@ -1148,24 +1155,25 @@ impl Band {
         }
     }
 
-    /// [`Band::new`]'s size, counted.
+    /// [`Band::new`]'s size, counted, for a stencil reaching `reach` nodes along each axis
+    /// ([`Grid::reach`]).
     pub fn size(
         interior: &[std::ops::Range<usize>; 3],
         free_surface: bool,
-        reach: usize,
+        reach: [usize; 3],
     ) -> BandSize {
         let [x, y, z] = interior.each_ref().map(|r| r.len());
-        let l = reach;
+        let [l, ly, _] = reach;
         let up = if free_surface { 0 } else { l };
         let some = |n: usize, runs: usize| if n > 0 { runs } else { 0 };
-        let shell = (x + 2 * l) * (y + 2 * l) * (z + up + l) - x * y * z;
+        let shell = (x + 2 * l) * (y + 2 * ly) * (z + up + l) - x * y * z;
         let shell_runs = if l == 0 {
             0
         } else {
-            (y + 2 * l) * (z + up + l) - y * z + some(l, 2 * y * z)
+            (y + 2 * ly) * (z + up + l) - y * z + some(l, 2 * y * z)
         };
-        let (fx, fy, fz) = (2 * l * y * z, x * 2 * l * z, x * y * (up + l));
-        let runs = some(l, 2 * y * z) + some(x, 2 * l * z) + some(x, y * (up + l));
+        let (fx, fy, fz) = (2 * l * y * z, x * 2 * ly * z, x * y * (up + l));
+        let runs = some(l, 2 * y * z) + some(x, 2 * ly * z) + some(x, y * (up + l));
         BandSize {
             values: 3 * shell + 3 * (fx + fy + fz),
             runs: shell_runs + 3 * runs,
@@ -1321,9 +1329,19 @@ const BAND_ROWS: usize = 4;
 /// read more again. Measured on gauss (Xeon E5-1650 v3, 15 MiB L3, 12 threads; the research
 /// log's 2026-11-25 entry), bands of 2–4 whole rows were fastest on every grid tried, and
 /// parts of rows slower: shorter rows defeat the hardware prefetchers.
+///
+/// A 2D grid is one row per plane, so its blocks are [`ROWS_2D`] whole rows, that it may use
+/// several threads.
 fn block_size(g: &Grid) -> [usize; 3] {
-    [g.n[0], BAND_ROWS.min(g.n[1]), g.n[2]]
+    if g.is_2d() {
+        [g.n[0], 1, ROWS_2D]
+    } else {
+        [g.n[0], BAND_ROWS.min(g.n[1]), g.n[2]]
+    }
 }
+
+/// Rows of a 2D grid in each block: see [`block_size`].
+const ROWS_2D: usize = 16;
 
 /// Splits `0..n` into the fewest nearly equal parts of at most `size`.
 fn split(n: usize, size: usize) -> impl Iterator<Item = Range<usize>> + Clone {
@@ -1571,14 +1589,21 @@ impl Update<3> for VelocityUpdate<'_> {
         let r = g.idx(i.start, j, kz);
         let n = i.len();
         st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
-        st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
         st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
         st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
-        st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
         st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
         st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
-        st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
         st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
+        if g.spans(1) {
+            st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
+            st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
+            st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
+        } else {
+            // Nothing varies along y on a 2D grid, which has no halo there to read.
+            for d in [&mut *d1, &mut *d4, &mut *d7] {
+                d.fill(0.0);
+            }
+        }
 
         if let Some([p0, p1, p2]) = row.x {
             cx.apply_along(i.clone(), d0, p0, Stagger::Half);
@@ -1636,18 +1661,24 @@ impl Update<6> for StressUpdate<'_> {
         let r = g.idx(i.start, j, kz);
         let n = i.len();
         st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
-        st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
         if surface {
             d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
         } else {
             st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
         }
-        st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
         st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
         st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
         st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
         st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
-        st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+        if g.spans(1) {
+            st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
+            st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
+            st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+        } else {
+            for d in [&mut *d1, &mut *d3, &mut *d8] {
+                d.fill(0.0);
+            }
+        }
 
         if let Some([p0, p1, p2]) = row.x {
             cx.apply_along(i.clone(), d0, p0, Stagger::Node);
@@ -1722,18 +1753,24 @@ impl Update<6> for StrainRate<'_> {
         let r = g.idx(i.start, j, kz);
         let n = i.len();
         st.backward(d0, vx, r, 1, ih[0]);
-        st.backward(d1, vy, r, sy, ih[1]);
         if *free_surface && kz == 0 {
             d2.fill(0.0);
         } else {
             st.backward(d2, vz, r, sz, ih[2]);
         }
-        st.forward(d3, vx, r, sy, ih[1]);
         st.forward(d4, vy, r, 1, ih[0]);
         st.forward(d5, vx, r, sz, ih[2]);
         st.forward(d6, vz, r, 1, ih[0]);
         st.forward(d7, vy, r, sz, ih[2]);
-        st.forward(d8, vz, r, sy, ih[1]);
+        if g.spans(1) {
+            st.backward(d1, vy, r, sy, ih[1]);
+            st.forward(d3, vx, r, sy, ih[1]);
+            st.forward(d8, vz, r, sy, ih[1]);
+        } else {
+            for d in [&mut *d1, &mut *d3, &mut *d8] {
+                d.fill(0.0);
+            }
+        }
         let [exx, eyy, ezz, exy, exz, eyz] = row.out;
         let (exy, exz, eyz) = (&mut exy[..n], &mut exz[..n], &mut eyz[..n]);
         if *add {
@@ -2094,6 +2131,81 @@ mod tests {
     }
 
     /// Restoring a state replays the run from there bit for bit, threads and all.
+    /// A 2D grid steps exactly as the 3D scheme does for fields that are the same at every
+    /// y: here a 3D slab two nodes across, its halo along y refilled from its rows after every
+    /// half step so the y-derivatives vanish, with the same forces and moments on both rows,
+    /// a free surface and rigid sides. Every value of the 2D run is the slab's, bit for bit.
+    #[test]
+    fn a_2d_grid_steps_as_a_3d_slab_constant_along_y() {
+        let h = [10.0, 1.0, 10.0];
+        let flat = Grid::new([24, 1, 20], h).with_halo(4);
+        let slab = Grid::new([24, 2, 20], h).with_halo(4);
+        let solver = |g: Grid| {
+            let mut model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+            // A softer lower half, so the material's averages differ from node to node.
+            for k in 12..g.n[2] {
+                for j in 0..g.n[1] {
+                    for i in 0..g.n[0] {
+                        let n = g.interior_idx(i, j, k);
+                        model.vs[n] = 1200.0 + 10.0 * i as f32;
+                        model.rho[n] = 2000.0;
+                    }
+                }
+            }
+            Solver::new(model, 4e-4, 0, true, &pml()).with_stencil(Stencil::taylor(8).unwrap())
+        };
+        let (mut a, mut b) = (solver(flat), solver(slab));
+        // The slab's values outside its two rows are those of the nearest row.
+        let extend = |f: &mut Fields| {
+            let (px, len) = (slab.padded()[0], slab.plane_len());
+            for v in f.arrays_mut() {
+                for plane in v.chunks_mut(len) {
+                    for j in 0..slab.padded()[1] {
+                        let from = j.clamp(4, 5) * px;
+                        if from != j * px {
+                            plane.copy_within(from..from + px, j * px);
+                        }
+                    }
+                }
+            }
+        };
+        let force = |g: Grid, f: &mut Fields, t: f64| {
+            for j in 0..g.n[1] {
+                f.vx[g.idx(7, j, 3)] += (t * 300.0).sin() as f32;
+                f.vz[g.idx(15, j, 0)] += (t * 500.0).cos() as f32;
+            }
+        };
+        let moment = |g: Grid, f: &mut Fields, t: f64| {
+            for j in 0..g.n[1] {
+                f.sxz[g.idx(11, j, 8)] += (t * 400.0).sin() as f32;
+                f.syy[g.idx(11, j, 8)] += (t * 200.0).sin() as f32;
+            }
+        };
+        for _ in 0..60 {
+            a.step_with(|f, t| force(flat, f, t), |f, t| moment(flat, f, t));
+            b.step_with(
+                |f, t| {
+                    force(slab, f, t);
+                    extend(f);
+                },
+                |f, t| {
+                    moment(slab, f, t);
+                    extend(f);
+                },
+            );
+        }
+        assert!(a.peak_velocity() > 0.0);
+        for field in Field::ALL {
+            let (x, y) = (a.fields.get(field), b.fields.get(field));
+            for k in 0..flat.n[2] {
+                for i in 0..flat.n[0] {
+                    let (u, v) = (x[flat.idx(i, 0, k)], y[slab.idx(i, 0, k)]);
+                    assert_eq!(u.to_bits(), v.to_bits(), "{field:?} at ({i}, {k}): {u} {v}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn restoring_a_state_replays_the_run_exactly() {
         let g = Grid::new([20, 18, 16], [10.0; 3]).with_halo(4);

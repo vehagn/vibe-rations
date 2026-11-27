@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod lamb;
+pub mod line;
 pub mod plane;
 pub mod stokes;
 
@@ -56,6 +57,29 @@ pub fn homogeneous(
         {rest}
         "#
     )
+}
+
+/// The 2D counterpart of a 3D configuration: one node across y (`points = [nx, 1, nz]`), and
+/// every source, receiver and sphere moved onto the plane y = 0 (a sphere becomes a disc).
+pub fn planar(config: &str) -> String {
+    config
+        .lines()
+        .map(|line| {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let trimmed = line.trim_start();
+            for key in ["points", "position", "center"] {
+                let Some(rest) = trimmed.strip_prefix(&format!("{key} = [")) else {
+                    continue;
+                };
+                let (list, tail) = rest.split_once(']').expect("a closed list");
+                let v: Vec<&str> = list.split(',').map(str::trim).collect();
+                let y = if key == "points" { "1" } else { "0.0" };
+                return format!("{indent}{key} = [{}, {y}, {}]{tail}", v[0], v[2]);
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// ‖a - b‖ / ‖b‖ over a whole trace.

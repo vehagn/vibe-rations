@@ -66,9 +66,11 @@ pub fn shot_dir(s: usize) -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GridConfig {
-    /// Nodes along x, y and z.
+    /// Nodes along x, y and z. One along y makes a 2D run in the x–z plane (plane strain:
+    /// nothing varies along y), whose sources are line sources per metre along y
+    /// ([`crate::grid`]).
     pub points: [usize; 3],
-    /// Node spacing in metres: one number, or one per axis.
+    /// Node spacing in metres: one number, or one per axis (along y ignored in 2D).
     pub spacing: Spacing,
 }
 
@@ -87,8 +89,9 @@ impl GridConfig {
         };
         ensure!(h.iter().all(|&h| h > 0.0), "grid spacing must be positive");
         ensure!(
-            self.points.iter().all(|&n| n >= 8),
-            "the grid needs at least 8 nodes along each axis"
+            self.points.iter().all(|&n| n >= 8)
+                || self.points[1] == 1 && self.points[0] >= 8 && self.points[2] >= 8,
+            "the grid needs at least 8 nodes along each axis, or one along y for a 2D run"
         );
         Ok(Grid::new(self.points, h))
     }
@@ -979,6 +982,20 @@ mod tests {
         let text = MINIMAL.replace("spacing = 10.0", "spacing = [10.0, 20.0, 5.0]");
         let g = Config::from_toml(&text).unwrap().grid.grid().unwrap();
         assert_eq!(g.h, [10.0, 20.0, 5.0]);
+    }
+
+    #[test]
+    fn one_node_across_y_makes_a_2d_grid() {
+        let grid = |points: &str| {
+            let text = MINIMAL.replace("points = [20, 20, 20]", points);
+            Config::from_toml(&text).unwrap().grid.grid()
+        };
+        let g = grid("points = [20, 1, 20]").unwrap();
+        assert!(g.is_2d());
+        assert_eq!(g.h, [10.0, 1.0, 10.0]);
+        let e = grid("points = [20, 2, 20]").unwrap_err().to_string();
+        assert!(e.contains("one along y"), "{e}");
+        assert!(grid("points = [1, 20, 20]").is_err());
     }
 
     #[test]
