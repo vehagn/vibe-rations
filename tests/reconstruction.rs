@@ -250,3 +250,329 @@ fn drift_in_the_gradient() {
         }
     }
 }
+
+// The forward wavefield rebuilt inside a closed surface one node wide from the velocities and
+// tractions recorded on it (Aaker et al. 2020; `vibe_rations::surface`), against the band's
+// exact step back: the research log's "Rebuilding inside a surface" entry.
+
+/// A larger model than [`model`], so that a surface up to eight nodes in from the layers
+/// still holds the sources nine nodes clear of it: two layers, a sphere, a force and an
+/// explosion at 14 Hz, a line of receivers. `boundary` goes into [boundary], `top` is the
+/// model's first layer.
+fn surface_model(order: usize, courant: f64, duration: f64, boundary: &str, top: &str) -> String {
+    format!(
+        r#"
+        [grid]
+        points = [64, 56, 48]
+        spacing = 10.0
+        [time]
+        duration = {duration}
+        courant = {courant}
+        [boundary]
+        {boundary}
+        [scheme]
+        order = {order}
+        optimised_for = 4.0
+        [output]
+        record_every = 2
+        {top}
+        [[model.layer]]
+        top = 60.0
+        vp = 2200.0
+        vs = 1100.0
+        rho = 2000.0
+        [[model.layer]]
+        top = 205.0
+        vp = 3000.0
+        vs = 1700.0
+        rho = 2300.0
+        [[model.sphere]]
+        center = [320.0, 280.0, 160.0]
+        radius = 35.0
+        vp = 2400.0
+        vs = 1200.0
+        rho = 2100.0
+        [[source]]
+        position = [260.0, 260.0, 140.0]
+        force = [3e8, 0.0, 1e9]
+        wavelet = {{ kind = "ricker", frequency = 14.0 }}
+        [[source]]
+        position = [380.0, 300.0, 220.0]
+        explosion = 2e12
+        wavelet = {{ kind = "ricker", frequency = 14.0, delay = 0.1 }}
+        [receivers]
+        components = ["vx", "vy", "vz", "p"]
+        [[receivers.line]]
+        from = [200.0, 280.0, 100.0]
+        to = [440.0, 280.0, 100.0]
+        count = 8
+        "#
+    )
+}
+
+/// The band's drift and the surface's after stepping back each of `back` steps, by the
+/// closest saved state.
+fn surface_row(label: &str, text: &str, back: &[usize], every: usize, inset: Option<usize>) {
+    let steps = setup(text).steps;
+    let band = rebuild_drift(setup(text), every);
+    let (surface, len) = surface_drift_where(setup(text), inset, 0, |n| n % every == 0);
+    let worst = |d: &[(usize, f64, f64)]| d.iter().fold(0.0f64, |m, &(_, e, _)| m.max(e));
+    println!(
+        "{label:34} band    {}   all the way ({steps}): {:.1e}",
+        drift_at(&band, steps, back).join(""),
+        worst(&band)
+    );
+    println!(
+        "{:34} surface {}   all the way: {:.1e}  ({len} values a step)",
+        "",
+        drift_at(&surface, steps, back).join(""),
+        worst(&surface)
+    );
+}
+
+/// How the surface's error grows as the rebuild steps back, against the band's: order 8 at
+/// C = 0.85 along a free surface, about 3000 steps from the end in one go.
+#[test]
+#[ignore = "a study, not a check: run with `just drift`"]
+fn surface_drift_with_run_length() {
+    let text = surface_model(8, 0.85, 3.6, CPML, SOLID_TOP);
+    let steps = setup(&text).steps;
+    let back = [1, 10, 100, 300, 1000, 2000, steps];
+    println!("\nsurface, run length: order 8, C 0.85, free surface, {steps} steps");
+    println!(
+        "{:42} {}",
+        "steps back",
+        back.map(|b| format!("{b:>9}")).join("")
+    );
+    surface_row("", &text, &back, 50, None);
+    let (drift, _) = surface_drift_where(setup(&text), None, 0, |n| n % 50 == 0);
+    println!("\nstep         surface's error    field's own level");
+    for n in [3000, 2000, 1000, 500, 300, 200, 150, 100, 50, 0] {
+        if let Some((_, e, level)) = drift.iter().find(|(m, _, _)| *m == n) {
+            println!("{n:>6}  {e:16.1e}  {level:16.1e}");
+        }
+    }
+    // Close to the face the error is larger: by how far in the nodes compared lie.
+    println!("\nby the nodes' distance inside the surface (all the way back)");
+    for margin in [1, 2, 4, 6, 9] {
+        let (d, _) = surface_drift_where(setup(&text), None, margin, |n| n % 50 == 0);
+        let worst = d.iter().fold(0.0f64, |m, &(_, e, _)| m.max(e));
+        println!("  {margin} or more nodes in: {worst:.1e}");
+    }
+}
+
+/// The surface's error by stencil order at C = 0.85 over 1.2 s, the surface L nodes in from
+/// the layers, and at order 8 by how far in it sits.
+#[test]
+#[ignore = "a study, not a check: run with `just drift`"]
+fn surface_drift_with_order_and_inset() {
+    let back = [100, 300, 1000];
+    println!("\nsurface, order and inset: 1.2 s, free surface");
+    println!(
+        "{:42} {}",
+        "steps back",
+        back.map(|b| format!("{b:>9}")).join("")
+    );
+    for order in [4, 8, 12, 16] {
+        let text = surface_model(order, 0.85, 1.2, CPML, SOLID_TOP);
+        surface_row(&format!("order {order:2}, inset L"), &text, &back, 10, None);
+    }
+    let text = surface_model(8, 0.85, 1.2, CPML, SOLID_TOP);
+    for inset in [6, 8] {
+        let (d, _) = surface_drift_where(setup(&text), Some(inset), 0, |n| n % 10 == 0);
+        let steps = setup(&text).steps;
+        println!(
+            "{:34} surface {}   all the way: {:.1e}",
+            format!("order  8, inset {inset}"),
+            drift_at(&d, steps, &back).join(""),
+            d.iter().fold(0.0f64, |m, &(_, e, _)| m.max(e))
+        );
+    }
+}
+
+/// The surface's error by how well the waves crossing it are sampled: the wavelets' peak
+/// frequency lowered from 14 Hz (3.1 points per S wavelength at 2.5 f₀ in the 1100 m/s rock)
+/// to 10 and 7 Hz (4.4 and 6.3), order 8 at C = 0.85 over 1.2 s along a free surface.
+#[test]
+#[ignore = "a study, not a check: run with `just drift`"]
+fn surface_drift_with_frequency() {
+    let back = [100, 300, 1000];
+    println!("\nsurface, frequency: order 8, C 0.85, 1.2 s, free surface");
+    println!(
+        "{:42} {}",
+        "steps back",
+        back.map(|b| format!("{b:>9}")).join("")
+    );
+    for f in [14.0, 10.0, 7.0] {
+        let text = surface_model(8, 0.85, 1.2, CPML, SOLID_TOP)
+            .replace(
+                "frequency = 14.0, delay = 0.1",
+                &format!("frequency = {f:.1}, delay = {:.3}", 1.4 / f),
+            )
+            .replace("frequency = 14.0", &format!("frequency = {f:.1}"));
+        let ppw = 1100.0 / (2.5 * f) / 10.0;
+        surface_row(&format!("{f:4.1} Hz, {ppw:.1} ppw"), &text, &back, 10, None);
+    }
+}
+
+/// The surface's error with each kind of boundary, order 8 at C = 0.85 over 1.2 s; and with
+/// water above a seabed at, or near, the surface's top face (layers all round), which Aaker
+/// et al. warn the interpolators can't take.
+#[test]
+#[ignore = "a study, not a check: run with `just drift`"]
+fn surface_drift_with_boundaries() {
+    let back = [100, 300, 1000];
+    println!("\nsurface, boundaries: order 8, C 0.85, 1.2 s");
+    println!(
+        "{:42} {}",
+        "steps back",
+        back.map(|b| format!("{b:>9}")).join("")
+    );
+    // With layers all round the surface has a top face, 12 nodes down (120 m): the force
+    // goes down to 260 m, 14 nodes clear of it.
+    let all_round = "pml_width = 8\nfree_surface = false";
+    let deeper = |text: String| text.replace("[260.0, 260.0, 140.0]", "[260.0, 260.0, 260.0]");
+    for (label, text) in [
+        (
+            "layers, free surface",
+            surface_model(8, 0.85, 1.2, CPML, SOLID_TOP),
+        ),
+        (
+            "layers all round",
+            deeper(surface_model(8, 0.85, 1.2, all_round, SOLID_TOP)),
+        ),
+        (
+            "rigid walls, free surface",
+            surface_model(8, 0.85, 1.2, "pml_width = 0", SOLID_TOP),
+        ),
+        (
+            "layers, 60 m of water at the surface",
+            surface_model(8, 0.85, 1.2, CPML, WATER_TOP),
+        ),
+    ] {
+        surface_row(label, &text, &back, 10, None);
+    }
+    // Water above a seabed, layers all round: the seabed 6 nodes above the top face, on it,
+    // 3 nodes below it and 8 below.
+    for seabed in [60.0, 120.0, 150.0, 200.0] {
+        let text = deeper(surface_model(8, 0.85, 1.2, all_round, WATER_TOP))
+            .replace("top = 60.0", &format!("top = {seabed:.1}"));
+        surface_row(
+            &format!("all round, seabed at {seabed} m"),
+            &text,
+            &back,
+            10,
+            None,
+        );
+    }
+}
+
+/// The gradient rebuilt inside the surface and from the band against the replay's, at the
+/// nodes where the surface's is meant to hold (L + 1 in from it), for segments of default
+/// length and the whole run, with the time and memory of each: on the solid model over 1.2
+/// and 3.6 s, and with 60 m of water at the top, inside the box (which is open there).
+#[test]
+#[ignore = "a study, not a check: run with `just drift`"]
+fn surface_in_the_gradient() {
+    use vibe_rations::surface::Surface;
+    for (duration, top, label) in [
+        (1.2, SOLID_TOP, "free surface"),
+        (3.6, SOLID_TOP, "free surface"),
+        (1.2, WATER_TOP, "60 m of water under the free surface"),
+    ] {
+        let text = surface_model(8, 0.85, duration, CPML, top);
+        let observed = simulate(&text.replace("vp = 2400.0", "vp = 2300.0"))
+            .receivers
+            .traces;
+        let weights = vec![1.0; observed.len()];
+        let run = |strategy| {
+            let mut sim = setup(&text);
+            let start = Instant::now();
+            let r = gradient_with(
+                &mut sim,
+                |r| l2_misfit(&r.traces, &observed, &weights),
+                strategy,
+            )
+            .unwrap();
+            (r, start.elapsed().as_secs_f64())
+        };
+        let (reference, t0) = run(Strategy::default());
+        let sim = setup(&text);
+        let steps = sim.steps;
+        let g = sim.solver.grid;
+        let reach = sim.solver.stencil.half_length();
+        let region = Surface::new(&sim.solver, None)
+            .unwrap()
+            .bounds
+            .region(reach);
+        let nodes: Vec<usize> = region[2]
+            .clone()
+            .flat_map(|k| {
+                let x = region[0].clone();
+                region[1]
+                    .clone()
+                    .flat_map(move |j| x.clone().map(move |i| g.interior_idx(i, j, k)))
+            })
+            .collect();
+        let [vp0, vs0, rho0] = reference.gradient.velocities(&sim.solver.model);
+        println!(
+            "\ngradient: order 8, C 0.85, {label}, {steps} steps, compared at {} nodes",
+            nodes.len()
+        );
+        println!(
+            "{:36} {:>9} {:>9} {:>9} {:>10} {:>8}",
+            "", "vp", "vs", "rho", "memory", "time"
+        );
+        println!(
+            "{:36} {:>9} {:>9} {:>9} {:>10} {t0:7.1}s",
+            format!("checkpoints every {}", reference.checkpoint_every),
+            "",
+            "",
+            "",
+            vibe_rations::memory::human(reference.memory_bytes as u64),
+        );
+        for (label, strategy) in [
+            (
+                "band, default segments",
+                Strategy::Reconstruct { segment: None },
+            ),
+            (
+                "band, the whole run",
+                Strategy::Reconstruct {
+                    segment: Some(usize::MAX),
+                },
+            ),
+            (
+                "surface, default segments",
+                Strategy::Surface {
+                    segment: None,
+                    inset: None,
+                },
+            ),
+            (
+                "surface, the whole run",
+                Strategy::Surface {
+                    segment: Some(usize::MAX),
+                    inset: None,
+                },
+            ),
+        ] {
+            let (r, t) = run(strategy);
+            let [vp, vs, rho] = r.gradient.velocities(&sim.solver.model);
+            let off = |a: &[f64], b: &[f64]| {
+                let scale = nodes.iter().fold(0.0f64, |m, &n| m.max(b[n].abs()));
+                nodes
+                    .iter()
+                    .fold(0.0f64, |m, &n| m.max((a[n] - b[n]).abs() / scale))
+            };
+            println!(
+                "{:36} {:>9.1e} {:>9.1e} {:>9.1e} {:>10} {t:7.1}s",
+                format!("{label} ({})", r.checkpoint_every),
+                off(&vp, &vp0),
+                off(&vs, &vs0),
+                off(&rho, &rho0),
+                vibe_rations::memory::human(r.memory_bytes as u64),
+            );
+        }
+    }
+}

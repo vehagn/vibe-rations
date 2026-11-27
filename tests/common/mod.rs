@@ -189,3 +189,87 @@ pub fn rebuild_drift_where(
     drift.reverse();
     drift
 }
+
+/// [`rebuild_drift_where`] for the field rebuilt inside a surface `inset` nodes in from the
+/// layers (`vibe_rations::surface`), from the run's end in one go: the largest difference at
+/// the nodes `margin` nodes or more inside the surface, in any of the nine arrays (the
+/// rebuilt stresses' sign turned back), relative to that array's largest value there over the
+/// run, at the steps `keep` picks, with the field's own level. Also returns the record's
+/// length in values.
+pub fn surface_drift_where(
+    mut sim: Simulation,
+    inset: Option<usize>,
+    margin: usize,
+    keep: impl Fn(usize) -> bool,
+) -> (Vec<(usize, f64, f64)>, usize) {
+    use vibe_rations::solver::Fields;
+    use vibe_rations::surface::Surface;
+    let surface = Surface::new(&sim.solver, inset).unwrap();
+    let ops = sim.truncated_sources(&surface);
+    let len = surface.len();
+    let steps = sim.steps;
+    let b = surface.bounds;
+    let [x, y, z]: [std::ops::Range<usize>; 3] = std::array::from_fn(|a| {
+        let start = b.lo[a].map_or(0, |lo| lo + margin.max(1));
+        start..b.hi[a].saturating_sub(margin.max(1) - 1).max(start)
+    });
+    let g = sim.solver.grid;
+    let nodes: Vec<usize> = z
+        .flat_map(|k| {
+            let x = x.clone();
+            y.clone()
+                .flat_map(move |j| x.clone().map(move |i| g.idx(i, j, k)))
+        })
+        .collect();
+    let arrays =
+        |f: &Fields| -> [Vec<f32>; 9] { f.arrays().map(|a| nodes.iter().map(|&p| a[p]).collect()) };
+    let mut records = vec![0.0f32; (steps + 1) * len];
+    let mut saved: Vec<(usize, Fields)> = Vec::new();
+    let mut scale = [0.0f32; 9];
+    for n in 0..=steps {
+        for (s, a) in scale.iter_mut().zip(arrays(&sim.solver.fields)) {
+            *s = a.iter().fold(*s, |m, v| m.max(v.abs()));
+        }
+        surface.save(&sim.solver.fields, &mut records[n * len..(n + 1) * len]);
+        if n == steps {
+            break;
+        }
+        if keep(n) {
+            saved.push((n, sim.solver.fields.clone()));
+        }
+        sim.step();
+    }
+    sim.begin_rebuild(&surface, &ops, steps, &records[steps * len..]);
+    // Each array's largest difference and the field's level, for the arrays `which` picks
+    // (`sign` turning the rebuilt ones back).
+    let compare =
+        |now: &[Vec<f32>; 9], then: &[Vec<f32>; 9], which: std::ops::Range<usize>, sign: f32| {
+            which
+                .filter(|&c| scale[c] > 0.0)
+                .map(|c| {
+                    let worst = now[c].iter().zip(&then[c]).fold(0.0f64, |m, (a, b)| {
+                        m.max(((sign * a - b).abs() / scale[c]) as f64)
+                    });
+                    let level = then[c]
+                        .iter()
+                        .fold(0.0f64, |m, v| m.max((v.abs() / scale[c]) as f64));
+                    (worst, level)
+                })
+                .fold((0.0f64, 0.0f64), |(w, l), (a, b)| (w.max(a), l.max(b)))
+        };
+    let mut drift = Vec::with_capacity(saved.len());
+    for n in (0..steps).rev() {
+        let kept = saved.iter().find(|(m, _)| *m == n).map(|(_, f)| arrays(f));
+        // The rebuild holds -σ⁽ⁿ⁾ now, and v⁽ⁿ⁻½⁾ after the next step back.
+        let stresses = kept
+            .as_ref()
+            .map(|then| compare(&arrays(&sim.solver.fields), then, 3..9, -1.0));
+        sim.rebuild_step(&surface, &ops, n, &records[n * len..(n + 1) * len]);
+        if let (Some(then), Some((ws, ls))) = (kept, stresses) {
+            let (wv, lv) = compare(&arrays(&sim.solver.fields), &then, 0..3, 1.0);
+            drift.push((n, ws.max(wv), ls.max(lv)));
+        }
+    }
+    drift.reverse();
+    (drift, len)
+}
