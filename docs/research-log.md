@@ -3952,6 +3952,92 @@ copy of `whole-true.toml` with `duration = 0.6`, and `gradient examples/marmousi
 `RAYON_NUM_THREADS=6`. For identity: `just physics` with and without `VIBE_RATIONS_SIMD=off`
 against main's, timings masked, and `cmp` on every output file of the runs above.
 
+## 2026-11-26 — The faster updates on the Mac
+
+**Question.** The faster updates (previous entry) were measured on gauss. Apple silicon gets
+only two of the three changes, the bands of rows and the one correlation pass: it has no AVX2
+copy, and its plain loops compile with NEON. What do they do natively on the maintainer's Mac,
+where every Marmousi2 study since 2026-11-23 has run?
+
+**Method.** Two binaries built with `just in mac`: main just before the merge (`abd7477`), from
+an export of that commit under `out/` with a target directory of its own, and main after it
+(`cf68d48`). Both ran natively on the M1 Max (8 performance cores in two clusters with 12 MiB
+of L2 each, 2 efficiency cores, 32 GiB, macOS 27.2), on rayon's default 10 threads, the four
+cases of the previous entry: `examples/layered.toml` as it is; Marmousi2's central part
+forward (`central-true.toml`); the whole section's grid for 300 steps (`whole-true.toml` at
+0.6 s); and the central part's gradient (`central.toml` against the after binary's run of
+`central-true.toml`, checkpoints). Each case ran before, after, after, before, 15 s apart, so
+a drift in the machine's speed falls on both alike. Mcells/s are the run's own, wall times
+from `/usr/bin/time`. The desktop was in use: the other processes took 0.5 to 2 cores during
+the runs (`ps`, every 5 s). Then the central part forward on 1, 4, 8 and 11 threads
+(`RAYON_NUM_THREADS`), before and after, one run each; then the `l2` study with the after
+code.
+
+**Results.** Two runs each:
+
+| Run | Nodes × steps | Before | After | Change |
+|---|---|---|---|---|
+| `examples/layered.toml` | 1.35 M × 1,666 | 199, 223 Mcell/s (11.6, 10.2 s) | 221, 237 Mcell/s (10.3, 9.6 s) | +9% |
+| central part forward | 1.39 M × 1,750 | 239, 234 Mcell/s (10.4, 10.6 s) | 199, 197 Mcell/s (12.4, 12.5 s) | −16% |
+| whole section's grid, 300 steps | 19.3 M × 300 | 283, 281 Mcell/s (21.3, 21.4 s) | 316, 320 Mcell/s (19.0, 18.8 s) | +13% |
+| central part's gradient, checkpoints | 1.39 M × 1,750 | 53.4, 49.2 s | 62.2, 61.0 s | +20% time |
+
+The central part forward by threads, Mcells/s, one run each (10 is the pair above):
+
+| Threads | 1 | 4 | 8 | 10 | 11 |
+|---|---|---|---|---|---|
+| before | 53 | 146 | 224 | 237 | 237 |
+| after | 49 | 133 | 196 | 198 | 197 |
+| change | −8% | −9% | −13% | −16% | −17% |
+
+- *Bit for bit.* Every output file of the 24 timed runs (traces, snapshots, gathers, gradients) is
+  identical between the two binaries, besides the timings in `run.json` and `gradient.json`
+  and `run.json`'s new `kernels` line (`plain`).
+- *Large planes gain*: the whole section's grid 13% (282 → 318 Mcell/s) and `layered.toml`
+  9% (211 → 229), within the desktop's noise (the first before run shared the machine with 2
+  cores of other work; against the second alone, 3%). On gauss the same build gained 34% and
+  22%, most of it from AVX2; there the bands alone, with the plain loops, gave 0% and 9%.
+- *The central part loses*: 16% forward and 20% on its gradient (51.3 → 61.6 s), where the
+  plain loops lost 2% on gauss. On one thread, where no balance can be lost, the bands are 8%
+  slower: a band of 4 rows reads $2L = 8$ rows more for its $y$-derivatives, and a plane of
+  this grid (241 × 41) is about 50 KB a field, so the $2L$ planes of three fields a plane's
+  update reads (about 1.2 MB) already stayed in the 12 MiB L2 and marching up a column saves
+  nothing. The loss then grows with the threads, consistent with 41 rows making only 11
+  whole-column tasks for 10 threads, two of them on efficiency cores, so each sweep waits for
+  its slowest task; 141 one-plane tasks balanced across them before.
+- *The Mac against gauss*, both after: 2.1 times faster on `layered.toml` (229 against 111
+  Mcell/s), 1.7 on the central part (198 against 117), 2.8 on the whole section's grid (318
+  against 114), and 1.7 on the central gradient (61.6 against 102.5 s), where it was 2.3
+  before (51.3 against 119.4 s).
+- *The `l2` study* (five L2 iterations on the central part, wavefields rebuilt, as
+  `l2_rebuilt` ran natively on 2026-11-24 at `ecadcb4`) reached the same model byte for
+  byte ($v_p$, $v_s$ and $\rho$ files identical): 57.9% of the start's L2 left and the same
+  error ratios and cosines by depth to every printed digit. It took 2,586 s by its own clock
+  against 2,032 s (+27%): set-up 488 against 346 s, iterations 395–423 against 285–437 s.
+  Indicative only: the Mac went to idle sleep 18 minutes in and was woken 3.5 hours later.
+  The study's clock leaves the sleep out (`/usr/bin/time` counted 13,995 s), but about
+  1,000 s of the run fell in macOS's brief maintenance wakes meanwhile.
+
+**Decision.** Nothing changed in the code. The bands pay on the Mac where they paid on gauss,
+on large grids, but the central Marmousi2 part, which every Marmousi2 study runs, is now
+about 20% slower there than before the merge, and an inversion of it 27%. A split chosen by
+the grid and the threads (whole planes, or shorter columns, when the bands are few for the
+threads) could recover it, but shorter columns lost 8–10% on the central part on gauss, so it
+needs measuring on both machines before it is worth a rule; it is in the open questions.
+
+**Reproduce.** `just in mac`; for the before binary, `git archive abd7477 | tar -x -C
+out/src-before`, then `docker compose -f .devcontainer/compose.yaml exec -T -w
+/workspaces/vibe-rations/out/src-before -e
+CARGO_TARGET_DIR=/home/dev/.cache/target/before-abd7477 dev just mac` and copy its
+`out/mac/vibe-rations` out. Natively, alternating the binaries: `run examples/layered.toml`,
+`run examples/marmousi2/central-true.toml`, `run` a copy of `whole-true.toml` with `duration =
+0.6` and its model paths made relative to the copy, and `gradient
+examples/marmousi2/central.toml --observed <central-true's run>`; the central part again with
+`RAYON_NUM_THREADS` 1, 4, 8 and 11; `cmp` on every output file. The study: `just in mac-test
+marmousi2_study`, then `caffeinate -i out/mac/marmousi2_study l2 --ignored --exact
+--nocapture --test-threads 1`, and `cmp` its `out/marmousi2/study/l2/stage-0` with the
+earlier run's.
+
 ## 2026-11-26 — Marmousi2: a start smoothed through its slownesses, the check's split, and a hard seabed
 
 **Question.** In the centre the slow seafloor waves turn $v_s$ below 750 m the wrong way even
@@ -4659,6 +4745,12 @@ analytic_inversion gauss_newton_products_against_born -- --ignored --nocapture`.
   (That entry also settled the time error in gradients: the transform takes it out.)
 - **Absorbing layers at high order.** Tune the profile or width so reflection returns to
   $-76$ dB.
+- **Splitting the updates by grid and machine.** The bands of four rows in whole columns made
+  the central Marmousi2 part, whose planes stay in cache, 16% slower on the Mac and its
+  gradient 20% (2026-11-26, "The faster updates on the Mac"): 8% on one thread, the rest from
+  11 tasks on 10 unequal cores. Whole planes, or shorter columns, when a grid has few bands
+  for the threads might recover it, but shorter columns lost 8–10% there on gauss; measure on
+  both machines before making a rule.
 - **Error propagation into adjoint fields and gradients.** Forward-field error (dispersion,
   interfaces, free surface, layers), reconstruction error (time-reversed propagation in single
   precision; the non-reversible layers [@dussaud2008; @aaker2020]), and their effect on
