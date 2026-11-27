@@ -141,7 +141,7 @@ a free surface $z = 0$ is the surface.
 
 | Section | What it sets |
 |---|---|
-| `[grid]` | `points = [nx, ny, nz]`, `spacing` (one value or `[dx, dy, dz]`) |
+| `[grid]` | `points = [nx, ny, nz]` (`ny = 1` for a 2D run, below), `spacing` (one value or `[dx, dy, dz]`) |
 | `[time]` | `duration`; `dt`, or `courant` (fraction of the stability limit; by default 0.85, or 0.3 at orders above 4 without `remove_time_dispersion`) |
 | `[scheme]` | `order` of the spatial derivatives: 2, 4, ..., 16 (default 8); `coefficients`, `optimised` (default) or `taylor`, and `optimised_for` (points per wavelength to optimise for; by default the run's own); `remove_time_dispersion` (default true): take leapfrog's time error out of the traces. See "Accuracy" |
 | `[boundary]` | `pml_width` (default 20 nodes), `free_surface` (default true), PML tuning; `surface_slope` (default false): sources and receivers near the free surface continue the mirrored fields with their slope (see "Accuracy") |
@@ -162,6 +162,17 @@ The wavelet is the moment rate of a moment-tensor source and the force of a forc
 Ricker wavelet peaks at 1, so its amplitude is a peak rate; a Gaussian has unit area, so its
 amplitude is the final moment. A source with a non-zero final moment leaves a static stress
 around it, which dominates pressure snapshots near the source. Velocity has no static part.
+
+**2D runs.** A grid one node across $y$ (`points = [nx, 1, nz]`) is a 2D run in the $x$–$z$
+plane, in plane strain: nothing varies along $y$, so a source is a line source along $y$ of
+its strength per metre (a `force` in N/m, an `explosion` in N·m/s per metre), positions have
+$y = 0$, and there are no absorbing layers across $y$. It is the 3D scheme for fields the
+same at every $y$, bit for bit, so gradients, Born runs, Hessian products and inversions work
+on it unchanged. P-SV and SH separate: $v_y$, $\sigma_{xy}$ and $\sigma_{yz}$ stay zero
+unless a force along $y$ drives them. A 2D trace's tail never ends, so with the
+time-dispersion transform (the default) record past the time that matters: the transform
+works on the whole record, and cutting it while the tail is still loud spreads error across
+the trace (see the research log's "A 2D solver").
 
 ## Output
 
@@ -808,6 +819,8 @@ removed) unless stated:
 | Dot-product test of the adjoint run, $\langle F w, \tilde d \rangle = \langle w, F^{T} \tilde d \rangle$, every component, rigid or absorbing walls (orders 4 and 8) | $\le 8.3 \times 10^{-8}$ |
 | Gradients with respect to $v_p$, $v_s$ and $\rho$ against finite differences (Richardson-extrapolated), every node outside the layers perturbed down the gradient, with $\Delta t$ and the layers held (orders 4 and 8; and rigid walls with a water layer and uneven spacing) | $\le 7.4 \times 10^{-5}$ ($v_p$ and $\rho$: $\le 1.2 \times 10^{-5}$) |
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
+| 2D: a line explosion and a line force against their closed forms (`tests/common/line.rs`), 100–250 m | 0.002–0.006% and 0.0002–0.0005% |
+| 2D: reciprocity, the dot-product test, gradients, the Born run and the Hessian's products, as in 3D | as accurate as in 3D or better (the research log's "A 2D solver") |
 
 ## Towards elastic FWI
 
