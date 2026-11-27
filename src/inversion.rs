@@ -765,6 +765,12 @@ impl Inversion {
         self.x.len()
     }
 
+    /// The inverted parameters and, for each, the nodes (interior indices) it may change at:
+    /// the unknowns, in their order.
+    pub fn free(&self) -> &[(Parameter, Vec<usize>)] {
+        &self.free
+    }
+
     /// The model the unknowns `x` describe, within the bounds.
     pub fn model_at(&self, x: &[f64]) -> Model {
         let mut m = self.model.clone();
