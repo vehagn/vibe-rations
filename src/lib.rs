@@ -7,6 +7,7 @@
 //! bottom, and the top is either absorbing or a free surface (stress imaging).
 
 pub mod adjoint;
+pub mod born;
 pub mod config;
 pub mod cpml;
 pub mod fd;

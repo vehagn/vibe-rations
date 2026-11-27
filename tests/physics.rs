@@ -1357,6 +1357,163 @@ fn gradient_check(
     }
 }
 
+/// The Born run is the forward run's derivative and the gradient its transpose: for a random
+/// change of vp, of vs or of ρ at every node outside the layers, its traces match the traces'
+/// central differences (extrapolated in the step, with Δt and the layers held), and
+/// ⟨J δm, r⟩ = ⟨δm, Jᵀ r⟩ with r the Born traces themselves times random positive weights, so
+/// that the terms can't cancel. In the gradient checks' models: a free surface, two
+/// band-limited layers and a sphere, a force and an explosion, at orders 4 and 8; and rigid
+/// walls, uneven spacing, water under the surface and a double couple.
+///
+/// Measured (vp, vs, ρ), against the extrapolated differences, the largest component's error
+/// relative to its size: order 4 3.5e-5, 1.1e-5, 8.1e-5; order 8 4.3e-5, 1.1e-5, 8.6e-5; walls
+/// and water 6.3e-5, 3.0e-5, 1.6e-4 (ρ's plain differences stall at about 1e-4: round-off).
+/// The transposes: order 4 1.4e-8, 5.9e-9, 4.2e-9; order 8 1.9e-9, 5.1e-9, 2.3e-8; walls and
+/// water 1.1e-7, 1.6e-7, 6.1e-8.
+#[test]
+fn the_born_run_is_the_derivative_and_the_gradient_its_transpose() {
+    for order in [4, 8] {
+        born_check(&format!("order {order}"), 8, &|sphere| {
+            gradient_model(order, sphere)
+        });
+    }
+    born_check("walls and water", 0, &walls_and_water);
+}
+
+/// [`the_born_run_is_the_derivative_and_the_gradient_its_transpose`] in the model `config`
+/// makes, every node outside layers `pml` nodes thick changed.
+fn born_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
+    use vibe_rations::born::{Change, born};
+    use vibe_rations::config::Config;
+    use vibe_rations::gradient::gradient_with;
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let base = std::path::Path::new(".");
+    let mut cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let dt = Simulation::with_model(&cfg, model.clone())
+        .unwrap()
+        .solver
+        .dt;
+    cfg.time.dt = Some(dt);
+    cfg.time.courant = None;
+    cfg.boundary.pml_vp_max.get_or_insert(model.vp_range()[1]);
+    let traces = |m: Model| {
+        let mut sim = Simulation::with_model(&cfg, m).unwrap();
+        sim.run(None, false).unwrap();
+        sim.receivers.traces
+    };
+    let g = model.grid;
+    let [nx, ny, nz] = g.n;
+    let mut mask = vec![0.0f64; g.interior_len()];
+    for k in 0..nz - pml {
+        for j in pml..ny - pml {
+            for i in pml..nx - pml {
+                mask[g.interior_idx(i, j, k)] = 1.0;
+            }
+        }
+    }
+    for (p, seed) in [(0, 13), (1, 14), (2, 15)] {
+        let name = ["vp", "vs", "rho"][p];
+        let u: Vec<f64> = noise(g.interior_len(), seed)
+            .iter()
+            .zip(&mask)
+            .map(|(v, m)| v * m)
+            .collect();
+        let values = |m: &Model| [&m.vp, &m.vs, &m.rho][p].clone();
+        let start = values(&model);
+        let mut speeds = [vec![0.0; u.len()], vec![0.0; u.len()], vec![0.0; u.len()]];
+        speeds[p] = u.iter().zip(&start).map(|(u, &m)| u * m as f64).collect();
+        let change = Change::from_velocities(&model, speeds.each_ref().map(Vec::as_slice));
+        let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+        let jv = born(&mut sim, &change).unwrap().traces;
+
+        let perturbed = |h: f64| {
+            let mut m = model.clone();
+            let target = [&mut m.vp, &mut m.vs, &mut m.rho]
+                .into_iter()
+                .nth(p)
+                .unwrap();
+            for (v, &w) in target.iter_mut().zip(&u) {
+                *v = (*v as f64 * (1.0 + h * w)) as f32;
+            }
+            m
+        };
+        let difference = |h: f64| -> Vec<Vec<f64>> {
+            let (a, b) = (traces(perturbed(h)), traces(perturbed(-h)));
+            a.iter()
+                .zip(&b)
+                .map(|(a, b)| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(a, b)| (*a as f64 - *b as f64) / (2.0 * h))
+                        .collect()
+                })
+                .collect()
+        };
+        let h = 1.6e-2;
+        let (coarse, fine) = (difference(h), difference(h / 2.0));
+        // Each component's error relative to its own size: pressure is 10⁶ times velocity.
+        let error = |fd: &[Vec<f64>]| {
+            fd.iter()
+                .zip(&jv)
+                .map(|(fd, jv)| {
+                    let diff: f64 = fd
+                        .iter()
+                        .zip(jv)
+                        .map(|(a, &b)| (a - b as f64).powi(2))
+                        .sum();
+                    let size: f64 = jv.iter().map(|&b| (b as f64).powi(2)).sum();
+                    (diff / size).sqrt()
+                })
+                .fold(0.0f64, f64::max)
+        };
+        let extrapolated: Vec<Vec<f64>> = coarse
+            .iter()
+            .zip(&fine)
+            .map(|(c, f)| c.iter().zip(f).map(|(c, f)| (4.0 * f - c) / 3.0).collect())
+            .collect();
+
+        // r: the Born traces with random positive weights, each component scaled to unit size.
+        let weights = noise(jv.iter().map(Vec::len).sum(), seed + 100);
+        let mut w = weights.iter();
+        let r: Vec<Vec<f32>> = jv
+            .iter()
+            .map(|t| {
+                let size: f64 = t.iter().map(|&v| (v as f64).powi(2)).sum();
+                t.iter()
+                    .map(|&v| (v as f64 * w.next().unwrap() / size) as f32)
+                    .collect()
+            })
+            .collect();
+        let forward: f64 = jv
+            .iter()
+            .flatten()
+            .zip(r.iter().flatten())
+            .map(|(&a, &b)| a as f64 * b as f64)
+            .sum();
+        let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+        let run = gradient_with(&mut sim, |_| Ok((0.0, r.clone())), Strategy::default()).unwrap();
+        let backward = change.dot(&run.gradient);
+        let transpose = (forward - backward).abs() / forward.abs();
+        println!(
+            "Born, {label}, {name}: against central differences {:.1e} (h {h:.1e}), {:.1e} \
+             (h/2), extrapolated {:.1e}; ⟨Jδm, r⟩ {forward:.6e}, ⟨δm, Jᵀr⟩ {backward:.6e}, \
+             difference {transpose:.1e}",
+            error(&coarse),
+            error(&fine),
+            error(&extrapolated)
+        );
+        assert!(
+            error(&extrapolated) < 5e-4,
+            "{label}, {name}: {}",
+            error(&extrapolated)
+        );
+        assert!(transpose < 1e-6, "{label}, {name}: {transpose}");
+    }
+}
+
 /// A small inversion: two shots of a vertical and a horizontal force, recorded on the free
 /// surface, of a model with a faster sphere, inverted for vp and vs from a homogeneous start,
 /// with the top 60 m (the sources and the receivers) held fixed and the gradient

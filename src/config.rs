@@ -729,6 +729,22 @@ pub struct InversionConfig {
     /// the source side alone.
     #[serde(default)]
     pub receiver_runs: usize,
+    /// Divide by the Gauss–Newton Hessian's diagonal instead of the illumination: estimated at
+    /// each stage's start from this many gradient runs per shot with random residuals
+    /// ([`crate::misfit::Misfit::probe`]), for each parameter at each node, so that it sets
+    /// the parameters' shares of the step as well as where it goes. 0, the default, for the
+    /// illumination. Not with `receiver_runs`, whose receivers' side it already holds.
+    #[serde(default)]
+    pub hessian_probes: usize,
+    /// The width (σ, in metres) of the Gaussian the estimated diagonal is smoothed with: each
+    /// node's estimate scatters by about √(2/probes) of its value. 0 leaves it as estimated.
+    #[serde(default)]
+    pub hessian_smoothing: f64,
+    /// Scale the diagonal parameter by parameter, each by its own largest value, so that it
+    /// sets where each parameter's step goes, as the illumination does, but not the
+    /// parameters' shares of it (the relative unknowns and `scale` set those).
+    #[serde(default)]
+    pub hessian_balance: bool,
     /// Factors on the preconditioner for the inverted parameters: a change of variables that
     /// sets each one's share of the steps, e.g. `rho = 0.3` where density takes up what the
     /// velocities should explain. Positive, 1 by default. Only their ratios matter: one

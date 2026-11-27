@@ -575,6 +575,78 @@ impl Misfit {
             .collect()
     }
 
+    /// A random adjoint source z for every sample, of the traces as recorded, whose
+    /// covariance is the misfit's Gauss–Newton weight on them: with `draw` giving independent
+    /// values of mean 0 and variance 1 (signs), the gradient run it drives returns Jᵀz, and
+    /// E[(Jᵀz)²] is the diagonal of the Gauss–Newton Hessian JᵀWJ, for one gradient run per
+    /// probe (Bekas, Kokiopoulou & Saad 2007's estimator of a diagonal).
+    ///
+    /// For L2 it is exact: z = (FM)ᵀ √w ξ, so E[zzᵀ] = (FM)ᵀ w (FM), the misfit's Hessian with
+    /// respect to the samples, filter, mutes and weights included. The trace-by-trace misfits'
+    /// Hessians have rank one (the time shift) or a few per trace, along the observed waveform;
+    /// for them z is a trace's weight from [`Misfit::receiver_weights`] on noise in the band the
+    /// misfit sees, which keeps their scale and band but not their shape. Draws go component by
+    /// component, receiver by receiver, sample by sample, so a seed gives the same probe.
+    pub fn probe(&self, draw: &mut dyn FnMut() -> f64) -> Vec<Vec<f32>> {
+        let n = self.samples;
+        let weights = match self.measure.kind {
+            MisfitKind::L2 => self
+                .observed
+                .iter()
+                .zip(&self.weights)
+                .map(|(o, &w)| vec![w; o.len() / n])
+                .collect(),
+            _ => self.receiver_weights(),
+        };
+        weights
+            .iter()
+            .map(|w| {
+                let mut out = Vec::with_capacity(w.len() * n);
+                for (r, &w) in w.iter().enumerate() {
+                    let root = w.max(0.0).sqrt();
+                    let mut z: Vec<f64> = (0..n).map(|_| root * draw()).collect();
+                    self.transform_transpose(&mut z, r);
+                    out.extend(z.into_iter().map(|v| v as f32));
+                }
+                out
+            })
+            .collect()
+    }
+
+    /// The misfit's Hessian in the samples applied to a change of the synthetic traces
+    /// (`change`, in their layout): the adjoint source whose gradient run, after a Born run
+    /// that gave `change` = J δm, is the Gauss–Newton Hessian's product JᵀWJ δm. For L2 it is
+    /// (FM)ᵀ w (FM) δd, exact; the trace-by-trace misfits' Hessians depend on the synthetic
+    /// traces and aren't offered.
+    pub fn gauss_newton_source(&self, change: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        ensure!(
+            self.measure.kind == MisfitKind::L2,
+            "the Gauss–Newton products are only for the L2 misfit"
+        );
+        ensure!(
+            change.len() == self.observed.len(),
+            "{} changed components for {} observed",
+            change.len(),
+            self.observed.len()
+        );
+        let n = self.samples;
+        Ok(change
+            .iter()
+            .zip(&self.weights)
+            .map(|(c, &w)| {
+                let mut out = Vec::with_capacity(c.len());
+                for (r, trace) in c.chunks(n).enumerate() {
+                    let mut z: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
+                    self.transform(&mut z, r);
+                    z.iter_mut().for_each(|v| *v *= w);
+                    self.transform_transpose(&mut z, r);
+                    out.extend(z.into_iter().map(|v| v as f32));
+                }
+                out
+            })
+            .collect())
+    }
+
     /// Bytes it holds besides the observed traces it shares with the caller: its muted and
     /// filtered copy of them if it mutes or filters, the weights, the receivers' offsets if
     /// it mutes, and the phase misfit's kernels.
@@ -1811,6 +1883,96 @@ mod tests {
         assert!(w[0][0] > 0.0 && w[0][1] == 0.0, "{w:?}");
         let (_, g) = m.evaluate(&[vec![0.5f32; 2 * n]]).unwrap();
         assert!(g[0][n..].iter().all(|&v| v == 0.0));
+    }
+
+    /// For L2 a probe's covariance is the misfit's Hessian in the samples, (FM)ᵀ W (FM), mutes,
+    /// filter and balancing weights included: summed over the unit draws, Σₖ (zₖ·u)(zₖ·y)
+    /// matches u·H y, H y the change of the adjoint source when the synthetic changes by y
+    /// (exact for L2, which is quadratic); and so does `gauss_newton_source(y)`.
+    #[test]
+    fn a_probes_covariance_is_the_l2_hessian() {
+        let dt = 2e-3;
+        let n = 80;
+        let obs = Arc::new(vec![
+            to_f32(&[ricker(12.0, 0.08, dt, n), ricker(12.0, 0.1, dt, n)].concat()),
+            to_f32(
+                &[ricker(12.0, 0.08, dt, n), ricker(12.0, 0.12, dt, n)]
+                    .concat()
+                    .iter()
+                    .map(|v| 1e6 * v)
+                    .collect::<Vec<_>>(),
+            ),
+        ]);
+        let measure = Measure {
+            max_frequency: Some(30.0),
+            mutes: vec![MuteConfig {
+                keep: MuteSide::After,
+                velocity: Some(2000.0),
+                delay: 0.0,
+                taper: 0.03,
+                weight: 0.0,
+                shape: MuteShape::Cosine,
+                shot: None,
+                spare: None,
+                spare_taper: 0.0,
+            }],
+            ..Measure::l2(true)
+        };
+        let components = [Component::Vz, Component::P];
+        let m = Misfit::new(measure, &obs, &components, n, dt, &[0.0, 150.0]).unwrap();
+        // Smooth changes of the synthetic, one per component, of the data's own size.
+        let change = |a: f64, b: f64| -> Vec<Vec<f32>> {
+            obs.iter()
+                .map(|o| {
+                    let peak = o.iter().fold(0.0f32, |p, v| p.max(v.abs())) as f64;
+                    (0..o.len())
+                        .map(|i| (peak * 0.3 * (a * i as f64).sin() * (b * i as f64).cos()) as f32)
+                        .collect()
+                })
+                .collect()
+        };
+        let (y, u) = (change(0.11, 0.023), change(0.07, 0.031));
+        let at = |d: &[Vec<f32>]| m.evaluate(d).unwrap().1;
+        let shifted: Vec<Vec<f32>> = obs
+            .iter()
+            .zip(&y)
+            .map(|(o, y)| o.iter().zip(y).map(|(a, b)| a + b).collect())
+            .collect();
+        let (g1, g0) = (at(&shifted), at(&obs));
+        let dot = |a: &[Vec<f32>], b: &[Vec<f32>]| -> f64 {
+            a.iter()
+                .flatten()
+                .zip(b.iter().flatten())
+                .map(|(&a, &b)| a as f64 * b as f64)
+                .sum()
+        };
+        let hy: Vec<Vec<f32>> = g1
+            .iter()
+            .zip(&g0)
+            .map(|(a, b)| a.iter().zip(b).map(|(a, b)| a - b).collect())
+            .collect();
+        let expect = dot(&u, &hy);
+        let total = 2 * 2 * n;
+        let mut sum = 0.0;
+        for k in 0..total {
+            let mut i = 0;
+            let z = m.probe(&mut || {
+                i += 1;
+                if i - 1 == k { 1.0 } else { 0.0 }
+            });
+            sum += dot(&z, &u) * dot(&z, &y);
+        }
+        assert!(expect.abs() > 0.0);
+        assert!(
+            ((sum - expect) / expect).abs() < 1e-5,
+            "{sum} against {expect}"
+        );
+        // And the Gauss–Newton source is H y itself.
+        let source = dot(&u, &m.gauss_newton_source(&y).unwrap());
+        assert!(
+            ((source - expect) / expect).abs() < 1e-5,
+            "{source} against {expect}"
+        );
     }
 
     /// One-sample traces are fine for every misfit but the time shifts, which say so.

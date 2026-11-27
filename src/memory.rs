@@ -59,6 +59,8 @@ pub struct InversionSize {
     pub misfit_bytes: u64,
     /// Whether it estimates the receivers' side of the illumination, held between stages.
     pub receiver_side: bool,
+    /// Whether it estimates the Gauss–Newton Hessian's diagonal, held between stages.
+    pub hessian_diagonal: bool,
     /// Whether its gradient runs rebuild the forward wavefield backwards (`[inversion]
     /// reconstruct`) instead of replaying it from checkpoints.
     pub reconstruct: bool,
@@ -199,6 +201,10 @@ impl Plan {
                 } else {
                     0
                 },
+            ),
+            part(
+                "the Gauss–Newton Hessian's diagonal",
+                if inversion.hessian_diagonal { 8 * n } else { 0 },
             ),
             // Last, as a test expects.
             part(
@@ -510,6 +516,7 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
                 .any(|&p| settings.scale.of(p) != 1.0),
         misfit_bytes,
         receiver_side: settings.precondition && settings.receiver_runs > 0,
+        hessian_diagonal: settings.precondition && settings.hessian_probes > 0,
         reconstruct: settings.reconstruct,
     };
     Ok(Plan::new(&cfg.shot(0)?, grid, steps)?.inversion_memory(&size))
@@ -987,7 +994,8 @@ mod tests {
         // As recorded; with a stage that filters (and so keeps filtered copies); with the
         // receivers' side of the illumination and a scale; with the phase misfit's kernels,
         // largest in its unfiltered stage; with a mute (a muted copy and the offsets); and
-        // with the forward wavefield rebuilt backwards instead of replayed.
+        // with the forward wavefield rebuilt backwards instead of replayed; and with the
+        // Gauss–Newton diagonal, smoothed.
         let filtering = "[[inversion.stage]]\nmax_frequency = 10.0\niterations = 2";
         let receivers = "receiver_runs = 1\n[inversion.scale]\nvp = 0.5";
         let phase = "misfit = \"phase\"\n[[inversion.stage]]\niterations = 2\n\
@@ -996,7 +1004,10 @@ mod tests {
                      taper = 0.02";
         let replayed = "reconstruct = false";
         let shallow = "fixed_below = 120.0";
-        for stages in ["", filtering, receivers, phase, muted, replayed, shallow] {
+        let hessian = "hessian_probes = 1\nhessian_smoothing = 15.0";
+        for stages in [
+            "", filtering, receivers, phase, muted, replayed, shallow, hessian,
+        ] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();
