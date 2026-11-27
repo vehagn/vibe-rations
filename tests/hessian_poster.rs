@@ -14,22 +14,34 @@
 //! source and per parameter: the change of the gradient on that line when that cell's ρ, vp
 //! or vs changes.
 //!
-//! Here the model is 3D: the disc is a cylinder across the plane, as a 2D model means it, the
-//! source a point, the receivers a line in its plane. The matrix is
+//! Two versions. In 2D (`poster_2d…`, a grid one node across) it is the poster's own
+//! survey, a line source, like for like with the code behind it. In 3D the disc is a cylinder
+//! across the plane, as a 2D model means it, the source a point and the receivers a line in
+//! its plane, which is what the point scatterer's closed forms are for. The matrix is
 //! [`vibe_rations::hessian::hessian_block`]'s: one forward run, one adjoint run and one Born
 //! run per column give JᵀJ (the Born traces' inner products), B (each Born run against the
 //! adjoint run) and the local term, so H = JᵀJ + B + Bᵀ + local has its second-order part at
 //! its own scale, not as a difference of numbers thousands of times larger.
 //!
-//! - `coarse`, `poster`, `poster_long`: the matrices into `out/hessian-poster/<case>/block`,
-//!   with the closed forms: the start's traces against an explosion's pressure, every Born
-//!   trace against a point scatterer's (`common::explosion`), and JᵀJ against the same from
-//!   those.
-//! - `coarse_products`, `poster_products`: six of those columns against whole products
-//!   ([`hessian_product`]: a Born and two adjoint runs each), and the kernels in the plane.
-//! - `coarse_differences`: the same six against differences of the gradient.
-//! - `coarse_along`, `poster_along`: the misfit along directions on the column read from
-//!   files: the Hessian's curvature and a step's worth, measured without the Hessian.
+//! - `coarse`, `poster`, `poster_long`, `poster_2d`, `poster_2d_long`: the matrices into
+//!   `out/hessian-poster/<case>/block`, with the closed forms: the start's traces against an
+//!   explosion's pressure (in 2D a line of them), and in 3D every Born trace against a point
+//!   scatterer's (`common::explosion`) and JᵀJ against the same from those.
+//! - `poster_2d_floor`: the 2D survey over a reflecting half-space two nodes under the box,
+//!   recorded until its reflection is back. The disc's edge is smooth (30 m against a P
+//!   wavelength of 150 m), so its own reflection is weak and the plain survey's residual
+//!   small; a wave returned from below crosses the disc twice and its residual, a third of
+//!   a period's advance, is 10⁴ times larger in energy. The gradient on the column then has
+//!   one sign at every depth, and so has the second-order part's diagonal: the look of the
+//!   poster's own figure, which the plain survey's exact matrix hasn't.
+//! - `coarse_products`, `poster_products`, `poster_2d_products`: six of those columns
+//!   against whole products ([`hessian_product`]: a Born and two adjoint runs each), and the
+//!   kernels in the plane.
+//! - `coarse_differences`, `poster_2d_differences`: the same six against differences of the
+//!   gradient.
+//! - `coarse_along`, `poster_along`, `poster_2d_along`: the misfit along directions on the
+//!   column read from files: the Hessian's curvature and a step's worth, measured without
+//!   the Hessian.
 //! - `coarse_without_residual`: with the start's own data the second-order part is zero and
 //!   a product is JᵀJ's column.
 //! - `coarse_forward`, `poster_forward`: the start's traces alone, for choosing the margins.
@@ -51,6 +63,7 @@ use vibe_rations::npy;
 use vibe_rations::simulation::Simulation;
 
 use common::explosion::{Explosion, evaluate, velocity_scattering};
+use common::line::along_line;
 use common::stokes::Medium;
 use common::{norm, sub};
 
@@ -88,6 +101,14 @@ struct Case {
     /// Nodes outside the layers on each side of the plane.
     across: usize,
     duration: f64,
+    /// A 2D run: the grid one node across, the source a line, as the poster's own code had
+    /// it. Otherwise 3D with a point source, which the closed forms are for.
+    planar: bool,
+    /// A reflector under the box, two nodes below its bottom: vp, vs and ρ of a half-space
+    /// there, in the start and in the observed data's model alike.
+    floor: Option<[f64; 3]>,
+    /// How far to the side of the column the source is, m.
+    aside: f64,
 }
 
 /// The poster's model at half its frequency on twice its spacing, with the same number of
@@ -104,6 +125,9 @@ const COARSE: Case = Case {
     around: 4,
     across: 6,
     duration: 2.0,
+    planar: false,
+    floor: None,
+    aside: 0.0,
 };
 
 /// The poster's spacing, wavelet, depths and record length (1000 steps of 1 ms).
@@ -119,6 +143,9 @@ const POSTER: Case = Case {
     around: 4,
     across: 6,
     duration: 1.0,
+    planar: false,
+    floor: None,
+    aside: 0.0,
 };
 
 /// The poster's survey recorded for long enough to hold the reflections of the whole
@@ -129,21 +156,65 @@ const POSTER_LONG: Case = Case {
     ..POSTER
 };
 
+/// The poster's survey in 2D, as its own code ran it: a line source, and the disc a disc.
+const POSTER_2D: Case = Case {
+    name: "poster-2d",
+    planar: true,
+    ..POSTER
+};
+
+const POSTER_2D_LONG: Case = Case {
+    name: "poster-2d-long",
+    planar: true,
+    ..POSTER_LONG
+};
+
+/// The same over a reflecting floor, recorded until its reflection has come back: the wave
+/// then crosses the disc twice, and the residual holds what the disc did to it on the way.
+const POSTER_2D_FLOOR: Case = Case {
+    name: "poster-2d-floor",
+    floor: Some([3000.0, 2000.0, 2000.0]),
+    ..POSTER_2D_LONG
+};
+
+/// The poster's survey as the code behind its figure ran it. Its absorbing layers, ten cells
+/// under a stencil sixteen long, had two cells at work, at under 2% of their damping: the
+/// model was a box with walls two cells outside it, and the record, 2000 steps of 1 ms, long
+/// enough for the wave to cross it three times. The source was one cell to the side of the
+/// column.
+const POSTER_2D_BOX: Case = Case {
+    name: "poster-2d-box",
+    pml: 0,
+    around: 2,
+    duration: 2.0,
+    aside: 10.0,
+    ..POSTER_2D
+};
+
 impl Case {
     /// Where the box's point `x` across and `z` down is on the grid, in the source's plane.
     fn at(&self, x: f64, z: f64) -> [f64; 3] {
         let h = self.spacing;
         let edge = (self.pml + self.around) as f64 * h;
-        [edge + x, (self.pml + self.across) as f64 * h, edge + z]
+        [edge + x, self.row() as f64 * h, edge + z]
+    }
+
+    /// The plane of the source: its node along y.
+    fn row(&self) -> usize {
+        if self.planar {
+            0
+        } else {
+            self.pml + self.across
+        }
     }
 
     fn points(&self) -> [usize; 3] {
         let n = (BOX / self.spacing).round() as usize + 1 + 2 * (self.pml + self.around);
-        [n, 2 * (self.pml + self.across) + 1, n]
+        [n, 2 * self.row() + 1, n]
     }
 
     fn source(&self) -> [f64; 3] {
-        self.at(BOX / 2.0, self.depth)
+        self.at(BOX / 2.0 + self.aside, self.depth)
     }
 
     fn receivers(&self) -> Vec<[f64; 3]> {
@@ -175,8 +246,13 @@ impl Case {
         let [vp, vs, rho] = START;
         // The observed data's model is faster than the start, whose time step the inversion
         // keeps: the usual fraction of the stability limit there.
-        let fastest = vp + ANOMALY;
-        let courant = 0.85 * vp / fastest;
+        let fastest = self.floor.map_or(vp, |f| f[0]).max(vp + ANOMALY);
+        // The layers' own Courant number follows the model's fastest node.
+        let courant = 0.85 * self.floor.map_or(vp, |f| f[0]).max(vp) / fastest;
+        let floor = self.floor.map_or(String::new(), |[vp, vs, rho]| {
+            let top = self.at(0.0, BOX)[2] + 2.0 * h;
+            format!("[[model.layer]]\ntop = {top}\nvp = {vp}\nvs = {vs}\nrho = {rho}")
+        });
         let source = self.source();
         let receivers = self.receivers();
         let (from, to, count) = (
@@ -202,6 +278,7 @@ impl Case {
             vp = {vp}
             vs = {vs}
             rho = {rho}
+            {floor}
             [[source]]
             position = {source:?}
             explosion = {RATE:e}
@@ -504,7 +581,16 @@ fn forward_misfits(s: &Survey) -> (Vec<f64>, Vec<f32>) {
             let exact: Vec<f64> = s
                 .times
                 .iter()
-                .map(|&t| explosion.pressure(&medium, r, t))
+                .map(|&t| {
+                    if case.planar {
+                        // A line of explosions: the point's pressure summed along it.
+                        along_line(medium.vp, r, t, |y| {
+                            explosion.pressure(&medium, r.hypot(y), t)
+                        })
+                    } else {
+                        explosion.pressure(&medium, r, t)
+                    }
+                })
                 .collect();
             let got: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
             relative(&got, &exact)
@@ -525,8 +611,11 @@ fn print_forward(misfits: &[f64], h: f64) {
     println!("the start's pressure against the explosion's, by the receiver's offset:");
     let middle = misfits.len() / 2;
     for i in (0..=middle).rev().step_by((middle / 6).max(1)) {
-        let offset = (middle - i) as f64 * h;
-        println!("  {offset:>6.0} m  {:>8.4}%", 100.0 * misfits[i]);
+        // A receiver on the source has no closed form.
+        if misfits[i].is_finite() {
+            let offset = (middle - i) as f64 * h;
+            println!("  {offset:>6.0} m  {:>8.4}%", 100.0 * misfits[i]);
+        }
     }
     let worst = misfits
         .iter()
@@ -715,11 +804,7 @@ fn run(case: Case, at_once: usize) {
     write_f64(&dir.join("gradient.f64"), &on_column);
     write_f64(&dir.join("depths.f64"), &case.depths());
     write_f64(&dir.join("times.f64"), &s.times);
-    let (shape, data) = plane(
-        model,
-        [&g[0][..], &g[1][..], &g[2][..]],
-        case.pml + case.across,
-    );
+    let (shape, data) = plane(model, [&g[0][..], &g[1][..], &g[2][..]], case.row());
     npy::write(&dir.join("gradient.npy"), &shape, &data).unwrap();
     let traces = born_traces(&s, &b);
     write_traces(&dir.join("jacobian.npy"), &traces);
@@ -743,12 +828,20 @@ fn run(case: Case, at_once: usize) {
     // The closed forms.
     println!();
     let (forward, traces_start) = forward_misfits(&s);
-    write_f64(&dir.join("forward_misfit.f64"), &forward);
-    print_forward(&forward, case.spacing);
+    if case.floor.is_none() && case.pml > 0 {
+        write_f64(&dir.join("forward_misfit.f64"), &forward);
+        print_forward(&forward, case.spacing);
+    } else {
+        println!("over a floor or between walls the explosion's closed form doesn't hold");
+    }
     let gather = [case.receivers().len(), s.times.len()];
     npy::write(&dir.join("start.npy"), &gather, &traces_start).unwrap();
     let observed = record(&s, &truth(&case, model));
     npy::write(&dir.join("observed.npy"), &gather, &observed).unwrap();
+    if case.planar {
+        // The point scatterer's closed form is for a point source.
+        return;
+    }
     let t = Instant::now();
     let exact = exact_traces(&s);
     write_traces(&dir.join("jacobian_exact.npy"), &exact);
@@ -841,6 +934,45 @@ fn poster_long() {
     run(POSTER_LONG, 1);
 }
 
+#[test]
+#[ignore = "a minute"]
+fn poster_2d() {
+    run(POSTER_2D, SIDE_BY_SIDE);
+}
+
+#[test]
+#[ignore = "minutes"]
+fn poster_2d_long() {
+    run(POSTER_2D_LONG, SIDE_BY_SIDE);
+}
+
+#[test]
+#[ignore = "minutes"]
+fn poster_2d_floor() {
+    run(POSTER_2D_FLOOR, SIDE_BY_SIDE);
+}
+
+#[test]
+#[ignore = "a minute"]
+fn poster_2d_box() {
+    run(POSTER_2D_BOX, SIDE_BY_SIDE);
+}
+
+#[test]
+#[ignore = "a minute, after `poster_2d_box`, whose block it reads"]
+fn poster_2d_box_products() {
+    products(POSTER_2D_BOX);
+}
+
+#[test]
+#[ignore = "a minute"]
+fn poster_2d_box_towards() {
+    towards(POSTER_2D_BOX);
+}
+
+/// Born runs side by side on a 2D grid, which is too small for one run to use every thread.
+const SIDE_BY_SIDE: usize = 8;
+
 /// The columns the checks below take: each parameter's at a quarter and at three quarters
 /// of the column.
 fn sampled(n: usize) -> Vec<(Parameter, usize)> {
@@ -863,7 +995,7 @@ fn products(case: Case) {
     let side = 3 * n;
     let model = &s.inv.model;
     let shot = &s.inv.shots[0];
-    let j = case.pml + case.across;
+    let j = case.row();
     println!("the block against whole products, ‖difference‖ / ‖the product's column‖:");
     for (p, c) in sampled(n) {
         let t = Instant::now();
@@ -920,6 +1052,18 @@ fn poster_products() {
     products(POSTER);
 }
 
+#[test]
+#[ignore = "a minute, after `poster_2d`, whose block it reads"]
+fn poster_2d_products() {
+    products(POSTER_2D);
+}
+
+#[test]
+#[ignore = "two minutes, after `poster_2d_floor`, whose block it reads"]
+fn poster_2d_floor_products() {
+    products(POSTER_2D_FLOOR);
+}
+
 /// The block `run` left against differences of the gradient, for six of its columns.
 fn differences(case: Case) {
     let s = setup(case, true);
@@ -955,6 +1099,18 @@ fn differences(case: Case) {
 #[ignore = "minutes, after `coarse`, whose block it reads"]
 fn coarse_differences() {
     differences(COARSE);
+}
+
+#[test]
+#[ignore = "a minute, after `poster_2d`, whose block it reads"]
+fn poster_2d_differences() {
+    differences(POSTER_2D);
+}
+
+#[test]
+#[ignore = "two minutes, after `poster_2d_floor`, whose block it reads"]
+fn poster_2d_floor_differences() {
+    differences(POSTER_2D_FLOOR);
 }
 
 /// With the start's own data the residuals vanish to the last bit: the block's second-order
@@ -1042,6 +1198,130 @@ fn coarse_along() {
 #[ignore = "seconds per direction, after `poster`"]
 fn poster_along() {
     along(POSTER);
+}
+
+#[test]
+#[ignore = "seconds, after `poster_2d`"]
+fn poster_2d_along() {
+    along(POSTER_2D);
+}
+
+/// The multiples of the whole anomaly [`towards`] measures the misfit at: 1 is the model
+/// the observed data came from.
+const TOWARDS: [f64; 17] = [
+    -0.5, -0.375, -0.25, -0.125, 0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125,
+    1.25, 1.375, 1.5,
+];
+
+/// Along the whole anomaly, not one cell of it: the direction from the start to the model
+/// the observed data came from, in all three parameters and in each alone. For each, the
+/// slope gᵀv, the two curvatures vᵀHv (a whole product) and vᵀJᵀJv (its Born traces), and
+/// the misfit measured at [`TOWARDS`]'s multiples, into `towards/<name>.f64`: which
+/// quadratic model, Newton's or Gauss–Newton's, follows the misfit to its minimum.
+fn towards(case: Case) {
+    let s = setup(case, true);
+    let dir = case.dir().join("towards");
+    fs::create_dir_all(&dir).unwrap();
+    let shot = &s.inv.shots[0];
+    let model = &s.inv.model;
+    let target = truth(&case, model);
+    let mut sim = Simulation::with_model(&shot.config, model.clone()).unwrap();
+    let g = gradient(&mut sim, |r| shot.misfit.evaluate(&r.traces), None)
+        .unwrap()
+        .gradient
+        .velocities(model);
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    println!(
+        "{}: along the anomaly, the slope, the curvatures and the misfit",
+        case.name
+    );
+    for (name, which) in [
+        ("all", [true; 3]),
+        ("vp", [true, false, false]),
+        ("vs", [false, true, false]),
+        ("rho", [false, false, true]),
+    ] {
+        let speeds: [Vec<f64>; 3] = Parameter::ALL.map(|p| {
+            let (from, to) = (model.values(p), target.values(p));
+            let on = if which[p as usize] { 1.0 } else { 0.0 };
+            from.iter()
+                .zip(to)
+                .map(|(&a, &b)| on * (b - a) as f64)
+                .collect()
+        });
+        let by_ref = speeds.each_ref().map(Vec::as_slice);
+        let change = Change::from_velocities(model, by_ref);
+        let mut sim = Simulation::with_model(&shot.config, model.clone()).unwrap();
+        let mut gauss_newton = 0.0;
+        let product = hessian_product(
+            &mut sim,
+            &change,
+            |r| shot.misfit.evaluate(&r.traces),
+            |d| {
+                let source = shot.misfit.gauss_newton_source(d)?;
+                gauss_newton = source[0]
+                    .iter()
+                    .zip(&d[0])
+                    .map(|(&w, &d)| w as f64 * d as f64)
+                    .sum();
+                Ok(source)
+            },
+            None,
+        )
+        .unwrap();
+        let hv = product.velocities(model, by_ref);
+        let slope: f64 = (0..3).map(|p| dot(&g[p], &speeds[p])).sum();
+        let hessian: f64 = (0..3).map(|p| dot(&hv[p], &speeds[p])).sum();
+        let misfits: Vec<f64> = TOWARDS
+            .iter()
+            .map(|&t| {
+                let mut changed = model.clone();
+                for p in Parameter::ALL {
+                    let values = changed.values_mut(p);
+                    for (v, d) in values.iter_mut().zip(&speeds[p as usize]) {
+                        *v += (t * d) as f32;
+                    }
+                }
+                shot.misfit.value(&[record(&s, &changed)]).unwrap()
+            })
+            .collect();
+        println!(
+            "  {name:>3}: gᵀv {slope:+.4e}, vᵀHv {hessian:+.4e}, vᵀJᵀJv {gauss_newton:+.4e}; the misfit {}",
+            misfits
+                .iter()
+                .map(|m| format!("{m:.4e}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut out = vec![slope, hessian, gauss_newton];
+        out.extend(TOWARDS);
+        out.extend(misfits);
+        write_f64(&dir.join(format!("{name}.f64")), &out);
+    }
+}
+
+#[test]
+#[ignore = "a minute"]
+fn poster_2d_towards() {
+    towards(POSTER_2D_LONG);
+}
+
+#[test]
+#[ignore = "two minutes"]
+fn poster_2d_floor_towards() {
+    towards(POSTER_2D_FLOOR);
+}
+
+#[test]
+#[ignore = "seconds per direction, after `poster_2d_long`"]
+fn poster_2d_long_along() {
+    along(POSTER_2D_LONG);
+}
+
+#[test]
+#[ignore = "seconds per direction, after `poster_2d_floor`"]
+fn poster_2d_floor_along() {
+    along(POSTER_2D_FLOOR);
 }
 
 /// The margins' choice: the start's traces against the closed form for narrower and wider
