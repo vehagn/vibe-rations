@@ -476,9 +476,9 @@ pub fn estimate_gradient_with(cfg: &Config, base: &Path, strategy: Strategy) -> 
 
 /// The memory an inversion of `cfg` (`invert`) would need ([`Plan::inversion_memory`]),
 /// worked out like [`estimate`]. Each source is a shot, run with the time step all of them
-/// set. Unknowns are counted at every node outside the layers and below `fixed_above`; vs isn't
-/// inverted where it starts at zero, so with fluids in the model this is a little more than
-/// the inversion needs.
+/// set. Unknowns are counted at every node outside the layers, below `fixed_above` and above
+/// `fixed_below`; vs isn't inverted where it starts at zero, so with fluids in the model this
+/// is a little more than the inversion needs.
 pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
     let settings = cfg
         .inversion
@@ -500,7 +500,8 @@ pub fn estimate_inversion(cfg: &Config, base: &Path) -> Result<Memory> {
     }
     let size = InversionSize {
         shots: cfg.sources.len(),
-        unknowns: settings.parameters.len() * free_nodes(cfg, &grid, settings.fixed_above),
+        unknowns: settings.parameters.len()
+            * free_nodes(cfg, &grid, settings.fixed_above, settings.fixed_below),
         memory: settings.memory,
         precondition: settings.precondition
             || settings
@@ -552,16 +553,22 @@ fn timed(cfg: &Config, files: Files) -> Result<(Grid, Timing)> {
     Ok((grid, timing(cfg, &grid, vp_max, slowest)?))
 }
 
-/// Nodes an inversion may change (`Inversion::new`): outside the absorbing layers and not
-/// above `fixed_above`.
-fn free_nodes(cfg: &Config, grid: &Grid, fixed_above: Option<f64>) -> usize {
+/// Nodes an inversion may change (`Inversion::new`): outside the absorbing layers, not above
+/// `fixed_above` and not at or below `fixed_below`.
+fn free_nodes(
+    cfg: &Config,
+    grid: &Grid,
+    fixed_above: Option<f64>,
+    fixed_below: Option<f64>,
+) -> usize {
     let b = &cfg.boundary;
     let w = b.pml_width;
     let [nx, ny, nz] = grid.n;
     let top = if b.free_surface { 0 } else { w };
     let fixed = fixed_above.unwrap_or(f64::NEG_INFINITY);
+    let bottom = fixed_below.unwrap_or(f64::INFINITY);
     let depths = (top..nz.saturating_sub(w))
-        .filter(|&k| k as f64 * grid.h[2] >= fixed)
+        .filter(|&k| (fixed..bottom).contains(&(k as f64 * grid.h[2])))
         .count();
     nx.saturating_sub(2 * w) * ny.saturating_sub(2 * w) * depths
 }
@@ -988,7 +995,8 @@ mod tests {
         let muted = "[[inversion.mute]]\nkeep = \"before\"\nvelocity = 1000.0\ndelay = 0.1\n\
                      taper = 0.02";
         let replayed = "reconstruct = false";
-        for stages in ["", filtering, receivers, phase, muted, replayed] {
+        let shallow = "fixed_below = 120.0";
+        for stages in ["", filtering, receivers, phase, muted, replayed, shallow] {
             let cfg = Config::from_toml(&model(1200.0, stages)).unwrap();
             let m = estimate_inversion(&cfg, Path::new(".")).unwrap();
             let settings = cfg.inversion.clone().unwrap();

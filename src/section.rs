@@ -112,6 +112,14 @@ pub struct Extrusion {
     /// Smooth the solid part afterwards with a Gaussian of this standard deviation, in metres:
     /// a starting model for an inversion.
     pub smooth: Option<f64>,
+    /// Smooth the slownesses 1/vp and 1/vs instead of the speeds: weighted harmonic means,
+    /// which keep the time a wave takes through the smoothed region. Averaging the speeds of a
+    /// thin slow layer and the faster rock below makes the layer fast.
+    pub slowness: bool,
+    /// Raise vs wherever Poisson's ratio exceeds this, to vs = vp √((1 - 2ν) / (2 - 2ν)) (vp/√3
+    /// at 0.25), sample by sample before the averaging; fluids stay fluid. Elastic inversions of
+    /// Marmousi2 in the literature cap it at 0.25, which removes its slow seafloor waves.
+    pub max_poisson: Option<f64>,
 }
 
 /// A model on the nodes, x fastest, then y, then z: as `[model.files]` reads it.
@@ -141,7 +149,9 @@ pub struct Extruded {
 ///
 /// With `smooth`, each property is then smoothed over the solid nodes only (see
 /// [`smooth_solid`]), so the fluid and the seafloor stay sharp, as an inversion that holds the
-/// water fixed wants them.
+/// water fixed wants them; with `slowness`, vp and vs through their slownesses. A weighted
+/// harmonic mean of values with vp > √(4/3) vs keeps it too, so either way the model stays
+/// physical.
 pub fn extrude(vp: &Section, vs: &Section, rho: &Section, e: &Extrusion) -> Result<Extruded> {
     for s in [vs, rho] {
         ensure!(
@@ -158,6 +168,17 @@ pub fn extrude(vp: &Section, vs: &Section, rho: &Section, e: &Extrusion) -> Resu
         "spacings must be positive"
     );
     ensure!(e.ny != Some(0), "the model needs at least one node along y");
+    // vs / vp at the largest Poisson's ratio allowed.
+    let min_ratio = match e.max_poisson {
+        Some(nu) => {
+            ensure!(
+                (0.0..0.5).contains(&nu),
+                "Poisson's ratio {nu} isn't between 0 and 0.5"
+            );
+            ((1.0 - 2.0 * nu) / (2.0 - 2.0 * nu)).sqrt()
+        }
+        None => 0.0,
+    };
     let d = e.input_spacing;
     let axis = |range: Option<[f64; 2]>, len: usize, name: &str| -> Result<Vec<Range<usize>>> {
         let end = (len - 1) as f64 * d;
@@ -189,11 +210,14 @@ pub fn extrude(vp: &Section, vs: &Section, rho: &Section, e: &Extrusion) -> Resu
                 for s in zr.clone() {
                     let r = rho.at(t, s) as f64 * e.rho_scale;
                     let p = vp.at(t, s) as f64 * e.speed_scale;
-                    let sv = vs.at(t, s) as f64 * e.speed_scale;
+                    let mut sv = vs.at(t, s) as f64 * e.speed_scale;
                     ensure!(
                         r > 0.0 && p > 0.0 && sv >= 0.0,
                         "unphysical sample at trace {t}, sample {s}: vp {p}, vs {sv}, rho {r}"
                     );
+                    if sv > 0.0 {
+                        sv = sv.max(min_ratio * p);
+                    }
                     n += 1;
                     rho_sum += r;
                     p_compliance += 1.0 / (r * p * p);
@@ -222,11 +246,30 @@ pub fn extrude(vp: &Section, vs: &Section, rho: &Section, e: &Extrusion) -> Resu
             plane[2][at] = r as f32;
         }
     }
+    ensure!(
+        e.smooth.is_some() || !e.slowness,
+        "smoothing slownesses needs a smoothing length"
+    );
     if let Some(sigma) = e.smooth {
         ensure!(sigma > 0.0, "the smoothing length must be positive");
         let solid: Vec<bool> = plane[1].iter().map(|&v| v > 0.0).collect();
-        for p in &mut plane {
+        // Speeds become slownesses and back on the solid nodes only: the fluid's vs is 0.
+        let invert = |p: &mut [f32]| {
+            for (v, &s) in p.iter_mut().zip(&solid) {
+                if s {
+                    *v = 1.0 / *v;
+                }
+            }
+        };
+        for (n, p) in plane.iter_mut().enumerate() {
+            let slowness = e.slowness && n < 2;
+            if slowness {
+                invert(p);
+            }
             smooth_solid(p, &solid, nx, sigma / e.spacing);
+            if slowness {
+                invert(p);
+            }
         }
     }
     let [vp_max, rho_max] = [&plane[0], &plane[2]].map(|v| v.iter().copied().fold(0.0, f32::max));
@@ -408,6 +451,8 @@ mod tests {
             speed_scale: 1000.0,
             rho_scale: 1000.0,
             smooth: None,
+            slowness: false,
+            max_poisson: None,
         }
     }
 
@@ -475,6 +520,121 @@ mod tests {
             assert_eq!(at(&m.vs, 0, j, 2), 500.0);
         }
         assert_eq!(m.fluid_nodes, 3 + 3);
+    }
+
+    #[test]
+    fn caps_poissons_ratio_before_averaging() {
+        // Water over a soft solid (vs 0.3 km/s, Poisson's ratio 0.49) left of a hard one (vs
+        // 1.5), all at vp 2 km/s; cells of one sample.
+        let water = |s: usize| s < 2;
+        let vp = uniform(6, 6, |_, s| if water(s) { 1.5 } else { 2.0 });
+        let vs = uniform(6, 6, |t, s| match (water(s), t < 3) {
+            (true, _) => 0.0,
+            (false, true) => 0.3,
+            (false, false) => 1.5,
+        });
+        let rho = uniform(6, 6, |_, _| 2.0);
+        let e = Extrusion {
+            max_poisson: Some(0.25),
+            ..extrusion(1.0, None)
+        };
+        let m = extrude(&vp, &vs, &rho, &e).unwrap();
+        let plain = extrude(&vp, &vs, &rho, &extrusion(1.0, None)).unwrap();
+        for k in 0..6 {
+            for i in 0..6 {
+                let at = k * 6 + i;
+                let want = match (water(k), i < 3) {
+                    (true, _) => 0.0,
+                    (false, true) => 2000.0 / 3f32.sqrt(),
+                    (false, false) => 1500.0,
+                };
+                assert!((m.vs[at] - want).abs() < 1e-2, "({i}, {k}): {}", m.vs[at]);
+                assert_eq!((m.vp[at], m.rho[at]), (plain.vp[at], plain.rho[at]));
+            }
+        }
+        let err = extrude(
+            &vp,
+            &vs,
+            &rho,
+            &Extrusion {
+                max_poisson: Some(0.5),
+                ..extrusion(1.0, None)
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Poisson"), "{err}");
+    }
+
+    #[test]
+    fn smooths_slownesses_into_harmonic_means() {
+        // Water over a slow layer (vs 0.4 km/s) over faster rock (vs 1.2), vp three times vs.
+        let (traces, samples) = (16, 24);
+        let layer = |s: usize| match s {
+            0..4 => 0,
+            4..8 => 1,
+            _ => 2,
+        };
+        let vs = uniform(traces, samples, |_, s| [0.0, 0.4, 1.2][layer(s)]);
+        let vp = uniform(traces, samples, |_, s| [1.5, 1.2, 3.6][layer(s)]);
+        let rho = uniform(traces, samples, |_, _| 2.0);
+        let smoothed = |slowness: bool| {
+            let e = Extrusion {
+                smooth: Some(3.0),
+                slowness,
+                ..extrusion(1.0, None)
+            };
+            extrude(&vp, &vs, &rho, &e).unwrap()
+        };
+        let (speeds, slownesses) = (smoothed(false), smoothed(true));
+        // The same as smoothing 1/v by hand.
+        let plain = extrude(&vp, &vs, &rho, &extrusion(1.0, None)).unwrap();
+        let solid: Vec<bool> = plain.vs.iter().map(|&v| v > 0.0).collect();
+        for (v, m) in [(&plain.vp, &slownesses.vp), (&plain.vs, &slownesses.vs)] {
+            let mut s: Vec<f32> = v
+                .iter()
+                .zip(&solid)
+                .map(|(&v, &solid)| if solid { 1.0 / v } else { v })
+                .collect();
+            smooth_solid(&mut s, &solid, traces, 3.0);
+            for (at, (&s, &m)) in s.iter().zip(m.iter()).enumerate() {
+                let want = if solid[at] { 1.0 / s } else { s };
+                assert!((want - m).abs() < 1e-2 * want.max(1.0), "{at}: {want} {m}");
+            }
+        }
+        for (at, &solid) in solid.iter().enumerate() {
+            if !solid {
+                // The water as it was.
+                assert_eq!(slownesses.vs[at], 0.0);
+                assert_eq!(slownesses.vp[at], 1500.0);
+            } else {
+                // Harmonic means never exceed arithmetic ones, and stay physical.
+                assert!(slownesses.vs[at] <= speeds.vs[at] + 1e-3, "{at}");
+                assert!(3.0 * slownesses.vp[at].powi(2) > 4.0 * slownesses.vs[at].powi(2));
+            }
+        }
+        // In the slow layer, where averaging speeds pulls in the rock below, slownesses keep it
+        // slower.
+        let at = 5 * traces + traces / 2;
+        assert!(
+            slownesses.vs[at] < 0.95 * speeds.vs[at],
+            "{} {}",
+            slownesses.vs[at],
+            speeds.vs[at]
+        );
+        assert_eq!(slownesses.rho, speeds.rho);
+        let err = extrude(
+            &vp,
+            &vs,
+            &rho,
+            &Extrusion {
+                slowness: true,
+                ..extrusion(1.0, None)
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("smoothing length"), "{err}");
     }
 
     #[test]

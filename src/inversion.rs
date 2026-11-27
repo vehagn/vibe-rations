@@ -3,8 +3,9 @@
 //!
 //! The unknowns are relative changes, x = m/m₀ - 1 for each inverted parameter at each free
 //! node, so that vp, vs and ρ share a scale; the gradient with respect to x is m₀ ∂χ/∂m. Free
-//! nodes are those outside the absorbing layers, where the gradient is exact, and below
-//! `fixed_above`; vs stays zero where it starts at zero, so fluids stay fluid.
+//! nodes are those outside the absorbing layers, where the gradient is exact, below
+//! `fixed_above` and above `fixed_below`; vs stays zero where it starts at zero, so fluids stay
+//! fluid.
 //!
 //! The time step, the layers' damping and the optimised coefficients' band are fixed at the
 //! starting model's (`[time] dt`, `[boundary] pml_vp_max`, `[scheme] optimised_for`), so the
@@ -463,6 +464,13 @@ impl Inversion {
             cfg.sources.len()
         );
         ensure!(!settings.parameters.is_empty(), "nothing to invert for");
+        if let Some(bottom) = settings.fixed_below {
+            let top = settings.fixed_above.unwrap_or(f64::NEG_INFINITY);
+            ensure!(
+                bottom > top,
+                "fixed_below ({bottom} m) must lie below fixed_above ({top} m), or nothing is free"
+            );
+        }
         for &p in &settings.parameters {
             let w = settings.scale.of(p);
             ensure!(
@@ -554,11 +562,13 @@ impl Inversion {
         let g = start.grid;
         let [nx, ny, nz] = g.n;
         let fixed_depth = settings.fixed_above.unwrap_or(f64::NEG_INFINITY);
+        let fixed_bottom = settings.fixed_below.unwrap_or(f64::INFINITY);
         let mut free = Vec::new();
         for &p in &settings.parameters {
             let mut nodes = Vec::new();
             for k in 0..nz {
-                if (k as f64) * g.h[2] < fixed_depth {
+                let z = (k as f64) * g.h[2];
+                if z < fixed_depth || z >= fixed_bottom {
                     continue;
                 }
                 for j in 0..ny {
@@ -1715,6 +1725,23 @@ mod tests {
         let m = inv.model_at(&x);
         assert!(m.vs[..16 * 16 * 3].iter().all(|&v| v == 0.0));
         m.validate().unwrap();
+    }
+
+    /// Only the depths from `fixed_above` down to `fixed_below` are free, `fixed_below`'s own
+    /// excluded; a `fixed_below` that leaves nothing free is refused.
+    #[test]
+    fn frees_only_the_depths_between_the_fixed_ones() {
+        let cfg = survey(
+            SOLID,
+            "parameters = [\"vs\"]\nfixed_above = 20.0\nfixed_below = 50.0",
+        );
+        let inv = setup(&cfg).unwrap();
+        assert_eq!(inv.unknowns(), 8 * 8 * 3); // z = 20, 30 and 40 m
+        let (_, nodes) = &inv.free[0];
+        assert!(nodes.iter().all(|&n| (2..5).contains(&(n / (16 * 16)))));
+        let none = survey(SOLID, "fixed_above = 50.0\nfixed_below = 50.0");
+        let msg = format!("{:#}", setup(&none).err().unwrap());
+        assert!(msg.contains("nothing is free"), "{msg}");
     }
 
     /// The gradient on the grid: the unknowns' gradient at the free nodes, zero elsewhere, and
