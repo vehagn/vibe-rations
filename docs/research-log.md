@@ -4369,6 +4369,144 @@ out/surface/layered/observed [--reconstruct | --surface] [--segment 100000]` wit
 the example with the upper crust's `vs = 2500.0`, and compare the `grad_*.npy` inside the
 region.
 
+## 2026-11-27 — The Hessian: its diagonal as a preconditioner, and exact products
+
+**Question.** The maintainer's notes on Hessian kernels (after Fichtner and Trampert
+[@fichtner2011hessian] and Fichtner's book [@fichtner2011]) suggest two things for the
+inversion: (1) the Gauss–Newton Hessian's diagonal, per parameter and with both the source's
+and the receivers' sides in it, as a preconditioner in place of the source-side illumination;
+(2) exact Hessian–vector products, the second-order terms included, for Newton-type steps
+[@metivier2013] and for resolution analysis. Does (1) help on the sphere survey, and can (2)
+be made exact for the discrete run, as the gradient is?
+
+**The Hessian probed** (`tests/hessian_study.rs`, no solver change). On the sphere survey's
+own data (zero residual, so $H = J^T W J$), Hessian rows from central differences of the exact
+gradient extrapolated in the step, for Gaussian bumps ($\sigma = 10$ m) of $v_p$, $v_s$ and
+$\rho$ at the sphere's centre: the 3 × 3 block they span is symmetric to $1.3 \times 10^{-4}$;
+$v_s$ and $\rho$ correlate $+0.77$, $v_p$ and $v_s$ $-0.22$, $v_p$ and $\rho$ $+0.06$; a $v_p$
+bump's row lands 2.1 times as much on $v_s$ and 2.7 times on $\rho$ as on $v_p$; the rows'
+centroids sit 20–30 m above the bump (towards the sources and receivers). The diagonal per
+parameter from 16 random adjoint sources (below) is unbiased within its noise at the bump's
+centre (±35% per node), and from 60 to 170 m depth it falls about 940-fold for $v_s$, 600 for
+$\rho$ and 28 for $v_p$, while the source-side illumination falls 6.5-fold.
+
+**The diagonal from probes** (`Misfit::probe`, `Inversion::gauss_newton_diagonal`). For L2,
+$\chi = \frac12 \lVert \sqrt W F M (s - d) \rVert^2$ with $F$ the zero-phase filter, $M$ the
+mutes and $W$ the balancing weights, so an adjoint source $z = (FM)^T \sqrt W \xi$ with
+independent signs $\xi$ gives $E[(J^T z)^2] = \operatorname{diag}(J^T (FM)^T W FM J)$, the
+Gauss–Newton diagonal exactly in expectation [@bekas2007]; the shots' draws are independent,
+so one gradient run per shot and probe. A node's estimate scatters by about
+$\sqrt{2/\text{probes}}$ of its value, so it can be smoothed within each parameter's free
+nodes (`hessian_smoothing`, a Gaussian's $\sigma$ in metres, normalised by the smoothed
+indicator so the region's edges keep their level). It replaces the illumination in the
+preconditioner, $P = w_c / (e / e_{\max} + \text{water level})$, with $e_{\max}$ the largest
+over all parameters, so the diagonal also sets the parameters' shares, or per parameter with
+`hessian_balance = true`, so only its shape differs from the illumination's. It holds the
+receivers' side already, so `receiver_runs` is refused with it. A unit test checks that
+probes sending one sample each sum to the diagonal exactly and that their covariance is the
+L2 Hessian in the samples (to $10^{-5}$ with random signs).
+
+*On the sphere survey* (36 × 32 × 26 nodes at 10 m, two surface-near forces at 12 Hz, three
+lines of three-component receivers on the surface, the top 60 m fixed, five L-BFGS
+iterations; `just study gauss_newton_diagonal`), the error left in the sphere, relative to
+its anomaly:
+
+| Case | Preconditioner | L2 left | $v_s$ | $v_p$ | $\rho$ |
+|---|---|---|---|---|---|
+| $v_s$, $\rho$, $v_p$, denser core | illumination | 6.6% | 85.4% | 100.3% | 79.8% |
+| | 8 probes | 7.4% | 101.2% | 106.7% | 86.9% |
+| | 8 probes, 10 m | 7.5% | 102.4% | 108.5% | 89.0% |
+| | 8 probes, 20 m | 7.2% | 99.9% | 108.3% | 89.2% |
+| | 16 probes, 10 m | 7.8% | 103.1% | 107.8% | 89.7% |
+| | 8 probes, 10 m, water level $10^{-2}$ | 5.6% | 95.4% | 103.9% | 78.6% |
+| | 8 probes, 10 m, balanced | 6.5% | 102.3% | 100.6% | 87.3% |
+| $v_p$, $v_s$ | illumination | 6.7% | 83.3% | 100.8% | |
+| | 8 probes, 10 m | 9.2% | 99.9% | 114.4% | |
+| | 8 probes, 10 m, balanced | 8.8% | 96.4% | 101.9% | |
+| $v_p$, $v_s$, nothing fixed | sources' side | 14.1% | 92.6% | 100.5% | |
+| | both sides, 8 receiver runs | 9.7% | 89.0% | 100.6% | |
+| | 8 probes, 10 m | 5.9% | 91.1% | 103.4% | |
+
+The diagonal is worse than the illumination in every case with the top fixed. Unbalanced, it
+gives $v_p$, which the data barely constrain, a large share (its diagonal falls 28-fold with
+depth against $v_s$'s 940), which turns into cross-talk ($v_p$ error above 100%), as the
+equalised classes did in an earlier trial ("Scaling the parameters"). Balanced, $v_p$ is back
+where the illumination leaves it, but $v_s$ still isn't recovered: the diagonal's shape,
+falling hundreds of times faster with depth than the illumination, pushes the updates to the
+sphere's deep side and below, where the misfit is barely sensitive. The number of probes and
+the smoothing change little, so the noise isn't the cause; a higher water level, closer to
+the illumination's flatness, helps. With nothing fixed it lowers the misfit most (5.9%
+against 9.7% for both sides of the illumination) without recovering the sphere better.
+
+**The Born run** (`src/born.rs`). The tangent-linear model of the discrete run: a second
+solver beside the forward one, stepped by the solver's own step with the forward run's
+velocity change and strain rate as sources, $(\delta B / B)(v^{n+\frac12} - v^{n-\frac12})$
+and $\delta M\, e^{n+\frac12}$, through the forward-differentiated material averaging
+(arithmetic for $\rho$, harmonic for $\mu$, the plane-stress moduli on the free surface). Its
+sources are the gradient's correlations untransposed, so it is the gradient's exact
+transpose. Against central differences of the traces (extrapolated, $\Delta t$ and the layers
+held), for random changes of $v_p$, $v_s$ or $\rho$ at every node outside the layers, the
+largest component's error is $3.5 \times 10^{-5}$, $1.1 \times 10^{-5}$, $8.1 \times 10^{-5}$
+at order 4, $4.3 \times 10^{-5}$, $1.1 \times 10^{-5}$, $8.6 \times 10^{-5}$ at order 8, and
+$6.3 \times 10^{-5}$, $3.0 \times 10^{-5}$, $1.6 \times 10^{-4}$ with rigid walls and water;
+$\langle J \delta m, r \rangle = \langle \delta m, J^T r \rangle$ to $\le 1.6 \times 10^{-7}$
+(`the_born_run_is_the_derivative_and_the_gradient_its_transpose`).
+
+**Gauss–Newton products** (`Inversion::gauss_newton_product`): a Born run, its traces
+weighed by the misfit's Hessian in the samples (`Misfit::gauss_newton_source`,
+$(FM)^T W FM$, L2 only), and a gradient run driven by them. Unit vectors give the diagonal the
+unit probes give, to $10^{-8}$ of its largest entry; against differences of the gradient at
+zero residual, entries agree to $1.4 \times 10^{-5}$–$1.7 \times 10^{-4}$ and columns to
+$1.5 \times 10^{-5}$–$5.5 \times 10^{-4}$. Products are symmetric to $1.5 \times 10^{-6}$ with
+the forward wavefield replayed; rebuilt backwards, its drift near the source puts them
+$1.4 \times 10^{-5}$ off ($2.3 \times 10^{-3}$ with the time error kept at $C = 0.3$), so
+Hessian work replays checkpoints.
+
+**Full products** (`src/hessian.rs`, `Inversion::hessian_product`). The gradient is
+$g = T\,S(u, \tilde u)$, sums bilinear in the forward and adjoint wavefields taken to the nodes
+by factors $T$ that depend on the model only through the free surface's plane-stress moduli
+and the shear moduli's harmonic means, so
+$H \delta m = T\,S(\delta u, \tilde u) + T\,S(u, \delta\tilde u) + \delta T\,S(u, \tilde u)$
+(forward over reverse; Fichtner and Trampert's second-order adjoints, discretely). $\delta u$
+is the Born run; $\delta\tilde u$ is a second adjoint run driven by the residuals' change (the
+Gauss–Newton source of the Born traces) and by the adjoint wavefield scattered by the
+material's change, as the Born run scatters the forward one: $(\delta B / B)$ times the
+adjoint velocities' change over each step and $\delta M (\tilde\varepsilon^n -
+\tilde\varepsilon^{n+1})$, the adjoint strain's, plus $\delta M \tilde\varepsilon^N$ at its
+start. The residuals enter through the material too ($B$ for velocity, $M$ for pressure), and
+these differences include what they added, so that is taken in. The conversion to $v_p$,
+$v_s$, $\rho$ adds its own change applied to the gradient. The forward and Born runs are
+replayed together from checkpoints; four runs per shot, and the gradient that comes with it
+is `gradient`'s bit for bit. Against central differences of the balanced L2 gradient, at the
+gradient checks' guessed sphere against data from another, every node outside the layers
+changed (`the_hessian_product_is_the_gradients_derivative`):
+
+| Model | Change of | Against the differences (extrapolated) | Gauss–Newton apart |
+|---|---|---|---|
+| order 8, free surface, two layers, sphere | $v_p$ | $1.6 \times 10^{-5}$ | $4.4 \times 10^{-2}$ |
+| | $v_s$ | $3.6 \times 10^{-6}$ | $1.7 \times 10^{-2}$ |
+| | $\rho$ | $1.8 \times 10^{-5}$ | $1.5 \times 10^{-2}$ |
+| rigid walls, water, uneven spacing | $v_p$ | $9.5 \times 10^{-6}$ | $1.6 \times 10^{-2}$ |
+| | $v_s$ | $8.2 \times 10^{-6}$ | $2.5 \times 10^{-2}$ |
+| | $\rho$ | $6.3 \times 10^{-5}$ | $2.5 \times 10^{-2}$ |
+
+(the largest of the three parameters' errors, relative to its size). The plain differences
+are $7 \times 10^{-4}$–$5 \times 10^{-3}$ off at $h = 1.6 \times 10^{-2}$ and four times less at
+$h/2$: the step's $h^2$. So the second-order terms are right to a few $10^{-3}$ of their size
+or better. In the inversion's unknowns, at zero residual the full and Gauss–Newton products
+are the same bit for bit; from a start 5% slow in $v_s$ and 3% light, $u^T H v$ and
+$v^T H u$ agree to $1.3 \times 10^{-8}$ and $Hu$ is $1.9 \times 10^{-2}$ from $J^T W J u$.
+
+**Decision.** The illumination stays the default preconditioner; the diagonal is opt-in
+(`hessian_probes`, default 0) and not worth its runs on this survey. The products are there
+for what needs them: truncated-Newton steps, point-spread functions and resolution, and
+checking against analytic answers (Lamb's problem, Stokes's full space), which comes next.
+
+**Reproduce.** `just study gauss_newton_diagonal`; `cargo test --release --test hessian_study
+-- --ignored --nocapture --test-threads 1`; `just physics
+the_born_run_is_the_derivative_and_the_gradient_its_transpose`, `just physics
+the_hessian_product_is_the_gradients_derivative`; `just unit hessian`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
