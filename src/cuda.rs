@@ -46,6 +46,10 @@ pub const KERNELS: &str = include_str!("cuda/kernels.cu");
 /// updates, as `32,4,4`: for tuning.
 pub const BLOCK_VARIABLE: &str = "VIBE_RATIONS_CUDA_BLOCK";
 
+/// The environment variable that sets how many planes a thread of the updates climbs
+/// ([`GpuSolver::climb`]): for tuning.
+pub const MARCH_VARIABLE: &str = "VIBE_RATIONS_CUDA_MARCH";
+
 /// A kernel of `cuda/kernels.cu`, in the order of [`Kernel::ALL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kernel {
@@ -119,6 +123,8 @@ pub struct Args {
     row: i32,
     sources: i32,
     check: i32,
+    march: i32,
+    spare: i32,
     sign: f32,
     c: [[f32; 8]; 3],
 }
@@ -257,6 +263,7 @@ impl<D: Device> GpuSolver<D> {
         a.free_surface = solver.free_surface as i32;
         a.layers = 1;
         a.sign = 1.0;
+        a.march = 1;
         for axis in 0..3 {
             let inside = solver.cpml[axis].interior();
             a.lo[axis] = int(inside.start);
@@ -302,7 +309,21 @@ impl<D: Device> GpuSolver<D> {
         gpu.args.peak = gpu.reserve(4 * (g.n[1] * g.n[2]).max(4))?;
         gpu.check_layout()?;
         gpu.upload(solver)?;
+        if let Ok(text) = std::env::var(MARCH_VARIABLE) {
+            let planes = text.trim().parse().ok().filter(|&p| p > 0);
+            gpu.climb(planes.with_context(|| {
+                format!("{MARCH_VARIABLE} is {text:?}, not a number of planes")
+            })?);
+        }
         Ok(gpu)
+    }
+
+    /// Has each thread of the updates climb `planes` planes of its column (the whole column
+    /// if there are fewer), keeping the values its derivatives along z read: each plane after
+    /// its first then reads one new value of each field instead of a stencil's length of
+    /// them. The results are the same whatever it is.
+    pub fn climb(&mut self, planes: usize) {
+        self.args.march = planes.clamp(1, self.grid.n[2]) as i32;
     }
 
     /// What it runs on.
@@ -462,9 +483,14 @@ impl<D: Device> GpuSolver<D> {
         Ok(())
     }
 
-    /// Launches a kernel that takes a thread per node.
+    /// Launches a kernel that sweeps the nodes: the updates with a thread per column of the
+    /// planes it climbs, the sponge with one per node.
     fn sweep(&mut self, kernel: Kernel) -> Result<()> {
-        let grid = std::array::from_fn(|a| (self.grid.n[a] as u32).div_ceil(self.block[a]));
+        let mut threads = self.grid.n.map(|n| n as u32);
+        if matches!(kernel, Kernel::Velocity | Kernel::Stress) {
+            threads[2] = threads[2].div_ceil(self.args.march as u32);
+        }
+        let grid = std::array::from_fn(|a| threads[a].div_ceil(self.block[a]));
         self.device.launch(kernel, grid, self.block, &self.args)
     }
 
@@ -622,13 +648,23 @@ pub fn run<D: Device>(
     out: Option<&Path>,
     progress: bool,
 ) -> Result<()> {
+    let gpu = GpuSolver::new(device, &sim.solver)?;
+    drive(sim, gpu, out, progress)
+}
+
+/// [`run`], with the solver already on its device.
+fn drive<D: Device>(
+    sim: &mut Simulation,
+    mut gpu: GpuSolver<D>,
+    out: Option<&Path>,
+    progress: bool,
+) -> Result<()> {
     let snap_dir = out.map(|d| d.join("snapshots"));
     if let Some(dir) = &snap_dir
         && !sim.snapshots.is_empty()
     {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let mut gpu = GpuSolver::new(device, &sim.solver)?;
     gpu.attach(&sim.sources, sim.steps, &sim.receivers)?;
     let name = gpu.device().name();
     if progress {
@@ -658,8 +694,8 @@ pub fn run<D: Device>(
         // check below waits for them.
         let report = progress
             && (done == sim.steps
-                || (done % 20 == 0 && last_report.elapsed() >= Duration::from_secs(2)));
-        if report || done % 100 == 0 || done == sim.steps {
+                || (done.is_multiple_of(20) && last_report.elapsed() >= Duration::from_secs(2)));
+        if report || done.is_multiple_of(100) || done == sim.steps {
             let peak = gpu.peak_velocity()?;
             if !peak.is_finite() {
                 bail!(
@@ -825,13 +861,16 @@ mod tests {
             .collect()
     }
 
-    /// Runs `text` on the CPU and on `device`, and wants the same bits from both.
-    fn runs_alike<D: Device>(name: &str, text: &str, device: D) {
+    /// Runs `text` on the CPU and on `device`, its threads climbing `planes` planes each,
+    /// and wants the same bits from both.
+    fn runs_alike<D: Device>(name: &str, text: &str, device: D, planes: usize) {
         let mut cpu = simulation(text);
         cpu.run(None, false).unwrap();
         let mut gpu = simulation(text);
         let on = device.name();
-        run(&mut gpu, device, None, false).unwrap();
+        let mut solver = GpuSolver::new(device, &gpu.solver).unwrap();
+        solver.climb(planes);
+        drive(&mut gpu, solver, None, false).unwrap();
         assert_eq!(gpu.solver.step, cpu.solver.step);
         let peak = cpu.solver.peak_velocity();
         assert!(peak > 0.0 && peak.is_finite(), "{name}: nothing to compare");
@@ -839,7 +878,7 @@ mod tests {
             let differ = a.iter().zip(&b).filter(|(x, y)| x != y).count();
             assert!(
                 a.len() == b.len() && differ == 0,
-                "{name}, {what}: {differ} of {} values differ on {on}",
+                "{name}, {what}: {differ} of {} values differ on {on}, {planes} planes a thread",
                 a.len()
             );
         }
@@ -851,12 +890,19 @@ mod tests {
         ("a 2D grid", PLANE),
     ];
 
+    /// Planes a thread climbs: a node at a time, a few planes (not a divisor of any case's
+    /// depth), and the whole column.
+    const CLIMBS: [usize; 3] = [1, 7, usize::MAX];
+
     /// The kernels' source, compiled for this CPU and run a thread at a time, leaves the
-    /// fields, the layers' memory and the traces the solver leaves, bit for bit.
+    /// fields, the layers' memory and the traces the solver leaves, bit for bit, however many
+    /// planes a thread climbs.
     #[test]
     fn the_kernels_step_as_the_solver_bit_for_bit() {
         for (name, text) in CASES {
-            runs_alike(name, text, Host::build().unwrap());
+            for planes in CLIMBS {
+                runs_alike(name, text, Host::build().unwrap(), planes);
+            }
         }
     }
 
@@ -880,9 +926,11 @@ mod tests {
     #[test]
     fn a_gpu_steps_as_the_solver_bit_for_bit() {
         for (name, text) in CASES {
-            let Some(device) = gpu() else { return };
-            eprintln!("{name} on {}", device.name());
-            runs_alike(name, text, device);
+            for planes in CLIMBS {
+                let Some(device) = gpu() else { return };
+                eprintln!("{name} on {}", device.name());
+                runs_alike(name, text, device, planes);
+            }
         }
     }
 
@@ -951,8 +999,8 @@ mod tests {
 
     #[test]
     fn the_arguments_are_laid_out_as_the_kernels_declare_them() {
-        // 32 addresses and 52 four-byte members, with no padding: cuda/kernels.cu.
-        assert_eq!(size_of::<Args>(), 32 * 8 + 52 * 4);
+        // 32 addresses and 54 four-byte members, with no padding: cuda/kernels.cu.
+        assert_eq!(size_of::<Args>(), 32 * 8 + 54 * 4);
         assert_eq!(align_of::<Args>(), 8);
         assert_eq!(std::mem::offset_of!(Args, n), 256);
         assert_eq!(std::mem::offset_of!(Args, c), size_of::<Args>() - 96);
