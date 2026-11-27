@@ -36,25 +36,32 @@ mangled; read the rendered page with your PDF-reading tool when the details matt
 
 ## Papers in the library
 
-Search file names with `ls ~/claude/papers | grep -i <word>`. The most useful:
+Search file names with `ls ~/claude/papers | grep -i <word>`. Files are named
+`Authors_Year_Title_Journal.pdf` (a few older ones `Authors - Year - Title.pdf`), so author,
+year and title words all match. The most useful:
 
-- Velocity–stress FD: Virieux 1986 (two copies; the file named "Virieux_1984_P-SV…" is the
-  1986 paper too).
+- Velocity–stress FD: Virieux 1986.
 - FWI foundations: Tarantola 1984, 1986, 1988; Mora 1987; Gauthier 1986.
 - Adjoints and kernels: Tromp, Tape & Liu 2005; Fichtner, Bunge & Igel 2006; Fichtner &
   Trampert 2011 (Hessians, resolution).
 - 3D elastic FWI in practice: Raknes, Arntsen & Weibull 2015 (Sleipner); Butzer, Kurzmann &
   Bohlen 2013; Epanomeritakis et al. 2008 (Newton-CG).
-- Parametrisation and trade-offs: Köhn et al. 2012; Operto et al. 2013.
+- Parametrisation and trade-offs: Köhn et al. 2012; Operto et al. 2013; Pan, Geng & Innanen
+  2018 (Hessian cross-talk kernels: vs contaminates ρ most); Pan, Innanen & Geng 2018
+  (parametrisations with walk-away VSP data).
 - Optimisation: Métivier et al. 2013 (truncated Newton); Pratt, Shin & Hicks 1998.
 - Multiscale: Fichtner et al. 2013.
-- Misfits: Engquist & Froese 2014, Yang, Engquist & Sun 2016 (Wasserstein).
+- Misfits: Engquist & Froese 2014, Yang, Engquist & Sun 2016 (Wasserstein); Borisov et al.
+  2018 (an envelope misfit before L2 for surface waves, 3D elastic).
 
 Not in the library but cited here (see `docs/references.bib`): Levander 1988, Graves 1996,
 Holberg 1987, Liu & Sen 2011, Moczo et al. 2011, Mittet 2002, Kristek et al. 2002, Hicks 2002,
 Collino & Tsogka 2001, Komatitsch & Martin 2007, Festa et al. 2005, Meza-Fajardo &
 Papageorgiou 2008, Dussaud et al. 2008. In the library and used for the wavefield
-reconstruction plan: Aaker, Raknes & Arntsen 2020 ("Aaker2020_Article_…").
+reconstruction plan: Aaker, Raknes & Arntsen 2020 (J. Supercomputing: GPUs, the bib's
+`aaker2020`) and Aaker, Raknes, Pedersen & Arntsen 2020 (GJI 222, doi 10.1093/gji/ggaa147:
+Kirchhoff–Helmholtz sources on a one-cell surface, `aaker2020gji`; a different route from
+`Strategy::Reconstruct`, which undoes the discrete step from a stencil-deep band).
 
 ## Citing
 
