@@ -1,22 +1,30 @@
 //! The computational grid: the interior nodes the user sees, padded by a halo.
+//!
+//! A grid one node across y is a 2D grid, a plane of x and z: the fields are taken to be the
+//! same at every y (plane strain), so nothing is differentiated along y, which needs no halo
+//! there, and what the solver computes on it is exactly what its 3D scheme computes for fields
+//! that don't vary along y. Its spacing along y is 1 m, so a source on it is a line source of
+//! that strength per metre and a cell's volume is its area times 1 m.
 
 /// A regular grid. Node (i, j, k) sits at (i·dx, j·dy, k·dz). z points down; with a free
 /// surface, z = 0 is the surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
-    /// Interior nodes along x, y and z.
+    /// Interior nodes along x, y and z; one along y for a 2D grid.
     pub n: [usize; 3],
     /// Spacing along x, y and z, in metres.
     pub h: [f64; 3],
-    /// Nodes beyond the interior on every side of a padded array. A stencil reaches its
-    /// half-length past the node it updates; the halo stays zero, or holds the free surface's
-    /// mirror images.
+    /// Nodes beyond the interior on every side of a padded array, but none across a 2D grid
+    /// ([`Grid::halos`]). A stencil reaches its half-length past the node it updates; the halo
+    /// stays zero, or holds the free surface's mirror images.
     pub halo: usize,
 }
 
 impl Grid {
-    /// A grid with a two-node halo, enough for the fourth-order stencil.
+    /// A grid with a two-node halo, enough for the fourth-order stencil. One node across y
+    /// makes it a 2D grid, whose spacing along y is 1 m whatever `h` says.
     pub fn new(n: [usize; 3], h: [f64; 3]) -> Self {
+        let h = if n[1] == 1 { [h[0], 1.0, h[2]] } else { h };
         Self { n, h, halo: 2 }
     }
 
@@ -28,9 +36,32 @@ impl Grid {
         }
     }
 
+    /// Whether it is a 2D grid: one node across y, the same at every y.
+    #[inline(always)]
+    pub fn is_2d(&self) -> bool {
+        self.n[1] == 1
+    }
+
+    /// Whether anything varies along `axis`: every axis but y on a 2D grid.
+    #[inline(always)]
+    pub fn spans(&self, axis: usize) -> bool {
+        axis != 1 || !self.is_2d()
+    }
+
+    /// How far a stencil `l` nodes long reaches along each axis: nowhere across a 2D grid.
+    pub fn reach(&self, l: usize) -> [usize; 3] {
+        std::array::from_fn(|a| if self.spans(a) { l } else { 0 })
+    }
+
+    /// The halo's width along each axis: [`Grid::halo`], and none across a 2D grid.
+    pub fn halos(&self) -> [usize; 3] {
+        self.reach(self.halo)
+    }
+
     /// Nodes along each axis of a padded array.
     pub fn padded(&self) -> [usize; 3] {
-        self.n.map(|n| n + 2 * self.halo)
+        let halos = self.halos();
+        std::array::from_fn(|a| self.n[a] + 2 * halos[a])
     }
 
     /// Distance in memory between neighbouring nodes along each axis of a padded array.
@@ -65,8 +96,8 @@ impl Grid {
     /// Index of interior node (i, j, k) in a padded array, x fastest.
     #[inline]
     pub fn idx(&self, i: usize, j: usize, k: usize) -> usize {
-        let (p, h) = (self.padded(), self.halo);
-        ((k + h) * p[1] + j + h) * p[0] + i + h
+        let (p, [hx, hy, hz]) = (self.padded(), self.halos());
+        ((k + hz) * p[1] + j + hy) * p[0] + i + hx
     }
 
     /// Index of node (i, j, k) in an interior-only array, x fastest.
@@ -159,6 +190,22 @@ mod tests {
         assert_eq!(g.idx(0, 1, 0) - g.idx(0, 0, 0), g.strides()[1]);
         assert_eq!(g.idx(0, 0, 1) - g.idx(0, 0, 0), g.strides()[2]);
         assert_eq!(g.interior_idx(2, 3, 4), g.interior_len() - 1);
+    }
+
+    #[test]
+    fn a_2d_grid_has_no_halo_across_y() {
+        let g = Grid::new([5, 1, 6], [10.0, 10.0, 5.0]).with_halo(4);
+        assert!(g.is_2d() && !Grid::new([5, 2, 6], [1.0; 3]).is_2d());
+        assert_eq!(g.h, [10.0, 1.0, 5.0]);
+        assert_eq!(g.cell_volume(), 50.0);
+        assert_eq!(g.halos(), [4, 0, 4]);
+        assert_eq!(g.padded(), [13, 1, 14]);
+        assert_eq!(g.idx(0, 0, 0), 4 * 13 + 4);
+        assert_eq!(g.idx(0, 0, 1) - g.idx(0, 0, 0), g.strides()[2]);
+        assert_eq!(g.strides()[2], g.plane_len());
+        assert_eq!(g.interior_idx(4, 0, 5), g.interior_len() - 1);
+        assert_eq!(g.coordinates([12.5, 0.0, 25.0]), Some([1.25, 0.0, 5.0]));
+        assert_eq!(g.coordinates([12.5, 0.5, 25.0]), None);
     }
 
     #[test]

@@ -499,6 +499,12 @@ fn swapping_source_and_receiver_gives_the_same_trace() {
 }
 
 fn reciprocity(order: usize, surface_slope: bool) {
+    reciprocity_in(order, surface_slope, false);
+}
+
+/// [`reciprocity`], in 2D if `two_d` ([`planar`]): forces along x and z to vx and vz, and
+/// along y to vy, which in 2D is SH alone.
+fn reciprocity_in(order: usize, surface_slope: bool, two_d: bool) {
     let model = format!(
         r#"
         [grid]
@@ -530,7 +536,7 @@ fn reciprocity(order: usize, surface_slope: bool) {
     "#
     );
     let run = |at: [f64; 3], force: [f64; 3], to: [f64; 3]| {
-        simulate(&format!(
+        let config = format!(
             r#"{model}
             [[source]]
             position = {at:?}
@@ -541,7 +547,8 @@ fn reciprocity(order: usize, surface_slope: bool) {
             [[receivers.point]]
             position = {to:?}
             "#
-        ))
+        );
+        simulate(&if two_d { planar(&config) } else { config })
     };
     let unit =
         |axis: usize| std::array::from_fn::<f64, 3, _>(|i| if i == axis { 1e9 } else { 0.0 });
@@ -562,7 +569,12 @@ fn reciprocity(order: usize, surface_slope: bool) {
             [416.3, 263.8, 227.4],
         ),
     ] {
-        for (i, j) in [(2, 0), (0, 1), (2, 2)] {
+        let pairs: &[(usize, usize)] = if two_d {
+            &[(2, 0), (0, 2), (2, 2), (1, 1)]
+        } else {
+            &[(2, 0), (0, 1), (2, 2)]
+        };
+        for &(i, j) in pairs {
             let ab = trace(&run(a, unit(i), b), components[j], 0);
             let ba = trace(&run(b, unit(j), a), components[i], 0);
             let peak = ab.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -571,6 +583,11 @@ fn reciprocity(order: usize, surface_slope: bool) {
                 .zip(&ba)
                 .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
             let slope = if surface_slope { ", surface slope" } else { "" };
+            let slope = if two_d {
+                format!("{slope}, 2D")
+            } else {
+                slope.to_string()
+            };
             println!(
                 "reciprocity, order {order}{slope}{label}, force {} at A to {} at B: worst difference {:.2e} of peak",
                 ["x", "y", "z"][i],
@@ -704,6 +721,11 @@ fn noise(n: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
+/// The nodes along y outside layers `pml` nodes thick: the only one across a 2D grid.
+fn across(ny: usize, pml: usize) -> std::ops::Range<usize> {
+    if ny == 1 { 0..1 } else { pml..ny - pml }
+}
+
 /// Zero-mean noise smoothed by a Ricker wavelet of `f0` Hz sampled every `dt`, scaled to a
 /// peak of 1.
 fn band_limited(n: usize, seed: u64, f0: f64, dt: f64) -> Vec<f64> {
@@ -736,6 +758,31 @@ fn dot_product(
     shift: [f64; 3],
     surface_slope: bool,
 ) -> f64 {
+    dot_product_in(
+        order,
+        walls,
+        free_surface,
+        signal,
+        every,
+        shift,
+        surface_slope,
+        false,
+    )
+}
+
+/// [`dot_product`], in 2D if `two_d` ([`planar`]), the force then along y too, so that the SH
+/// fields carry a share.
+#[allow(clippy::too_many_arguments)]
+fn dot_product_in(
+    order: usize,
+    walls: &str,
+    free_surface: bool,
+    signal: &str,
+    every: usize,
+    shift: [f64; 3],
+    surface_slope: bool,
+    two_d: bool,
+) -> f64 {
     let pml = if walls == "rigid" { 0 } else { 10 };
     // Without a free surface the top 100 m are an absorbing layer, and the shallow receivers
     // sit where their interpolation (four nodes up at order 8) stays out of it.
@@ -757,7 +804,12 @@ fn dot_product(
     })
     .collect();
     let source: [f64; 3] = std::array::from_fn(|a| [330.0, 240.0, 200.0][a] + shift[a]);
-    let mut sim = setup(&format!(
+    let force = if two_d {
+        [0.6, 0.5, 0.8]
+    } else {
+        [0.6, 0.0, 0.8]
+    };
+    let config = format!(
         r#"
         [grid]
         points = [60, 50, 40]
@@ -790,13 +842,14 @@ fn dot_product(
         rho = 1900.0
         [[source]]
         position = {source:?}
-        force = [0.6, 0.0, 0.8]
+        force = {force:?}
         wavelet = {{ kind = "ricker", frequency = 12.0 }}
         [receivers]
         components = ["vx", "vy", "vz", "p"]
         {receivers}
         "#
-    ));
+    );
+    let mut sim = setup(&if two_d { planar(&config) } else { config });
     // A receiver reading damped values would make the test measure the layers instead.
     assert_eq!(
         sim.receivers_next_to_layers(),
@@ -862,12 +915,16 @@ fn dot_product(
         .run(|n, s| {
             back[n] = 0.6 * s.sample(Component::Vx, node) as f64
                 + 0.8 * s.sample(Component::Vz, node) as f64;
+            if two_d {
+                back[n] += force[1] * s.sample(Component::Vy, node) as f64;
+            }
         })
         .expect("a stable adjoint run");
     let backward: f64 = w.iter().zip(&back).map(|(a, b)| a * b).sum();
     let e = (forward - backward).abs() / forward;
+    let dims = if two_d { "2D, " } else { "" };
     println!(
-        "dot product, order {order}, {walls} walls, free surface {free_surface}, {signal}, \
+        "dot product, {dims}order {order}, {walls} walls, free surface {free_surface}, {signal}, \
          every {every}, shifted {shift:?}: ⟨Fw, d̃⟩ {forward:.6e}, ⟨w, Fᵀd̃⟩ {backward:.6e}, \
          difference {e:.1e}"
     );
@@ -1294,7 +1351,7 @@ fn gradient_check(
     let g = model.grid;
     let [nx, ny, nz] = g.n;
     let inside = |i: usize, j: usize, k: usize| {
-        (pml..nx - pml).contains(&i) && (pml..ny - pml).contains(&j) && k < nz - pml
+        (pml..nx - pml).contains(&i) && across(ny, pml).contains(&j) && k < nz - pml
     };
     for (name, grad, seed) in [("vp", &g_vp, 3), ("vs", &g_vs, 4), ("rho", &g_rho, 5)] {
         let u: Vec<f64> = noise(g.interior_len(), seed)
@@ -1408,7 +1465,7 @@ fn born_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
     let [nx, ny, nz] = g.n;
     let mut mask = vec![0.0f64; g.interior_len()];
     for k in 0..nz - pml {
-        for j in pml..ny - pml {
+        for j in across(ny, pml) {
             for i in pml..nx - pml {
                 mask[g.interior_idx(i, j, k)] = 1.0;
             }
@@ -1455,9 +1512,11 @@ fn born_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
         let h = 1.6e-2;
         let (coarse, fine) = (difference(h), difference(h / 2.0));
         // Each component's error relative to its own size: pressure is 10⁶ times velocity.
+        // A trace that stays zero (vy without SH sources in 2D) has no size to compare with.
         let error = |fd: &[Vec<f64>]| {
             fd.iter()
                 .zip(&jv)
+                .filter(|(_, jv)| jv.iter().any(|&v| v != 0.0))
                 .map(|(fd, jv)| {
                     let diff: f64 = fd
                         .iter()
@@ -1475,7 +1534,8 @@ fn born_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
             .map(|(c, f)| c.iter().zip(f).map(|(c, f)| (4.0 * f - c) / 3.0).collect())
             .collect();
 
-        // r: the Born traces with random positive weights, each component scaled to unit size.
+        // r: the Born traces with random positive weights, each component scaled to unit size
+        // (a trace that stays zero stays so).
         let weights = noise(jv.iter().map(Vec::len).sum(), seed + 100);
         let mut w = weights.iter();
         let r: Vec<Vec<f32>> = jv
@@ -1483,7 +1543,14 @@ fn born_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
             .map(|t| {
                 let size: f64 = t.iter().map(|&v| (v as f64).powi(2)).sum();
                 t.iter()
-                    .map(|&v| (v as f64 * w.next().unwrap() / size) as f32)
+                    .zip(w.by_ref())
+                    .map(|(&v, w)| {
+                        if size > 0.0 {
+                            (v as f64 * w / size) as f32
+                        } else {
+                            0.0
+                        }
+                    })
                     .collect()
             })
             .collect();
@@ -1576,7 +1643,7 @@ fn hessian_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
     let [nx, ny, nz] = g.n;
     let mut mask = vec![0.0f64; g.interior_len()];
     for k in 0..nz - pml {
-        for j in pml..ny - pml {
+        for j in across(ny, pml) {
             for i in pml..nx - pml {
                 mask[g.interior_idx(i, j, k)] = 1.0;
             }
@@ -1887,13 +1954,53 @@ fn the_mutes_keep_the_gradient_exact() {
 /// The relative error of the extrapolated central difference of the inversion's misfit down
 /// its gradient, at steps `h` and `h`/2, with `settings` added to its [inversion] section.
 fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {
+    inversion_gradient_check_in(label, settings, h, false)
+}
+
+/// [`inversion_gradient_check`], in 2D if `two_d` ([`planar`]).
+fn inversion_gradient_check_in(label: &str, settings: &str, h: f64, two_d: bool) -> f64 {
+    let (inversion, start) = inversion_survey(settings, two_d);
+    let g = inversion.evaluate(&start).unwrap().gradient;
+    // Down the gradient, scaled to a largest change of 1: the change it predicts can't cancel
+    // between unknowns, as along a random direction, where single-precision round-off in the
+    // misfit then swamps it; a gradient with wrong parts still disagrees with the finite
+    // difference, which measures g_true · g, not |g|².
+    let largest = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let u: Vec<f64> = g.iter().map(|v| -v / largest).collect();
+    let predicted: f64 = g.iter().zip(&u).map(|(g, u)| g * u).sum();
+    let misfit = |h: f64| {
+        let x: Vec<f64> = u.iter().map(|u| h * u).collect();
+        inversion.misfit_of(&inversion.model_at(&x)).unwrap()
+    };
+    let [coarse, fine] = [h, h / 2.0].map(|h| (misfit(h) - misfit(-h)) / (2.0 * h));
+    let extrapolated = (4.0 * fine - coarse) / 3.0;
+    let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
+    println!(
+        "{label}: predicted {predicted:.6e}; finite differences off by {:.1e} and {:.1e} \
+         (h = {h:.0e}), extrapolated by {:.1e}",
+        e(coarse),
+        e(fine),
+        e(extrapolated)
+    );
+    e(extrapolated)
+}
+
+/// The inversion of [`inversion_gradient_check`], with `settings` added to its `[inversion]`,
+/// in 2D if `two_d` ([`planar`]), against data from a sphere slower in vs, and its start.
+fn inversion_survey(
+    settings: &str,
+    two_d: bool,
+) -> (
+    vibe_rations::inversion::Inversion,
+    vibe_rations::model::Model,
+) {
     use vibe_rations::config::Config;
     use vibe_rations::inversion::{Inversion, Observed};
     use vibe_rations::model::Model;
     use vibe_rations::simulation::Simulation;
 
     let model = |sphere_vs: f64| {
-        format!(
+        let text = format!(
             r#"
             [grid]
             points = [30, 28, 24]
@@ -1953,7 +2060,8 @@ fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {
             parameters = ["vs", "rho", "vp"]
             {settings}
             "#
-        )
+        );
+        if two_d { planar(&text) } else { text }
     };
     let base = std::path::Path::new(".");
     let truth = Config::from_toml(&model(1050.0)).unwrap();
@@ -1972,27 +2080,539 @@ fn inversion_gradient_check(label: &str, settings: &str, h: f64) -> f64 {
     let settings = cfg.inversion.clone().unwrap();
     let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
     let inversion = Inversion::new(&cfg, start.clone(), observed, &settings).unwrap();
-    let g = inversion.evaluate(&start).unwrap().gradient;
-    // Down the gradient, scaled to a largest change of 1: the change it predicts can't cancel
-    // between unknowns, as along a random direction, where single-precision round-off in the
-    // misfit then swamps it; a gradient with wrong parts still disagrees with the finite
-    // difference, which measures g_true · g, not |g|².
-    let largest = g.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    let u: Vec<f64> = g.iter().map(|v| -v / largest).collect();
-    let predicted: f64 = g.iter().zip(&u).map(|(g, u)| g * u).sum();
-    let misfit = |h: f64| {
-        let x: Vec<f64> = u.iter().map(|u| h * u).collect();
-        inversion.misfit_of(&inversion.model_at(&x)).unwrap()
+    (inversion, start)
+}
+
+// 2D: a grid one node across y (plane strain). The solver computes there exactly what its 3D
+// scheme computes for fields the same at every y (`solver::tests`, bit for bit), so these
+// check what the 3D tests can't: the line sources' closed forms, and that the adjoint,
+// gradient, Born run and Hessian, which share the 3D code, hold on a 2D grid.
+
+/// The line sources' closed forms (`common::line`) against the point sources' (`common`)
+/// summed along the line: two derivations that share only the medium. Measured, the largest
+/// difference over a trace relative to its peak: the explosion's pressure 6e-15 (summed along
+/// the line it is the same integral, so this checks the constants), its radial velocity 4e-9,
+/// the line force's velocities 1–4e-8.
+#[test]
+fn the_line_sources_closed_forms_sum_the_point_sources() {
+    use common::line::{along_line, line_explosion, line_force_velocity};
+    use std::f64::consts::PI;
+
+    let w = Wavelet::Ricker { f0: 10.0, t0: 0.15 };
+    let k = RHO * (VP * VP - 4.0 / 3.0 * VS * VS);
+    let worst = |a: &[f64], b: &[f64]| {
+        let peak = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let diff = a
+            .iter()
+            .zip(b)
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        diff / peak
     };
-    let [coarse, fine] = [h, h / 2.0].map(|h| (misfit(h) - misfit(-h)) / (2.0 * h));
-    let extrapolated = (4.0 * fine - coarse) / 3.0;
-    let e = |fd: f64| (fd - predicted).abs() / predicted.abs();
-    println!(
-        "{label}: predicted {predicted:.6e}; finite differences off by {:.1e} and {:.1e} \
-         (h = {h:.0e}), extrapolated by {:.1e}",
-        e(coarse),
-        e(fine),
-        e(extrapolated)
+    let times: Vec<f64> = (0..16).map(|m| 0.05 + 0.02 * m as f64).collect();
+    for r in [150.0, 300.0] {
+        let (mut p2, mut v2, mut p3, mut v3) = (vec![], vec![], vec![], vec![]);
+        for &t in &times {
+            let (p, v) = line_explosion(&w, 1.0, r, t);
+            p2.push(p);
+            v2.push(v);
+            // p = K m0 w'(t - R/α) / (4πρα⁴R) from a point explosion; its radial velocity
+            // projected onto the plane.
+            p3.push(along_line(VP, r, t, |y| {
+                let d = r.hypot(y);
+                k / (4.0 * PI * RHO * VP.powi(4) * d) * w.derivative(t - d / VP)
+            }));
+            v3.push(along_line(VP, r, t, |y| {
+                let d = r.hypot(y);
+                explosion_velocity(&w, 1.0, d, t) * r / d
+            }));
+        }
+        let (ep, ev) = (worst(&p2, &p3), worst(&v2, &v3));
+        println!("line explosion at {r} m: pressure {ep:.1e}, velocity {ev:.1e}");
+        assert!(ep < 1e-5 && ev < 1e-5, "{ep} {ev}");
+    }
+    for d in [[200.0f64, 0.0], [0.0, 200.0], [140.0, -140.0]] {
+        let r = d[0].hypot(d[1]);
+        let (mut two, mut three) = (vec![[0.0; 2]; 0], vec![[0.0; 2]; 0]);
+        for &t in &times {
+            two.push(line_force_velocity(&w, 1.0, 0, d, t));
+            let v =
+                |c: usize| along_line(VP, r, t, |y| force_velocity(&w, 1.0, [d[0], y, d[1]], t)[c]);
+            three.push([v(0), v(2)]);
+        }
+        for c in 0..2 {
+            let a: Vec<f64> = two.iter().map(|v| v[c]).collect();
+            let b: Vec<f64> = three.iter().map(|v| v[c]).collect();
+            if b.iter().all(|v| v.abs() < 1e-30) {
+                assert!(a.iter().all(|v| v.abs() < 1e-30));
+                continue;
+            }
+            let e = worst(&a, &b);
+            println!(
+                "line force along x, offset {d:?}, v{}: {e:.1e}",
+                ["x", "z"][c]
+            );
+            assert!(e < 1e-5, "{d:?} {c}: {e}");
+        }
+    }
+}
+
+/// A line explosion in a full space, 2D, against its closed form: pressure (read from the
+/// stresses at whole steps) and the radial velocity. Sixteen points per shortest P wavelength
+/// at 2.5 f₀ and 8 per S, as in the 3D explosion test. Measured: 0.003–0.006% for velocity,
+/// 0.002–0.005% for pressure, from 100 to 250 m.
+///
+/// In 2D a wave's tail never ends, and the time-dispersion transform's un-warp spreads a
+/// trace's cut-off end across the whole trace, so the run goes on twice as long as the
+/// window compared (0.6 s, the first 0.3 s compared). Cut at 0.3 s the misfits were 0.004–0.014%
+/// and 0.005–0.018%, growing with distance.
+#[test]
+fn a_line_explosion_matches_the_closed_form() {
+    use common::line::line_explosion;
+
+    let source = [800.0, 0.0, 800.0];
+    let receivers = [
+        [950.0, 0.0, 800.0],
+        [800.0, 0.0, 1050.0],
+        [900.0, 0.0, 900.0],
+        [800.0, 0.0, 700.0],
+    ];
+    let points: String = receivers
+        .iter()
+        .map(|p| format!("[[receivers.point]]\nposition = {p:?}\n"))
+        .collect();
+    let sim = simulate(&homogeneous(
+        [161, 1, 161],
+        12,
+        false,
+        0.6,
+        &format!(
+            r#"
+            [[source]]
+            position = {source:?}
+            explosion = 1e13
+            wavelet = {{ kind = "ricker", frequency = 15.0, delay = 0.1 }}
+            [receivers]
+            components = ["vx", "vz", "p"]
+            {points}
+            "#
+        ),
+    ));
+    let w = Wavelet::Ricker { f0: 15.0, t0: 0.1 };
+    let times: Vec<f64> = sim
+        .sample_times()
+        .into_iter()
+        .filter(|&t| t <= 0.3)
+        .collect();
+    let dt = sim.solver.dt;
+    for (r, &p) in receivers.iter().enumerate() {
+        let d = sub(p, source);
+        let dist = norm(d);
+        let [vx, vz, pressure] = [Component::Vx, Component::Vz, Component::P]
+            .map(|c| trace(&sim, c, r)[..times.len()].to_vec());
+        let radial: Vec<f64> = (0..times.len())
+            .map(|m| (vx[m] * d[0] + vz[m] * d[2]) / dist)
+            .collect();
+        let exact_v: Vec<f64> = times
+            .iter()
+            .map(|&t| line_explosion(&w, 1e13, dist, t).1)
+            .collect();
+        // Stresses are recorded half a step after the velocities.
+        let exact_p: Vec<f64> = times
+            .iter()
+            .map(|&t| line_explosion(&w, 1e13, dist, t + 0.5 * dt).0)
+            .collect();
+        let (ev, ep) = (misfit(&radial, &exact_v), misfit(&pressure, &exact_p));
+        println!(
+            "line explosion, 2D, r = {dist:.1} m: velocity misfit {:.3}%, pressure {:.3}%",
+            100.0 * ev,
+            100.0 * ep
+        );
+        assert!(ev < 2e-4 && ep < 2e-4, "misfits {ev}, {ep} at {p:?}");
+    }
+}
+
+/// Line forces along x and along z in a full space, 2D, against the closed form, along,
+/// across and diagonal to the force, as the 3D point force test does. Measured: 0.0002–0.0005%.
+///
+/// As in [`a_line_explosion_matches_the_closed_form`], the run goes on twice as long as the
+/// window compared (0.8 s, the first 0.4 s compared): with the record cut at 0.4 s the
+/// misfits were 0.014–0.072% (0.023% at 200 m along the force, with the samples past 0.4 s
+/// dropped; 0.037% with them), the same with Taylor's coefficients, and 0.045–0.124% at
+/// C = 0.3 without the transform, whose own time error that is.
+#[test]
+fn a_line_force_matches_the_closed_form() {
+    use common::line::line_force_velocity;
+
+    let source = [800.0, 0.0, 800.0];
+    let offsets = [[200.0, 0.0], [0.0, 200.0], [140.0, 140.0], [-100.0, 170.0]];
+    let points: String = offsets
+        .iter()
+        .map(|d| {
+            let p = [source[0] + d[0], 0.0, source[2] + d[1]];
+            format!("[[receivers.point]]\nposition = {p:?}\n")
+        })
+        .collect();
+    for (along, force) in [(0, "[1e9, 0.0, 0.0]"), (1, "[0.0, 0.0, 1e9]")] {
+        let sim = simulate(&homogeneous(
+            [161, 1, 161],
+            12,
+            false,
+            0.8,
+            &format!(
+                r#"
+                [[source]]
+                position = {source:?}
+                force = {force}
+                wavelet = {{ kind = "ricker", frequency = 10.0, delay = 0.15 }}
+                [receivers]
+                components = ["vx", "vz"]
+                {points}
+                "#
+            ),
+        ));
+        let w = Wavelet::Ricker { f0: 10.0, t0: 0.15 };
+        let times: Vec<f64> = sim
+            .sample_times()
+            .into_iter()
+            .filter(|&t| t <= 0.4)
+            .collect();
+        for (r, &d) in offsets.iter().enumerate() {
+            let exact: Vec<[f64; 2]> = times
+                .iter()
+                .map(|&t| line_force_velocity(&w, 1e9, along, d, t))
+                .collect();
+            for (i, c) in [Component::Vx, Component::Vz].into_iter().enumerate() {
+                let want: Vec<f64> = exact.iter().map(|v| v[i]).collect();
+                if want.iter().all(|v| v.abs() < 1e-12) {
+                    continue;
+                }
+                let e = misfit(&trace(&sim, c, r)[..times.len()], &want);
+                println!(
+                    "line force along {}, 2D, {} at offset {d:?}: misfit {:.4}%",
+                    ["x", "z"][along],
+                    c.name(),
+                    100.0 * e
+                );
+                assert!(e < 2e-4, "force along {along}, {} at {d:?}: {e}", c.name());
+            }
+        }
+    }
+}
+
+/// [`swapping_source_and_receiver_gives_the_same_trace`] in 2D: forces along x and z to vx
+/// and vz (P-SV), and along y to vy (SH). Measured: at most 4.5e-7 of the peak at order 4 and
+/// 5.3e-7 at order 8, as in 3D.
+#[test]
+fn swapping_source_and_receiver_gives_the_same_trace_in_2d() {
+    for order in [4, 8] {
+        reciprocity_in(order, false, true);
+    }
+}
+
+/// [`the_adjoint_run_is_the_transpose_of_the_forward_run`] in 2D, on and between nodes, the
+/// force along y too, so that the SH fields carry a share. Measured: 5.3e-9 to 6.6e-8 on the
+/// nodes, 8.1e-9 and 2.3e-8 between them.
+#[test]
+fn the_adjoint_run_is_the_transpose_of_the_forward_run_in_2d() {
+    for order in [4, 8] {
+        for (walls, free_surface, signal, every) in [
+            ("rigid", true, "white", 1),
+            ("cpml", true, "band-limited", 2),
+            ("cpml", false, "white", 1),
+        ] {
+            let e = dot_product_in(
+                order,
+                walls,
+                free_surface,
+                signal,
+                every,
+                [0.0; 3],
+                false,
+                true,
+            );
+            assert!(e < 1.5e-7, "2D, order {order}, {walls}, {signal}: {e}");
+        }
+    }
+    for (walls, signal, every) in [("rigid", "white", 1), ("cpml", "band-limited", 2)] {
+        let e = dot_product_in(8, walls, true, signal, every, [3.7, 0.0, 4.1], false, true);
+        assert!(e < 1.5e-7, "2D, between nodes, {walls}, {signal}: {e}");
+    }
+}
+
+/// [`the_gradient_matches_finite_differences`] and its walls-and-water and rebuilt variants
+/// in 2D: the same models cut along y = 0, so the sphere becomes a disc, the receiver line
+/// and every source lie in the plane, and the walls-and-water force along y drives SH.
+///
+/// Measured, extrapolated, down the gradient: order 8 vp 1.8e-6, vs 3.5e-5, ρ 3.2e-7 (rebuilt
+/// 1.8e-6, 3.5e-5, 3.0e-7); walls and water vp 2.8e-6, vs 2.4e-6, ρ 5.8e-6.
+#[test]
+fn the_gradient_matches_finite_differences_in_2d() {
+    gradient_check(
+        "2D, order 8",
+        8,
+        &|sphere| planar(&gradient_model(8, sphere)),
+        Strategy::default(),
     );
-    e(extrapolated)
+    gradient_check(
+        "2D, walls and water",
+        0,
+        &|sphere| planar(&walls_and_water(sphere)),
+        Strategy::default(),
+    );
+    gradient_check(
+        "2D, rebuilt, order 8",
+        8,
+        &|sphere| planar(&gradient_model(8, sphere)),
+        Strategy::Reconstruct { segment: None },
+    );
+}
+
+/// [`the_rebuilt_wavefield_follows_the_run`] in 2D: the band around the layers has no part
+/// across y. Measured: 1.0e-6 with a free surface and 3.8e-7 with layers all round (233
+/// steps), 3.5e-7 for walls and water (183).
+#[test]
+fn the_rebuilt_wavefield_follows_the_run_in_2d() {
+    let model = planar(&gradient_model(8, [2300.0, 1150.0, 2050.0]));
+    for (label, text) in [
+        ("free surface", model.clone()),
+        (
+            "layers all round",
+            model.replace("pml_width = 8", "pml_width = 8\nfree_surface = false"),
+        ),
+        (
+            "walls and water",
+            planar(&walls_and_water([2300.0, 1150.0, 2050.0])),
+        ),
+    ] {
+        let drift = rebuild_drift(setup(&text), 10);
+        let worst = drift.iter().fold(0.0f64, |m, &(_, e, _)| m.max(e));
+        println!(
+            "rebuilt wavefield, 2D, {label}: {} steps, at most {worst:.1e}",
+            setup(&text).steps
+        );
+        assert!(worst < 5e-6, "2D, {label}: {worst}");
+    }
+}
+
+/// [`the_born_run_is_the_derivative_and_the_gradient_its_transpose`] in 2D. Measured (vp, vs,
+/// ρ): order 8 2.9e-5, 7.9e-6, 6.1e-5, the transposes 2.1e-8, 4.6e-8, 2.2e-8; walls and water
+/// 1.5e-5, 1.9e-5, 8.1e-5, and 3.4e-8, 2.6e-8, 9.9e-8.
+#[test]
+fn the_born_run_is_the_derivative_and_the_gradient_its_transpose_in_2d() {
+    born_check("2D, order 8", 8, &|sphere| {
+        planar(&gradient_model(8, sphere))
+    });
+    born_check("2D, walls and water", 0, &|sphere| {
+        planar(&walls_and_water(sphere))
+    });
+}
+
+/// [`the_hessian_product_is_the_gradients_derivative`] in 2D. Measured (vp, vs, ρ): order 8
+/// 1.8e-5, 3.4e-6, 1.6e-5, with the Gauss–Newton product 1.0e-1, 4.0e-2, 4.5e-2 apart; walls
+/// and water 3.3e-6, 4.6e-6, 3.5e-5, and 2.1e-2, 3.4e-2, 4.6e-2 apart.
+#[test]
+fn the_hessian_product_is_the_gradients_derivative_in_2d() {
+    hessian_check("2D, order 8", 8, &|sphere| {
+        planar(&gradient_model(8, sphere))
+    });
+    hessian_check("2D, walls and water", 0, &|sphere| {
+        planar(&walls_and_water(sphere))
+    });
+}
+
+/// [`the_inversion_gradient_matches_finite_differences`] in 2D: the inversion's own unknowns,
+/// shots, balancing and preconditioning on a 2D grid, the sphere a disc. Measured: 1.7e-6.
+#[test]
+fn the_inversion_gradient_matches_finite_differences_in_2d() {
+    let e = inversion_gradient_check_in("inversion gradient, 2D", "", 1e-2, true);
+    assert!(e < 3e-5, "{e}");
+}
+
+/// The inversion's Hessian products in 2D, as the poster's study takes them, from the
+/// inversion check's start, whose data misfit: the Gauss–Newton and the full products are
+/// both symmetric, u·Hv = v·Hu for random positive u and v, and the full one differs from the
+/// Gauss–Newton one by its second-order terms. Checkpoints replayed, so the products are exact.
+/// Measured: asymmetry 6.1e-9 (Gauss–Newton) and 3.0e-8 (full), the two 1.2e-1 apart.
+#[test]
+fn the_inversions_hessian_products_are_symmetric_in_2d() {
+    let (inversion, start) = inversion_survey("reconstruct = false", true);
+    let n = inversion.unknowns();
+    let (u, v) = (noise(n, 21), noise(n, 22));
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+    let norm = |a: &[f64]| dot(a, a).sqrt();
+    let mut products = Vec::new();
+    for (name, full) in [("Gauss–Newton", false), ("full", true)] {
+        let product = |x: &[f64]| {
+            if full {
+                inversion.hessian_product(&start, x).unwrap()
+            } else {
+                inversion.gauss_newton_product(&start, x).unwrap()
+            }
+        };
+        let (hu, hv) = (product(&u), product(&v));
+        let (a, b) = (dot(&u, &hv), dot(&v, &hu));
+        let asymmetry = (a - b).abs() / (dot(&u, &hu).abs() * dot(&v, &hv).abs()).sqrt();
+        println!("{name} products, 2D: u·Hv {a:.6e}, v·Hu {b:.6e}, asymmetry {asymmetry:.1e}");
+        assert!(asymmetry < 1e-5, "{name}: {asymmetry}");
+        products.push(hu);
+    }
+    let d: Vec<f64> = products[0]
+        .iter()
+        .zip(&products[1])
+        .map(|(a, b)| a - b)
+        .collect();
+    let apart = norm(&d) / norm(&products[1]);
+    println!("full against Gauss–Newton, 2D: {apart:.1e}");
+    assert!(apart > 1e-3, "{apart}");
+}
+
+/// Many Hessian products side by side, each on one thread, against one after another on every
+/// thread, on the poster's 2D grid (101 × 101 nodes at 10 m, 1000 steps of 1 ms, layers all
+/// round, an explosion recorded as pressure 130 m down, a disc 200 m across in the data) and
+/// on one twice as fine: the same products bit for bit, and the time each way. A study
+/// (ignored): `cargo test --release --test physics hessian_products_side_by_side_in_2d --
+/// --ignored --nocapture`.
+///
+/// Measured on the cloud container's 4 cores: a forward run 0.34 s on one thread (30
+/// Mcells/s) and 0.28 s on four (36); a product 4.4 s on one thread and 5.0 s on four, so eight
+/// products took 8.7 s four at a time and 39.8 s one after another (4.6 times the throughput).
+/// At 201 × 201 and 5 m: 44 and 70 Mcells/s, eight products in 26.5 s against 73.3 s (2.8).
+#[test]
+#[ignore]
+fn hessian_products_side_by_side_in_2d() {
+    use std::time::Instant;
+    use vibe_rations::config::Config;
+    use vibe_rations::inversion::{Inversion, Observed};
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let poster = |disc: f64, n: usize, h: f64| {
+        let w = (n - 1) as f64 * h;
+        format!(
+            r#"
+            [grid]
+            points = [{n}, 1, {n}]
+            spacing = {h}
+            [time]
+            duration = 1.0
+            dt = 1e-3
+            [boundary]
+            pml_width = 10
+            free_surface = false
+            pml_vp_max = 1600.0
+            [[model.layer]]
+            top = 0.0
+            vp = 1500.0
+            vs = 1000.0
+            rho = 1000.0
+            [[model.sphere]]
+            center = [{c}, 0.0, {c}]
+            radius = 200.0
+            vp = {vp}
+            vs = {vs}
+            rho = {rho}
+            [[source]]
+            position = [{c}, 0.0, 130.0]
+            explosion = 1e6
+            wavelet = {{ kind = "ricker", frequency = 10.0, delay = 0.15 }}
+            [receivers]
+            components = ["p"]
+            [[receivers.line]]
+            from = [150.0, 0.0, 130.0]
+            to = [{to}, 0.0, 130.0]
+            count = {count}
+            [inversion]
+            observed = "unused"
+            parameters = ["vp", "vs", "rho"]
+            reconstruct = false
+            "#,
+            c = w / 2.0,
+            vp = 1500.0 + disc,
+            vs = 1000.0 + disc,
+            rho = 1000.0 + disc,
+            to = w - 150.0,
+            count = ((w - 300.0) / h).round() as usize + 1,
+        )
+    };
+    let base = std::path::Path::new(".");
+    let threads = rayon::current_num_threads();
+    for (n, h) in [(101, 10.0), (201, 5.0)] {
+        let cfg = Config::from_toml(&poster(0.0, n, h)).unwrap();
+        for t in [1, threads] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(t)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut sim = Simulation::new(&cfg, base).unwrap();
+                let clock = Instant::now();
+                sim.run(None, false).unwrap();
+                let s = clock.elapsed().as_secs_f64();
+                let cells = (n * n * sim.steps) as f64;
+                println!(
+                    "{n} × {n} at {h} m, {t} thread(s): {} steps in {s:.3} s, {:.1} Mcells/s",
+                    sim.steps,
+                    cells / s / 1e6
+                );
+            });
+        }
+        let truth = Config::from_toml(&poster(100.0, n, h)).unwrap();
+        let observed: Vec<Observed> = vec![{
+            let mut sim = Simulation::new(&truth, base).unwrap();
+            sim.run(None, false).unwrap();
+            sim.receivers.traces.into()
+        }];
+        let settings = cfg.inversion.clone().unwrap();
+        let start = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+        let inversion = Inversion::new(&cfg, start.clone(), observed, &settings).unwrap();
+        let m = inversion.unknowns();
+        // A unit change at one node, as a Hessian's column takes.
+        let column = |k: usize| -> Vec<f64> {
+            let mut v = vec![0.0; m];
+            v[(k * 7919) % m] = 1.0;
+            v
+        };
+        let products = 2 * threads;
+        let clock = Instant::now();
+        let one_by_one: Vec<Vec<f64>> = (0..products)
+            .map(|k| inversion.hessian_product(&start, &column(k)).unwrap())
+            .collect();
+        let one_by_one_s = clock.elapsed().as_secs_f64();
+        let clock = Instant::now();
+        let mut side_by_side: Vec<(usize, Vec<f64>)> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|w| {
+                    let (inversion, start, column) = (&inversion, &start, &column);
+                    scope.spawn(move || {
+                        let pool = rayon::ThreadPoolBuilder::new()
+                            .num_threads(1)
+                            .build()
+                            .unwrap();
+                        pool.install(|| {
+                            (w..products)
+                                .step_by(threads)
+                                .map(|k| (k, inversion.hessian_product(start, &column(k)).unwrap()))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect()
+        });
+        let side_by_side_s = clock.elapsed().as_secs_f64();
+        side_by_side.sort_by_key(|(k, _)| *k);
+        let same = side_by_side
+            .iter()
+            .zip(&one_by_one)
+            .all(|((_, a), b)| a == b);
+        println!(
+            "{n} × {n}: {products} Hessian products ({m} unknowns), one after another on \
+             {threads} threads {one_by_one_s:.2} s, {threads} side by side on one thread each \
+             {side_by_side_s:.2} s; the same bit for bit: {same}"
+        );
+        assert!(same);
+    }
 }

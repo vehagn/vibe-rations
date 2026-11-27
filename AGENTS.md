@@ -66,7 +66,8 @@ src/
   misfit.rs      misfits and their exact derivatives: L2, time shifts, phase; zero-phase low-pass,
                  mutes and windows
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
-  grid.rs        the grid and its halo (as wide as the stencil), indexing
+  grid.rs        the grid and its halo (as wide as the stencil), indexing; one node across
+                 y makes it 2D
   hessian.rs     the Hessian's products H δm, second-order terms included: Born and two adjoint
                  runs, replayed from checkpoints
   memory.rs      the memory a run needs, from its configuration alone
@@ -124,11 +125,13 @@ tests/
                  differences of the gradient, the Gauss–Newton diagonal from random probes (ignored)
   analytic_inversion.rs  the inversion against Born's Gauss–Newton solution in a full space:
                  J from Stokes's solution, checked against the kernels; studies ignored
-  common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
+  common/        closed-form solutions and setup helpers the tests share (`planar`: a 3D
+                 configuration cut to 2D along y = 0); stokes.rs: a point
                  force's field with its gradient for any time function, and the exact kernels;
                  plane.rs: plane waves at normal incidence on an interface, kept exactly 1D,
                  and their exact answer; lamb.rs: Pekeris's closed form for a vertical force
-                 on the surface of a Poisson solid, and the survey that tests it
+                 on the surface of a Poisson solid, and the survey that tests it; line.rs:
+                 the 2D line explosion and line force
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -164,6 +167,20 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **2D runs** (`points = [nx, 1, nz]`; `Grid::is_2d`, `Grid::spans`, `cpml::layer_widths`;
+  the log's "A 2D solver", 2026-11-27). Plane strain on the 3D code, not a second solver: the
+  kernels skip the $y$-derivatives, so a 2D step is bit for bit the 3D step of a field
+  constant along $y$ (`a_2d_grid_steps_as_a_3d_slab_constant_along_y`, keep it), and the
+  adjoint, gradient, Born, Hessian, inversion and memory plan are the 3D code, exact in 2D
+  too (`just physics _in_2d`). No halo, layers or band across $y$; its spacing is 1 m, so
+  sources are per metre of line; the time step is $\sqrt{3/2}$ times a cube's; blocks of 16
+  rows (`ROWS_2D`). SH ($v_y$, $\sigma_{xy}$, $\sigma_{yz}$) is stored but stays zero unless
+  a force along $y$ drives it. When the step gains a $y$-derivative, put it under
+  `g.spans(1)` with the others, or the 2D grid reads past its rows. **In 2D the
+  time-dispersion transform needs a record longer than the window used**: a 2D trace's tail
+  never ends, the un-warp spreads its cut end across the trace, and a line force missed by
+  0.014–0.072% cut at 0.4 s against 0.0002–0.0005% over the same 0.4 s of a 0.8 s run
+  (`tests/common/line.rs` holds the closed forms). `gradient --surface` refuses 2D grids.
 - **The Hessian** (`src/born.rs`, `src/hessian.rs`, `Inversion::gauss_newton_product`,
   `Inversion::hessian_product`, `[inversion] hessian_probes`; the log's "The Hessian",
   2026-11-27). The Born run is the solver's own step on $\delta v$, $\delta\sigma$ with the
@@ -685,7 +702,14 @@ doesn't show.
   against differences of the gradient $\le 6.3 \times 10^{-5}$; the gradient against the exact
   kernels at 3.5 points per S wavelength (`tests/gradient_accuracy.rs`), the wavefields' part
   0.26% (S) and 0.12% (P) in the Fresnel zone, +0.19% and −0.10% along a smooth change; the 9 s soft-sediment run drains to
-  $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact
+  $\le 3 \times 10^{-6}$ of its peak. In 2D (`_in_2d`, `line_`): the line explosion
+  0.003–0.006% (velocity) and 0.002–0.005% (pressure), the line force 0.0002–0.0005%, both
+  over the first half of their runs; reciprocity $\le 5.3 \times 10^{-7}$; the dot-product
+  test $\le 6.6 \times 10^{-8}$; gradients against finite differences $\le 3.5 \times 10^{-5}$
+  ($v_s$; rebuilt the same); the rebuilt wavefield $\le 1.0 \times 10^{-6}$; Born
+  $\le 8.1 \times 10^{-5}$ and its transpose $\le 9.9 \times 10^{-8}$; the Hessian's product
+  $\le 3.5 \times 10^{-5}$; the inversion's gradient $1.7 \times 10^{-6}$ and its products'
+  asymmetry $\le 3.0 \times 10^{-8}$. With Taylor coefficients: 0.002–0.006% (near exact
   for these long waves), 0.001–0.008%, 2.53%, the same layers, $\le 7 \times 10^{-7}$. With
   the time error kept at $C = 0.3$ (the default before): 0.07–0.19%, 0.03–0.09%, 2.40%,
   $3.9 \times 10^{-4}$, $2.1 \times 10^{-3}$ and $1.9 \times 10^{-6}$; with cubic receivers

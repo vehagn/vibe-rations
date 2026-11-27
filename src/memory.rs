@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::config::{Config, InversionConfig, PlaneKind};
+use crate::cpml::layer_widths;
 use crate::gradient::{Strategy, checkpoint_interval, reconstruction_segment};
 use crate::grid::Grid;
 use crate::misfit::{Measure, Misfit};
@@ -93,12 +94,12 @@ impl Plan {
     /// The plan of a run of `steps` steps on `grid` (with its halo) as `cfg` sets it up.
     pub fn new(cfg: &Config, grid: Grid, steps: usize) -> Result<Self> {
         let b = &cfg.boundary;
-        let w = b.pml_width;
+        let widths = layer_widths(&grid, b.pml_width, b.free_surface);
         let receivers = cfg.receivers.positions()?.len();
         Ok(Self {
             grid,
-            layer_nodes: [2 * w, 2 * w, if b.free_surface { w } else { 2 * w }],
-            sponge: b.free_surface && b.pml_sponge > 0.0 && w > 0,
+            layer_nodes: widths.map(|(lo, hi)| lo + hi),
+            sponge: b.free_surface && b.pml_sponge > 0.0 && b.pml_width > 0,
             steps,
             warped_sources: if cfg.scheme.remove_time_dispersion {
                 cfg.sources.len()
@@ -114,9 +115,8 @@ impl Plan {
             samples: steps.div_ceil(cfg.output.record_every.max(1)),
             volume_snapshots: cfg.snapshots.iter().any(|s| s.plane == PlaneKind::Volume),
             interior: std::array::from_fn(|a| {
-                let n = grid.n[a];
-                let lo = if a == 2 && b.free_surface { 0 } else { w };
-                lo.min(n)..n.saturating_sub(w).max(lo.min(n))
+                let (n, (lo, hi)) = (grid.n[a], widths[a]);
+                lo.min(n)..n.saturating_sub(hi).max(lo.min(n))
             }),
             free_surface: b.free_surface,
         })
@@ -354,7 +354,7 @@ impl Plan {
 
     /// The band a step back reads ([`Band`]), counted.
     pub fn band(&self) -> BandSize {
-        Band::size(&self.interior, self.free_surface, self.grid.halo)
+        Band::size(&self.interior, self.free_surface, self.grid.halos())
     }
 
     /// The forward run, the adjoint's solver, `observed` traces and the residuals.
@@ -569,15 +569,14 @@ fn free_nodes(
     fixed_below: Option<f64>,
 ) -> usize {
     let b = &cfg.boundary;
-    let w = b.pml_width;
+    let [(x0, x1), (y0, y1), (top, w)] = layer_widths(grid, b.pml_width, b.free_surface);
     let [nx, ny, nz] = grid.n;
-    let top = if b.free_surface { 0 } else { w };
     let fixed = fixed_above.unwrap_or(f64::NEG_INFINITY);
     let bottom = fixed_below.unwrap_or(f64::INFINITY);
     let depths = (top..nz.saturating_sub(w))
         .filter(|&k| (fixed..bottom).contains(&(k as f64 * grid.h[2])))
         .count();
-    nx.saturating_sub(2 * w) * ny.saturating_sub(2 * w) * depths
+    nx.saturating_sub(x0 + x1) * ny.saturating_sub(y0 + y1) * depths
 }
 
 /// Memory the system can still give this process. On Linux /proc/meminfo's MemAvailable, or
@@ -764,15 +763,29 @@ mod tests {
         Simulation::new(&Config::from_toml(text).unwrap(), Path::new(".")).unwrap()
     }
 
+    /// [`BASE`] as a 2D run: one node across y, and everything on the plane y = 0.
+    fn planar() -> String {
+        BASE.replace("points = [40, 36, 30]", "points = [40, 1, 30]")
+            .replace(", 180.0, ", ", 0.0, ")
+            .replace("[100.0, 100.0, 60.0]", "[100.0, 0.0, 60.0]")
+    }
+
     /// The estimate, made without building anything, counts exactly what a run allocates.
     #[test]
     fn counts_what_a_run_allocates() {
-        for extra in [
-            "",
-            "[scheme]\nremove_time_dispersion = false\norder = 4",
-            "[[snapshot]]\nfield = \"vz\"\nplane = \"volume\"\ninterval = 0.1\nformats = [\"npy\"]",
+        let volume =
+            "[[snapshot]]\nfield = \"vz\"\nplane = \"volume\"\ninterval = 0.1\nformats = [\"npy\"]";
+        for (base, extra) in [
+            (BASE.to_string(), ""),
+            (
+                BASE.to_string(),
+                "[scheme]\nremove_time_dispersion = false\norder = 4",
+            ),
+            (BASE.to_string(), volume),
+            (planar(), ""),
+            (planar(), volume),
         ] {
-            let text = format!("{BASE}\n{extra}");
+            let text = format!("{base}\n{extra}");
             let cfg = Config::from_toml(&text).unwrap();
             let m = estimate(&cfg, Path::new(".")).unwrap();
             let s = sim(&text);
@@ -783,8 +796,8 @@ mod tests {
                 .sum();
             let traces: usize = s.receivers.traces.iter().map(Vec::len).sum();
             let allocated = (s.solver.memory_bytes() + 8 * series + 4 * traces) as u64;
-            assert_eq!(m.resident, allocated, "{extra}");
-            assert_eq!(s.info.memory, m, "{extra}");
+            assert_eq!(m.resident, allocated, "{text}");
+            assert_eq!(s.info.memory, m, "{text}");
             if extra.contains("volume") {
                 assert_eq!(
                     m.peak,
@@ -811,6 +824,7 @@ mod tests {
             ),
             (free_surface, Some(7)),
             (velocity_only, Some(1000)),
+            (planar(), None),
         ] {
             let cfg = Config::from_toml(&text).unwrap();
             let m = estimate_gradient(&cfg, Path::new("."), every).unwrap();
@@ -844,6 +858,11 @@ mod tests {
             (BASE.to_string(), Some(1 << 30)),
             (walls, None),
             (format!("{BASE}\n[scheme]\norder = 4"), Some(5)),
+            (planar(), None),
+            (
+                planar().replace("pml_width = 8", "pml_width = 8\nfree_surface = false"),
+                Some(7),
+            ),
         ] {
             let strategy = Strategy::Reconstruct { segment };
             let cfg = Config::from_toml(&text).unwrap();

@@ -4,6 +4,8 @@
 //! variable follows ψ ← b·ψ + a·∂ every step. Memory is kept only for the nodes in the layers
 //! (the "slab"): the first `lo` and the last `hi` nodes along the axis, in that order.
 
+use crate::grid::Grid;
+
 /// How the layers damp.
 #[derive(Clone, Copy, Debug)]
 pub struct PmlSettings {
@@ -23,6 +25,21 @@ pub struct PmlSettings {
     /// (Festa et al. 2005); damping that doesn't depend on direction, as in the multiaxial PML
     /// (Meza-Fajardo & Papageorgiou 2008), keeps them stable.
     pub sponge: f64,
+}
+
+/// The absorbing layers' thickness at the start and end of each axis of `grid`, for layers
+/// `width` nodes thick: none on top with a free surface, and none across a 2D grid, which
+/// has no sides along y.
+pub fn layer_widths(grid: &Grid, width: usize, free_surface: bool) -> [(usize, usize); 3] {
+    std::array::from_fn(|a| {
+        if !grid.spans(a) {
+            (0, 0)
+        } else if a == 2 && free_surface {
+            (0, width)
+        } else {
+            (width, width)
+        }
+    })
 }
 
 /// The reflection coefficient Collino & Tsogka (2001) suggest for a layer `width` nodes

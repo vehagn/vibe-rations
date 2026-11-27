@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::config::{Coefficients, Config, Format, default_courant};
-use crate::cpml::{PmlSettings, Stagger};
+use crate::cpml::{PmlSettings, Stagger, layer_widths};
 use crate::fd::Stencil;
 use crate::grid::Grid;
 use crate::image;
@@ -40,9 +40,13 @@ pub fn min_points_per_wavelength(order: usize, coefficients: Coefficients) -> f6
 }
 
 /// The largest stable time step: the Courant–Friedrichs–Lewy limit of the staggered scheme,
-/// dt ≤ 1 / (vp_max Σ|cₙ| √(1/dx² + 1/dy² + 1/dz²)).
+/// dt ≤ 1 / (vp_max Σ|cₙ| √(1/dx² + 1/dy² + 1/dz²)), without 1/dy² on a 2D grid.
 pub fn stable_dt(grid: &Grid, vp_max: f64, stencil: &Stencil) -> f64 {
-    let s: f64 = grid.h.iter().map(|h| 1.0 / (h * h)).sum();
+    // Only the axes it spans: a 2D grid's limit is √(3/2) times a cube's of the same spacing.
+    let s: f64 = (0..3)
+        .filter(|&a| grid.spans(a))
+        .map(|a| 1.0 / (grid.h[a] * grid.h[a]))
+        .sum();
     1.0 / (vp_max * stencil.sum_abs() * s.sqrt())
 }
 
@@ -156,7 +160,10 @@ pub(crate) fn timing(cfg: &Config, grid: &Grid, vp_max: f64, slowest: f64) -> Re
         .map(|w| w.max_frequency())
         .fold(0.0, f64::max);
 
-    let h_max = grid.h.iter().copied().fold(0.0, f64::max);
+    let h_max = (0..3)
+        .filter(|&a| grid.spans(a))
+        .map(|a| grid.h[a])
+        .fold(0.0, f64::max);
     let ppw = slowest / f_max / h_max;
     let stencil = match cfg.scheme.coefficients {
         Coefficients::Taylor => Stencil::taylor(cfg.scheme.order)?,
@@ -288,10 +295,11 @@ impl Simulation {
 
         let b = &cfg.boundary;
         let w = b.pml_width;
+        let widths = layer_widths(&grid, w, b.free_surface);
         for (a, axis) in ["x", "y", "z"].iter().enumerate() {
-            let layers = if a == 2 && b.free_surface { w } else { 2 * w };
+            let layers = widths[a].0 + widths[a].1;
             ensure!(
-                grid.n[a] > layers + 4,
+                !grid.spans(a) || grid.n[a] > layers + 4,
                 "{} nodes along {axis} leave no room inside absorbing layers {w} nodes thick",
                 grid.n[a]
             );
@@ -1011,7 +1019,8 @@ mod tests {
             let band = sim.band();
             let interior = sim.solver.interior();
             let free = sim.solver.free_surface;
-            let size = Band::size(&interior, free, sim.solver.stencil.half_length());
+            let reach = sim.solver.grid.reach(sim.solver.stencil.half_length());
+            let size = Band::size(&interior, free, reach);
             assert_eq!(
                 (band.len(), band.memory_bytes()),
                 (size.values, size.runs_bytes())

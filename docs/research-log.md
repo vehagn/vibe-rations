@@ -4652,6 +4652,120 @@ the_born_run_is_the_derivative_and_the_gradient_its_transpose`, `just physics
 the_hessian_product_is_the_gradients_derivative`; `just unit hessian`; `just accuracy hessian_against_lambs_problem`; `cargo test --release --test
 analytic_inversion gauss_newton_products_against_born -- --ignored --nocapture`.
 
+## 2026-11-27 — A 2D solver
+
+**Question.** Replicating the maintainer's SEG 2018 Hessian poster takes 2D elastic runs (the
+poster's were plane strain, in a code we only read), and hundreds of Hessian–vector products
+per matrix; in 3D each is a large run. Can the solver run 2D without a second code path, and
+with everything the 3D one has (the adjoint, exact gradients, Born runs, Hessian products, the
+inversion, the memory plan) exact on it?
+
+**Design.** A grid with one node across $y$ (`points = [nx, 1, nz]`) is 2D: plane strain, the
+fields the same at every $y$. The kernels skip the three $y$-derivatives of the velocity
+update ($\partial_y \sigma_{xy}$, $\partial_y \sigma_{yy}$, $\partial_y \sigma_{yz}$) and of the
+stress update and strain rates ($\partial_y v_y$, $\partial_y v_x$, $\partial_y v_z$), which are
+zero for such fields, so a 2D step is *exactly* the 3D step of a field constant along $y$: a
+unit test steps a 2D grid and a 3D slab two nodes across with its $y$-halo refilled from the
+rows (`a_2d_grid_steps_as_a_3d_slab_constant_along_y`), with sources, a free surface and order
+8, and they agree bit for bit. Everything built on the step — the adjoint (its transpose), the
+gradient's correlations, the Born run, the Hessian's second adjoint run, the inversion — is
+then the 3D code unchanged, and stays exact. What does change: no halo across $y$
+(`Grid::halos`), no absorbing layers across it (`cpml::layer_widths`), the band a rebuild
+saves has no part across it (`Grid::reach`), a source or receiver weighs the single row
+whatever its $y$ (`Solver::axis_weights`), the stable time step sums $1/h^2$ over $x$ and $z$
+only ($\sqrt{3/2}$ times a cube's), and the work splits into blocks of 16 rows
+(`ROWS_2D`), since a 2D grid has one row per plane. The spacing across $y$ is set to 1 m, so
+a source is a line source of its strength per metre (N/m, N·m/m) and a cell's volume is its
+area times 1 m. P-SV ($v_x$, $v_z$, $\sigma_{xx}$, $\sigma_{yy}$, $\sigma_{zz}$,
+$\sigma_{xz}$) and SH ($v_y$, $\sigma_{xy}$, $\sigma_{yz}$) decouple; SH stays zero unless a
+force along $y$ drives it. All nine fields are still stored ($\sigma_{yy}$ is needed: plane
+strain gives $\sigma_{yy} = \lambda(\varepsilon_{xx} + \varepsilon_{zz})$, and pressure reads
+it), so a P-SV run carries three idle arrays; dropping them would need a separate field set.
+
+**Closed forms** (`tests/common/line.rs`). In 2D the scalar Green's function is
+$g_c = H(t - r/c)/(2\pi\sqrt{t^2 - r^2/c^2})$, whose tail never ends; with
+$t = (r/c)\cosh u$ the singularity goes ($g\,dt = du/2\pi$), so each solution is an integral
+over $u$ of the source's time function at $t - (r/c)\cosh u$ with smooth weights, by Simpson's
+rule. The elastic Green's tensor has the same form in any dimension [@aki2002, §4.2]; in 2D
+the second derivatives of the double time integral $I_c$ of $g_c$ are
+$\frac{1}{2\pi r^2}[\gamma_i\gamma_j c t^2/Q - (\delta_{ij} - \gamma_i\gamma_j) Q/c]$,
+$Q = \sqrt{c^2t^2 - r^2}$. A line force then gives
+$v_i = \frac{f}{2\pi\rho}[\frac{1}{\alpha^2}\int(\gamma_i\gamma_j\cosh 2u - \delta_{ij}\sinh^2 u)\,w'\,du + \frac{1}{\beta^2}\int(\delta_{ij}\cosh^2 u - \gamma_i\gamma_j\cosh 2u)\,w'\,du]$,
+and a line explosion of moment rate $m_0 w$ per metre $p = \frac{K m_0}{2\pi\rho\alpha^4}\int w'\,du$
+and $v_r = \frac{m_0}{2\pi\rho\alpha^3}\int \cosh u\, w'\,du$. Checked against the 3D point
+sources' closed forms summed along the line ($y = r\sinh s$), two derivations that share only
+the medium: the explosion's pressure to $6 \times 10^{-15}$ of its peak (the same integral, so
+this checks the constants), its velocity to $4 \times 10^{-9}$, the force's to
+$1$–$4 \times 10^{-8}$.
+
+**Results.** Each 2D test is its 3D counterpart on the same model cut along $y = 0$ (a sphere
+becomes a disc; `planar` in `tests/common`):
+
+| Check | 2D | 3D baseline |
+|---|---|---|
+| Line explosion, 100–250 m, velocity / pressure | 0.003–0.006% / 0.002–0.005% | 0.005–0.007% |
+| Line force along $x$ and $z$, along, across and diagonal | 0.0002–0.0005% | 0.001–0.005% |
+| Reciprocity, P-SV and SH, on and between nodes, orders 4 / 8 | $\le 4.5$ / $5.3 \times 10^{-7}$ | $\le 8 \times 10^{-7}$ |
+| Dot-product test, rigid and CPML, with and without a free surface | $5.3 \times 10^{-9}$–$6.6 \times 10^{-8}$ | $\le 8.3 \times 10^{-8}$ |
+| Gradient against extrapolated differences ($v_p$, $v_s$, $\rho$), order 8 | $1.8 \times 10^{-6}$, $3.5 \times 10^{-5}$, $3.2 \times 10^{-7}$ | $2.3 \times 10^{-6}$, $7.4 \times 10^{-5}$, $1.2 \times 10^{-5}$ |
+| The same, walls and water | $2.8 \times 10^{-6}$, $2.4 \times 10^{-6}$, $5.8 \times 10^{-6}$ | $5.4 \times 10^{-6}$, $9.1 \times 10^{-6}$, $5.1 \times 10^{-6}$ |
+| The same, rebuilt backwards, order 8 | as replayed | as replayed |
+| Rebuilt wavefield's drift: free surface, layers all round, walls and water | $1.0 \times 10^{-6}$, $3.8 \times 10^{-7}$, $3.5 \times 10^{-7}$ | $\le 1.8 \times 10^{-6}$ |
+| Born run against differences, order 8 / walls and water | $\le 6.1 \times 10^{-5}$ / $\le 8.1 \times 10^{-5}$ | $\le 8.6 \times 10^{-5}$ / $1.6 \times 10^{-4}$ |
+| Gradient as the Born run's transpose | $\le 9.9 \times 10^{-8}$ | $\le 1.6 \times 10^{-7}$ |
+| Hessian product against differences of the gradient | $\le 3.5 \times 10^{-5}$ | $\le 6.3 \times 10^{-5}$ |
+| The inversion's gradient (its unknowns, two shots) | $1.7 \times 10^{-6}$ | $4.9 \times 10^{-6}$ |
+| The inversion's products, $u \cdot Hv$ against $v \cdot Hu$: Gauss–Newton / full | $6.1 \times 10^{-9}$ / $3.0 \times 10^{-8}$ | |
+
+The memory plan stays exact (`counts_what_a_run_allocates` and the gradient and rebuilt
+gradient cases, with 2D runs added). In 2D the full Hessian product is 2–12% from the
+Gauss–Newton one in these models (10% for $v_p$ in the gradient model), against 1.5–4.4% in
+3D.
+
+*A finding about the time-dispersion transform.* The line force first missed by 0.014–0.072%
+(0.037% at 200 m along the force), whatever the grid's size (81 or 161 nodes across), and the
+same with Taylor's coefficients. Run twice as long and compared over the same first 0.4 s, it
+gives 0.0002–0.0005% (the line explosion likewise: 0.004–0.018% cut at 0.3 s, 0.002–0.006%
+run to 0.6 s). The run is causal, so its first 0.4 s are the same either way; what
+differs is the transform's pair [@koene2018], which pre-warps the source and un-warps the
+traces over the whole record in the frequency domain: a 2D trace is still in its tail when
+the record ends, and the cut spreads across the whole trace. In 3D a trace is quiet by then
+and the cut costs nothing. So **in 2D, record past the window that matters, or opt out of the
+transform** (`remove_time_dispersion = false`, at $C = 0.3$ and its own time error: 0.045–0.12%
+here). It doesn't touch exactness: the adjoint takes the transform's transpose, so gradients and
+Hessian products are still those of the traces as recorded.
+
+*Speed, and many products at once.* On the cloud container's 4 cores, on the poster's grid
+(101 × 101 nodes at 10 m, 1000 steps of 1 ms, layers all round, an explosion recorded as
+pressure): a forward run takes 0.34 s on one thread (30 Mcells/s) and 0.28 s on four (36); at
+201 × 201 and 5 m, 44 and 70 Mcells/s. A grid this small gives four threads too little each:
+a full Hessian product ($v_p$, $v_s$ and $\rho$ free, 19,683 unknowns; a forward, a Born and
+two adjoint runs, checkpoints replayed) took 4.4 s on one thread and 5.0 s on four. Eight
+products four at a time, each in a rayon pool of one thread, took 8.7 s, against 39.8 s one
+after another on four threads: 4.6 times the throughput, and the same products bit for bit.
+At 201 × 201, 26.5 s against 73.3 s (2.8 times). The poster's matrix needs a product per node
+and parameter of its column, about 290, so about 5 minutes here run side by side.
+`examples/layered.toml` (3D) takes 24.6–24.9 s against the previous binary's 24.9–25.9 s.
+
+*3D unchanged.* Built on PR 16's head (`237c6f4`) and compared with it, before moving onto
+main (which adds only the Gauss–Newton products' replay and documents to it): every one of the
+189 lines `just physics` printed there is printed the same with the change, and 152 output files are identical byte for byte
+to the previous binary's, with AVX2 and with the plain loops (`run.json` apart from the
+`kernels` line it names): `examples/explosion.toml` and `layered.toml` run,
+`sphere-inversion.toml` by shots, a gradient of the explosion replayed and rebuilt against a
+faster model's traces, the memory plans and a set-up summary.
+
+**Decision.** 2D is a grid one node across $y$, not a second solver. It shares every line of
+the adjoint, gradient, Born, Hessian and inversion code with 3D, so what the 3D tests prove
+about them holds in 2D, and the 2D tests confirm it. The surface rebuild
+(`gradient --surface`) refuses 2D grids, as it refuses any grid with no room inside along an
+axis.
+
+**Reproduce.** `just physics _in_2d`, `just physics line_`, `just physics
+the_line_sources_closed_forms_sum_the_point_sources`; `just unit 2d`; `just unit
+counts_what`; the speeds, `cargo test --release --test physics
+hessian_products_side_by_side_in_2d -- --ignored --nocapture`.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
