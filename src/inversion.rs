@@ -997,7 +997,10 @@ impl Inversion {
     /// to `v`: JᵀWJ v summed over the shots, exact for the L2 misfit, to round-off. Per shot a
     /// Born run of the model change `v` describes ([`crate::born`]) and a gradient run driven
     /// by its traces weighed by the misfit's Hessian ([`Misfit::gauss_newton_source`]). Where
-    /// the residuals vanish, it is the Hessian itself.
+    /// the residuals vanish, it is the Hessian itself. The gradient run replays the forward
+    /// wavefield from checkpoints whatever `reconstruct` says, as [`Inversion::hessian_product`]
+    /// does: rebuilt backwards, its drift made the products 1.4·10⁻⁵ asymmetric, against
+    /// 1.5·10⁻⁶ replayed.
     pub fn gauss_newton_product(&self, model: &Model, v: &[f64]) -> Result<Vec<f64>> {
         let speeds = self.speeds_of(model, v)?;
         let change = Change::from_velocities(model, speeds.each_ref().map(Vec::as_slice));
@@ -1008,7 +1011,7 @@ impl Inversion {
             let scattered = born(&mut sim, &change)?.traces;
             let source = shot.misfit.gauss_newton_source(&scattered)?;
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
-            let run = gradient_with(&mut sim, |_| Ok((0.0, source)), self.strategy())?;
+            let run = gradient_with(&mut sim, |_| Ok((0.0, source)), Strategy::default())?;
             for (s, g) in sum.iter_mut().zip(run.gradient.velocities(model)) {
                 s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
             }
@@ -2326,8 +2329,9 @@ mod tests {
     /// wavefield exactly. At order 4, so that no receiver reads into the layers, where the
     /// adjoint is only nearly the transpose. Measured 1.5·10⁻⁶ (the bound's scale). Rebuilt
     /// backwards instead, the forward field's drift near the source (3–9·10⁻⁶ of the largest
-    /// gradient at a node here) puts u·Hv 1.4·10⁻⁵ off ⟨Ju, WJv⟩, and 2.3·10⁻³ with the time
-    /// error kept (C = 0.3, three times the steps).
+    /// gradient at a node here) put u·Hv 1.4·10⁻⁵ off ⟨Ju, WJv⟩, and 2.3·10⁻³ with the time
+    /// error kept (C = 0.3, three times the steps), so the products replay checkpoints even
+    /// where the inversion rebuilds: the same bit for bit with `reconstruct = true`.
     #[test]
     fn gauss_newton_products_are_symmetric() {
         let cfg = survey(
@@ -2358,6 +2362,15 @@ mod tests {
         assert!(uu > 0.0 && vv > 0.0);
         let asymmetry = (a - b).abs() / (uu * vv).sqrt();
         assert!(asymmetry < 1e-6, "{a} against {b}: {asymmetry}");
+        let mut settings = cfg.inversion.clone().unwrap();
+        settings.reconstruct = true;
+        let rebuilding =
+            Inversion::new(&cfg, start(&cfg), vec![recorded(&cfg)], &settings).unwrap();
+        assert_eq!(
+            rebuilding.strategy(),
+            Strategy::Reconstruct { segment: None }
+        );
+        assert_eq!(rebuilding.gauss_newton_product(&inv.model, &u).unwrap(), hu);
     }
 
     /// The full Hessian's products: at zero residual the Gauss–Newton products, to round-off
