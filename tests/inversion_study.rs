@@ -11,6 +11,9 @@
 //! - `density_scaling`: the same, inverted for ρ too, with ρ's steps scaled down.
 //! - `receivers_side`: the same with nothing fixed, preconditioned by one or both sides of
 //!   the illumination.
+//! - `gauss_newton_diagonal`: the sphere preconditioned by the Gauss–Newton Hessian's
+//!   diagonal, estimated from random adjoint sources (`hessian_probes`), against the
+//!   illumination: for vs, ρ and vp with a denser core; for vp and vs; and with nothing fixed.
 //! - `slow_start`: a homogeneous model, started 20% too slow in vp and vs, a line of 43
 //!   receivers over 420 m, 8 iterations: at the far offsets the P waves come about half a
 //!   period late and the S waves about a full period, where L2 cycle-skips. The target is
@@ -289,6 +292,112 @@ fn receivers_side() {
             (
                 "top fixed, both sides, 8 runs",
                 "iterations = 5\nreceiver_runs = 8\n# fixed",
+            ),
+        ],
+    );
+}
+
+/// The sphere preconditioned by the Gauss–Newton Hessian's diagonal instead of the
+/// illumination: from 8 or 16 probes, smoothed over 0, 10 or 20 m, with the water level at its
+/// default or ten times it, and balanced parameter by parameter (`hessian_balance`, so that
+/// only its shape differs from the illumination's). Three cases: vs, ρ and vp with a denser core (`density_scaling`'s
+/// first), where the diagonal also sets the parameters' shares; vp and vs
+/// (`misfits_on_a_sphere`'s); and vp and vs with nothing fixed (`receivers_side`'s), where
+/// the diagonal holds the receivers' side.
+#[test]
+#[ignore]
+fn gauss_newton_diagonal() {
+    let sphere = |rho: f64| {
+        format!(
+            "[[model.sphere]]\ncenter = [175.0, 155.0, 115.0]\nradius = 40.0\n\
+             vp = 2700.0\nvs = 1500.0\nrho = {rho}"
+        )
+    };
+    let inside = |truth: &Model| {
+        let truth = truth.clone();
+        move |start: &Model| -> Vec<usize> {
+            (0..truth.vs.len())
+                .filter(|&n| truth.vs[n] != start.vs[n])
+                .collect()
+        }
+    };
+    let (observed, truth) =
+        record(&Config::from_toml(&sphere_survey(&sphere(2300.0), "")).unwrap());
+    // vs, ρ and vp, 5 iterations, and each variant's settings.
+    macro_rules! three {
+        ($extra:literal) => {
+            concat!(
+                "parameters = [\"vs\", \"rho\", \"vp\"]\niterations = 5\n",
+                $extra
+            )
+        };
+    }
+    let variants: [Variant; 7] = [
+        ("illumination", three!("")),
+        ("8 probes", three!("hessian_probes = 8")),
+        (
+            "8 probes, 10 m",
+            three!("hessian_probes = 8\nhessian_smoothing = 10.0"),
+        ),
+        (
+            "8 probes, 20 m",
+            three!("hessian_probes = 8\nhessian_smoothing = 20.0"),
+        ),
+        (
+            "16 probes, 10 m",
+            three!("hessian_probes = 16\nhessian_smoothing = 10.0"),
+        ),
+        (
+            "8 probes, 10 m, water 1e-2",
+            three!("hessian_probes = 8\nhessian_smoothing = 10.0\nwater_level = 1e-2"),
+        ),
+        (
+            "8 probes, 10 m, balanced",
+            three!("hessian_probes = 8\nhessian_smoothing = 10.0\nhessian_balance = true"),
+        ),
+    ];
+    study(
+        "sphere, vs, rho and vp, denser core",
+        &|settings| sphere_survey("", settings),
+        &observed,
+        &truth,
+        &inside(&truth),
+        &variants,
+    );
+
+    let (observed, truth) =
+        record(&Config::from_toml(&sphere_survey(&sphere(2100.0), "")).unwrap());
+    study(
+        "sphere, vp and vs",
+        &|settings| sphere_survey("", settings),
+        &observed,
+        &truth,
+        &inside(&truth),
+        &[
+            ("illumination", "iterations = 5"),
+            (
+                "8 probes, 10 m",
+                "iterations = 5\nhessian_probes = 8\nhessian_smoothing = 10.0",
+            ),
+            (
+                "8 probes, 10 m, balanced",
+                "iterations = 5\nhessian_probes = 8\nhessian_smoothing = 10.0\n\
+                 hessian_balance = true",
+            ),
+        ],
+    );
+    study(
+        "sphere, vp and vs, nothing fixed",
+        &|settings| sphere_survey("", settings).replace("fixed_above = 60.0", ""),
+        &observed,
+        &truth,
+        &inside(&truth),
+        &[
+            ("sources' side", "iterations = 5"),
+            ("both sides, 8 runs", "iterations = 5\nreceiver_runs = 8"),
+            (
+                "8 probes, 10 m",
+                "iterations = 5\nhessian_probes = 8\nhessian_smoothing = 10.0",
             ),
         ],
     );

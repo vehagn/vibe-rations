@@ -26,8 +26,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
+use crate::born::{Change, born};
 use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
 use crate::gradient::{Strategy, gradient_with, illuminate};
+use crate::grid::Grid;
+use crate::hessian::hessian_product;
 use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
@@ -411,6 +414,9 @@ pub struct Inversion {
     /// that estimate (Σₜ |v|² at every interior node), if there are any.
     receiver_runs: usize,
     receiver_side: Option<Vec<f64>>,
+    /// The Gauss–Newton Hessian's diagonal for every unknown, estimated at each stage's start
+    /// if the inversion divides by it (`hessian_probes`).
+    hessian_diagonal: Option<Vec<f64>>,
     preconditioner: Option<Vec<f64>>,
     lbfgs: Lbfgs,
     x: Vec<f64>,
@@ -676,6 +682,7 @@ impl Inversion {
                 .collect(),
             receiver_runs: settings.receiver_runs,
             receiver_side: None,
+            hessian_diagonal: None,
             preconditioner: None,
             lbfgs: Lbfgs::new(settings.memory),
             x: vec![0.0; n],
@@ -688,6 +695,15 @@ impl Inversion {
         ensure!(
             settings.water_level > 0.0,
             "the water level must be positive"
+        );
+        ensure!(
+            settings.hessian_probes == 0 || settings.receiver_runs == 0,
+            "hessian_probes and receiver_runs exclude each other: the Gauss–Newton diagonal \
+             holds the receivers' side already"
+        );
+        ensure!(
+            settings.hessian_smoothing.is_finite() && settings.hessian_smoothing >= 0.0,
+            "hessian_smoothing must be a width in metres, 0 or more"
         );
         inversion.start_stage()?;
         Ok(inversion)
@@ -725,6 +741,7 @@ impl Inversion {
     fn start_stage(&mut self) -> Result<()> {
         let s = self.stage;
         self.illuminate_from_receivers(s as u64)?;
+        self.estimate_hessian_diagonal(s as u64)?;
         let e = self.evaluate(&self.model)?;
         self.memory_bytes = self.memory_bytes.max(e.memory_bytes);
         ensure!(
@@ -763,6 +780,12 @@ impl Inversion {
     /// Unknowns: the inverted parameters at their free nodes.
     pub fn unknowns(&self) -> usize {
         self.x.len()
+    }
+
+    /// The inverted parameters and, for each, the nodes (interior indices) it may change at:
+    /// the unknowns, in their order.
+    pub fn free(&self) -> &[(Parameter, Vec<usize>)] {
+        &self.free
     }
 
     /// The model the unknowns `x` describe, within the bounds.
@@ -902,10 +925,12 @@ impl Inversion {
             .sum();
         let misfits: usize = self.shots.iter().map(|s| s.misfit.memory_bytes()).sum();
         let receiver_side = 8 * self.receiver_side.as_ref().map_or(0, Vec::len);
+        let diagonal = 8 * self.hessian_diagonal.as_ref().map_or(0, Vec::len);
         let free: usize = self.free.iter().map(|(_, nodes)| nodes.len()).sum();
         4 * observed
             + misfits
             + receiver_side
+            + diagonal
             + self.model.memory_bytes()
             + self.start.memory_bytes()
             + std::mem::size_of::<usize>() * free
@@ -914,8 +939,9 @@ impl Inversion {
     }
 
     /// For each unknown, its parameter's factor w divided by (I / I_max + water level), I the
-    /// energy at its node, if the inversion divides by it; w alone if not, and none if every w
-    /// is 1 too.
+    /// energy at its node, or its Gauss–Newton diagonal if that was estimated (I_max then its
+    /// parameter's largest with `hessian_balance`), if the inversion divides by it; w alone if
+    /// not, and none if every w is 1 too.
     ///
     /// L-BFGS with an initial matrix γ D² P is L-BFGS with γ P on the unknowns scaled by D⁻¹,
     /// D = diag(√w): the pairs (s, y) and the products sᵀy, the Armijo test and the step
@@ -925,25 +951,224 @@ impl Inversion {
     /// factor.
     fn preconditioner_for(&self, illumination: &[f64]) -> Option<Vec<f64>> {
         let unit = self.scale.iter().all(|&w| w == 1.0);
-        let scaled = |f: &dyn Fn(usize) -> f64| -> Vec<f64> {
+        // Each unknown's parameter factor and what it is divided by: the diagonal, or the
+        // source side of its node's illumination times, if it was estimated, the receivers'.
+        let both = |n: usize| illumination[n] * self.receiver_side.as_ref().map_or(1.0, |r| r[n]);
+        let energy: Vec<f64> = match &self.hessian_diagonal {
+            Some(d) => d.clone(),
+            None => self
+                .free
+                .iter()
+                .flat_map(|(_, nodes)| nodes.iter().map(|&n| both(n)))
+                .collect(),
+        };
+        let factors = || {
             self.free
                 .iter()
                 .zip(&self.scale)
-                .flat_map(|((_, nodes), &w)| nodes.iter().map(move |&n| w * f(n)))
-                .collect()
+                .flat_map(|((_, nodes), &w)| std::iter::repeat_n(w, nodes.len()))
         };
-        // The source side times, if it was estimated, the receivers' side.
-        let both = |n: usize| illumination[n] * self.receiver_side.as_ref().map_or(1.0, |r| r[n]);
-        let max = self
-            .free
-            .iter()
-            .flat_map(|(_, nodes)| nodes.iter().map(|&n| both(n)))
-            .fold(0.0, f64::max);
+        let max = energy.iter().copied().fold(0.0, f64::max);
+        // What each unknown's energy is taken relative to: the largest of all, or with
+        // `hessian_balance` its parameter's largest.
+        let mut maxima = Vec::with_capacity(energy.len());
+        let mut offset = 0;
+        for (_, nodes) in &self.free {
+            let part = &energy[offset..offset + nodes.len()];
+            let own = part.iter().copied().fold(0.0, f64::max);
+            let balance = self.hessian_diagonal.is_some() && self.settings.hessian_balance;
+            let m = if balance && own > 0.0 { own } else { max };
+            maxima.extend(std::iter::repeat_n(m, nodes.len()));
+            offset += nodes.len();
+        }
         match self.water_level {
-            Some(level) if max > 0.0 => Some(scaled(&|n| 1.0 / (both(n) / max + level))),
-            _ if !unit => Some(scaled(&|_| 1.0)),
+            Some(level) if max > 0.0 => Some(
+                factors()
+                    .zip(energy.iter().zip(&maxima))
+                    .map(|(w, (e, max))| w * (1.0 / (e / max + level)))
+                    .collect(),
+            ),
+            _ if !unit => Some(factors().collect()),
             _ => None,
         }
+    }
+
+    /// The Gauss–Newton Hessian of the misfit with respect to the unknowns at `model`, applied
+    /// to `v`: JᵀWJ v summed over the shots, exact for the L2 misfit, to round-off. Per shot a
+    /// Born run of the model change `v` describes ([`crate::born`]) and a gradient run driven
+    /// by its traces weighed by the misfit's Hessian ([`Misfit::gauss_newton_source`]). Where
+    /// the residuals vanish, it is the Hessian itself. The gradient run replays the forward
+    /// wavefield from checkpoints whatever `reconstruct` says, as [`Inversion::hessian_product`]
+    /// does: rebuilt backwards, its drift made the products 1.4·10⁻⁵ asymmetric, against
+    /// 1.5·10⁻⁶ replayed.
+    pub fn gauss_newton_product(&self, model: &Model, v: &[f64]) -> Result<Vec<f64>> {
+        let speeds = self.speeds_of(model, v)?;
+        let change = Change::from_velocities(model, speeds.each_ref().map(Vec::as_slice));
+        let n = model.grid.interior_len();
+        let mut sum = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+        for shot in &self.shots {
+            let mut sim = Simulation::with_model(&shot.config, model.clone())?;
+            let scattered = born(&mut sim, &change)?.traces;
+            let source = shot.misfit.gauss_newton_source(&scattered)?;
+            let mut sim = Simulation::with_model(&shot.config, model.clone())?;
+            let run = gradient_with(&mut sim, |_| Ok((0.0, source)), Strategy::default())?;
+            for (s, g) in sum.iter_mut().zip(run.gradient.velocities(model)) {
+                s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
+            }
+        }
+        Ok(self.unknowns_of(&sum))
+    }
+
+    /// The Hessian of the misfit with respect to the unknowns at `model`, applied to `v`, the
+    /// second-order terms included ([`crate::hessian`]): exact for the L2 misfit, to
+    /// round-off, at any residual. Per shot a forward, a Born and two adjoint runs, the
+    /// forward wavefields replayed from checkpoints whatever `reconstruct` says. At zero
+    /// residual it is [`Inversion::gauss_newton_product`].
+    pub fn hessian_product(&self, model: &Model, v: &[f64]) -> Result<Vec<f64>> {
+        let speeds = self.speeds_of(model, v)?;
+        let speeds = speeds.each_ref().map(Vec::as_slice);
+        let change = Change::from_velocities(model, speeds);
+        let n = model.grid.interior_len();
+        let mut sum = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+        for shot in &self.shots {
+            let mut sim = Simulation::with_model(&shot.config, model.clone())?;
+            let product = hessian_product(
+                &mut sim,
+                &change,
+                |r| shot.misfit.evaluate(&r.traces),
+                |d| shot.misfit.gauss_newton_source(d),
+                None,
+            )?;
+            for (s, g) in sum.iter_mut().zip(product.velocities(model, speeds)) {
+                s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
+            }
+        }
+        Ok(self.unknowns_of(&sum))
+    }
+
+    /// δvp, δvs and δρ at the nodes for a change `v` of the unknowns: x = m/m₀ - 1, so
+    /// δm = m₀ v.
+    fn speeds_of(&self, model: &Model, v: &[f64]) -> Result<[Vec<f64>; 3]> {
+        ensure!(
+            v.len() == self.x.len(),
+            "{} values for {} unknowns",
+            v.len(),
+            self.x.len()
+        );
+        let n = model.grid.interior_len();
+        let mut speeds = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+        let mut offset = 0;
+        for (p, nodes) in &self.free {
+            let start = self.start.values(*p);
+            for (i, &node) in nodes.iter().enumerate() {
+                speeds[*p as usize][node] = v[offset + i] * start[node] as f64;
+            }
+            offset += nodes.len();
+        }
+        Ok(speeds)
+    }
+
+    /// The unknowns' share of a derivative in vp, vs and ρ at the nodes, the transpose of
+    /// [`Inversion::speeds_of`].
+    fn unknowns_of(&self, nodes: &[Vec<f64>; 3]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.x.len());
+        for (p, free) in &self.free {
+            let (values, start) = (&nodes[*p as usize], self.start.values(*p));
+            out.extend(free.iter().map(|&node| values[node] * start[node] as f64));
+        }
+        out
+    }
+
+    /// Estimates the Gauss–Newton Hessian's diagonal in the model as it stands, if the
+    /// inversion divides by it, with signs drawn from `seed`.
+    fn estimate_hessian_diagonal(&mut self, seed: u64) -> Result<()> {
+        let probes = self.settings.hessian_probes;
+        if probes == 0 || self.water_level.is_none() {
+            return Ok(());
+        }
+        self.hessian_diagonal = None;
+        let (diagonal, peak) = self.gauss_newton_diagonal(&self.model, probes, seed)?;
+        self.memory_bytes = self.memory_bytes.max(peak);
+        self.hessian_diagonal = Some(diagonal);
+        Ok(())
+    }
+
+    /// The Gauss–Newton Hessian's diagonal, JᵀWJ's, for every unknown in `model`, estimated
+    /// from `probes` gradient runs per shot, each driven by [`Misfit::probe`]'s random adjoint
+    /// sources (signs drawn from `seed`): E[(Jᵀz)²] = diag(JᵀWJ), the shots' draws being
+    /// independent (Bekas, Kokiopoulou & Saad 2007). Then smoothed by `hessian_smoothing`
+    /// within each parameter's free nodes. With the most memory held meanwhile.
+    ///
+    /// Unlike the illumination, the same for every parameter, it weighs each parameter at
+    /// each node by its own sensitivity, source and receivers' sides together, and is
+    /// exact in expectation for L2; a node's estimate scatters by about √(2/probes) of its
+    /// value, about 35% for 16.
+    pub fn gauss_newton_diagonal(
+        &self,
+        model: &Model,
+        probes: usize,
+        seed: u64,
+    ) -> Result<(Vec<f64>, usize)> {
+        let mut rng = seed;
+        let mut draw = move || {
+            if splitmix64(&mut rng) >> 63 == 0 {
+                1.0
+            } else {
+                -1.0
+            }
+        };
+        self.gauss_newton_diagonal_with(model, probes, &mut draw)
+    }
+
+    /// [`Inversion::gauss_newton_diagonal`] with the probes' values from `draw`: shot by shot
+    /// within a probe, and within a shot as [`Misfit::probe`] takes them.
+    fn gauss_newton_diagonal_with(
+        &self,
+        model: &Model,
+        probes: usize,
+        draw: &mut dyn FnMut() -> f64,
+    ) -> Result<(Vec<f64>, usize)> {
+        let n = model.grid.interior_len();
+        let mut diagonal = vec![0.0; self.x.len()];
+        // Besides the inversion: the diagonal and one probe's sums over the shots.
+        let held = self.memory_held() + 8 * diagonal.len() + 8 * 3 * n;
+        let mut peak = held;
+        for _ in 0..probes {
+            let mut sum = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+            for shot in &self.shots {
+                let mut sim = Simulation::with_model(&shot.config, model.clone())?;
+                let run = gradient_with(
+                    &mut sim,
+                    |_| Ok((0.0, shot.misfit.probe(draw))),
+                    self.strategy(),
+                )?;
+                peak = peak.max(held + run.memory_bytes);
+                for (s, g) in sum.iter_mut().zip(run.gradient.velocities(model)) {
+                    s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
+                }
+            }
+            let mut offset = 0;
+            for (p, nodes) in &self.free {
+                let (sum, start) = (&sum[*p as usize], self.start.values(*p));
+                for (i, &node) in nodes.iter().enumerate() {
+                    let g = sum[node] * start[node] as f64;
+                    diagonal[offset + i] += g * g / probes as f64;
+                }
+                offset += nodes.len();
+            }
+        }
+        let sigma = self.settings.hessian_smoothing;
+        if sigma > 0.0 {
+            // The values, the region's indicator and a row's worth of scratch, on the grid.
+            peak = peak.max(self.memory_held() + 8 * diagonal.len() + 8 * 2 * n);
+            let mut offset = 0;
+            for (_, nodes) in &self.free {
+                let part = &mut diagonal[offset..offset + nodes.len()];
+                smooth_within(&model.grid, nodes, part, sigma);
+                offset += nodes.len();
+            }
+        }
+        Ok((diagonal, peak))
     }
 
     /// Estimates the receivers' side of the illumination in the model as it stands, if the
@@ -1180,6 +1405,43 @@ fn splitmix64(state: &mut u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// Smooths `values`, one for each of `nodes` (interior indices), with a Gaussian of width
+/// `sigma` metres along every axis, within those nodes: the smoothed values over the smoothed
+/// indicator, so that the region's edges aren't pulled towards the zeros outside it.
+fn smooth_within(grid: &Grid, nodes: &[usize], values: &mut [f64], sigma: f64) {
+    let n = grid.interior_len();
+    let mut sums = vec![0.0; n];
+    let mut weights = vec![0.0; n];
+    for (&node, &v) in nodes.iter().zip(values.iter()) {
+        sums[node] = v;
+        weights[node] = 1.0;
+    }
+    let [nx, ny, _] = grid.n;
+    let mut line = Vec::new();
+    for axis in 0..3 {
+        let len = grid.n[axis];
+        let stride = [1, nx, nx * ny][axis];
+        let reach = ((3.0 * sigma / grid.h[axis]).ceil() as usize).min(len.saturating_sub(1));
+        let kernel: Vec<f64> = (0..=reach)
+            .map(|j| (-0.5 * (j as f64 * grid.h[axis] / sigma).powi(2)).exp())
+            .collect();
+        for field in [&mut sums, &mut weights] {
+            for first in (0..n).filter(|&i| (i / stride) % len == 0) {
+                line.clear();
+                line.extend((0..len).map(|i| field[first + i * stride]));
+                for i in 0..len {
+                    let (lo, hi) = (i.saturating_sub(reach), (i + reach).min(len - 1));
+                    field[first + i * stride] =
+                        (lo..=hi).map(|j| kernel[i.abs_diff(j)] * line[j]).sum();
+                }
+            }
+        }
+    }
+    for (&node, v) in nodes.iter().zip(values.iter_mut()) {
+        *v = sums[node] / weights[node];
+    }
 }
 
 /// One shot's observed traces, in the layout of [`crate::receiver::Receivers::traces`], with
@@ -1964,6 +2226,262 @@ mod tests {
         }
         let cfg = survey(SOLID, "parameters = [\"vs\"]\n[inversion.scale]\nvp = -1.0");
         assert!(setup(&cfg).is_ok());
+    }
+
+    /// Probes that each send one sample alone sum to the Gauss–Newton diagonal exactly; the
+    /// Gauss–Newton product with a unit vector, from a Born and a gradient run, is that
+    /// diagonal's column; and at zero residual it is the Hessian's, which central differences
+    /// of the gradient give (extrapolated in the step): the relative unknowns' scaling, the
+    /// parameters' order and the sum over the shots included. Measured, with the forward
+    /// wavefield replayed: the diagonal entries agree to 10⁻⁸ of the largest; against the
+    /// differences, the entries to 1.4·10⁻⁵–1.7·10⁻⁴ and the columns between the source and
+    /// the receivers to 1.5·10⁻⁵–5.5·10⁻⁴ (ρ's).
+    #[test]
+    fn unit_probes_and_born_runs_give_the_hessian() {
+        let cfg = survey(
+            &format!("{SOLID}\n[scheme]\norder = 4"),
+            "parameters = [\"vp\", \"vs\", \"rho\"]\nfixed_above = 20.0\nreconstruct = false",
+        );
+        let inv = setup(&cfg).unwrap();
+        let samples: usize = inv.shots[0].observed.iter().map(Vec::len).sum();
+        let mut count = 0;
+        let mut probe = 0;
+        let mut draw = || {
+            let one = count == probe * samples + probe;
+            count += 1;
+            if count % samples == 0 {
+                probe += 1;
+            }
+            if one { 1.0 } else { 0.0 }
+        };
+        let (diagonal, _) = inv
+            .gauss_newton_diagonal_with(&inv.model, samples, &mut draw)
+            .unwrap();
+        let largest = diagonal.iter().fold(0.0f64, |m, &d| m.max(d)) * samples as f64;
+        let g = inv.model.grid;
+        let [nx, ny, _] = g.n;
+        let gradient_at = |h: f64, i: usize| {
+            let mut x = inv.x.clone();
+            x[i] += h;
+            inv.evaluate(&inv.model_at(&x)).unwrap().gradient
+        };
+        // A node between the source and the receivers, and one off to the side.
+        for node in [[7, 8, 4], [10, 6, 3]] {
+            let n = node[0] + nx * (node[1] + ny * node[2]);
+            let mut offset = 0;
+            for (p, nodes) in &inv.free {
+                let i = offset + nodes.binary_search(&n).unwrap();
+                offset += nodes.len();
+                let exact = diagonal[i] * samples as f64;
+                let mut unit = vec![0.0; inv.unknowns()];
+                unit[i] = 1.0;
+                let column = inv.gauss_newton_product(&inv.model, &unit).unwrap();
+                // Both exact, to single precision's round-off relative to the largest value.
+                let born = (column[i] - exact).abs() / largest;
+                assert!(
+                    born < 1e-6,
+                    "{p:?} at {node:?}: {} against {exact}",
+                    column[i]
+                );
+                // Differences resolve entries down to about 10⁻⁴ of the largest: the second node's
+                // ρ, 10⁻⁶ of it, is 5·10⁻³ off at order 4.
+                if exact < 1e-4 * largest {
+                    continue;
+                }
+                let difference = |h: f64| -> Vec<f64> {
+                    let (a, b) = (gradient_at(h, i), gradient_at(-h, i));
+                    a.iter().zip(&b).map(|(a, b)| (a - b) / (2.0 * h)).collect()
+                };
+                // Smaller steps sit on single precision's round-off.
+                let h = 2e-2;
+                let (coarse, fine) = (difference(h), difference(h / 2.0));
+                let extrapolated: Vec<f64> = coarse
+                    .iter()
+                    .zip(&fine)
+                    .map(|(c, f)| (4.0 * f - c) / 3.0)
+                    .collect();
+                let error = (extrapolated[i] - exact).abs() / exact;
+                assert!(
+                    error < 1e-3,
+                    "{p:?} at {node:?}: {exact} against {} ({error})",
+                    extrapolated[i]
+                );
+                // The whole column, relative to its size, where it is large: off to the side the
+                // differences of the small entries sit on round-off (vp's column there 3.5·10⁻³).
+                if node != [7, 8, 4] {
+                    continue;
+                }
+                let size = column.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let off = column
+                    .iter()
+                    .zip(&extrapolated)
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+                    / size;
+                assert!(off < 1e-3, "{p:?} at {node:?}: column off by {off}");
+            }
+        }
+    }
+
+    /// The Gauss–Newton products are symmetric, u·Hv = v·Hu for random positive u and v, and
+    /// positive, with a mute and a filter in the misfit, when the gradient replays the forward
+    /// wavefield exactly. At order 4, so that no receiver reads into the layers, where the
+    /// adjoint is only nearly the transpose. Measured 1.5·10⁻⁶ (the bound's scale). Rebuilt
+    /// backwards instead, the forward field's drift near the source (3–9·10⁻⁶ of the largest
+    /// gradient at a node here) put u·Hv 1.4·10⁻⁵ off ⟨Ju, WJv⟩, and 2.3·10⁻³ with the time
+    /// error kept (C = 0.3, three times the steps), so the products replay checkpoints even
+    /// where the inversion rebuilds: the same bit for bit with `reconstruct = true`.
+    #[test]
+    fn gauss_newton_products_are_symmetric() {
+        let cfg = survey(
+            &format!("{SOLID}\n[scheme]\norder = 4"),
+            "parameters = [\"vs\", \"rho\"]\nfixed_above = 20.0\nreconstruct = false\n\
+             [[inversion.stage]]\nmax_frequency = 40.0\niterations = 1\n\
+             [[inversion.mute]]\nkeep = \"before\"\nvelocity = 1000.0\ndelay = 0.01\ntaper = 0.005",
+        );
+        let inv = setup(&cfg).unwrap();
+        let sim = Simulation::with_model(&inv.shots[0].config, inv.model.clone()).unwrap();
+        assert_eq!(sim.receivers_next_to_layers(), 0);
+        let mut rng = 7u64;
+        let mut random = |n: usize| -> Vec<f64> {
+            (0..n)
+                .map(|_| (splitmix64(&mut rng) >> 11) as f64 / (1u64 << 53) as f64)
+                .collect()
+        };
+        let (u, v) = (random(inv.unknowns()), random(inv.unknowns()));
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+        let (hu, hv) = (
+            inv.gauss_newton_product(&inv.model, &u).unwrap(),
+            inv.gauss_newton_product(&inv.model, &v).unwrap(),
+        );
+        let (a, b) = (dot(&u, &hv), dot(&v, &hu));
+        // Positive semidefinite, vᵀHv = ‖√W J v‖² ≥ 0, so |uᵀHv| ≤ √(uᵀHu vᵀHv), the scale of
+        // the difference.
+        let (uu, vv) = (dot(&u, &hu), dot(&v, &hv));
+        assert!(uu > 0.0 && vv > 0.0);
+        let asymmetry = (a - b).abs() / (uu * vv).sqrt();
+        assert!(asymmetry < 1e-6, "{a} against {b}: {asymmetry}");
+        let mut settings = cfg.inversion.clone().unwrap();
+        settings.reconstruct = true;
+        let rebuilding =
+            Inversion::new(&cfg, start(&cfg), vec![recorded(&cfg)], &settings).unwrap();
+        assert_eq!(
+            rebuilding.strategy(),
+            Strategy::Reconstruct { segment: None }
+        );
+        assert_eq!(rebuilding.gauss_newton_product(&inv.model, &u).unwrap(), hu);
+    }
+
+    /// The full Hessian's products: at zero residual the Gauss–Newton products, to round-off
+    /// (the second-order terms vanish with the adjoint wavefield); with a residual, from a
+    /// start 5% slower in vs and 3% lighter than the data's model, symmetric, and apart from
+    /// the Gauss–Newton products. Measured: the same bit for bit at zero residual; with the
+    /// residual, u·Hv and v·Hu agree to 1.3·10⁻⁸, and Hu is 1.9·10⁻² from the Gauss–Newton
+    /// product.
+    #[test]
+    fn full_hessian_products_are_symmetric_and_gauss_newton_at_zero_residual() {
+        let cfg = survey(
+            &format!("{SOLID}\n[scheme]\norder = 4"),
+            "parameters = [\"vp\", \"vs\", \"rho\"]\nfixed_above = 20.0\nreconstruct = false",
+        );
+        let inv = setup(&cfg).unwrap();
+        let mut rng = 11u64;
+        let mut random = |n: usize| -> Vec<f64> {
+            (0..n)
+                .map(|_| (splitmix64(&mut rng) >> 11) as f64 / (1u64 << 53) as f64)
+                .collect()
+        };
+        let (u, v) = (random(inv.unknowns()), random(inv.unknowns()));
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+        let norm = |a: &[f64]| dot(a, a).sqrt();
+        let apart = |a: &[f64], b: &[f64]| {
+            let d: Vec<f64> = a.iter().zip(b).map(|(a, b)| a - b).collect();
+            norm(&d) / norm(b)
+        };
+        let full = inv.hessian_product(&inv.model, &u).unwrap();
+        let gauss_newton = inv.gauss_newton_product(&inv.model, &u).unwrap();
+        let at_zero = apart(&full, &gauss_newton);
+        println!("zero residual: full against Gauss–Newton {at_zero:.1e}");
+        assert!(at_zero < 1e-12, "{at_zero}");
+
+        let mut model = start(&cfg);
+        model.vs.iter_mut().for_each(|v| *v *= 0.95);
+        model.rho.iter_mut().for_each(|v| *v *= 0.97);
+        let settings = cfg.inversion.clone().unwrap();
+        let inv = Inversion::new(&cfg, model, vec![recorded(&cfg)], &settings).unwrap();
+        let (hu, hv) = (
+            inv.hessian_product(&inv.model, &u).unwrap(),
+            inv.hessian_product(&inv.model, &v).unwrap(),
+        );
+        let (a, b) = (dot(&u, &hv), dot(&v, &hu));
+        let (uu, vv) = (dot(&u, &hu), dot(&v, &hv));
+        let asymmetry = (a - b).abs() / (uu.abs() * vv.abs()).sqrt();
+        let gauss_newton = inv.gauss_newton_product(&inv.model, &u).unwrap();
+        let second_order = apart(&hu, &gauss_newton);
+        println!(
+            "with a residual: u·Hv {a:.6e}, v·Hu {b:.6e}, asymmetry {asymmetry:.1e}; \
+             full against Gauss–Newton {second_order:.1e}"
+        );
+        assert!(asymmetry < 1e-6, "{a} against {b}: {asymmetry}");
+        assert!(second_order > 1e-3, "{second_order}");
+    }
+
+    /// The estimate divides each parameter by its own diagonal, so their preconditioners
+    /// differ (the illumination's are the same); the same seed gives the same, and the
+    /// receivers' side, which the diagonal holds, can't be asked for as well.
+    #[test]
+    fn the_hessians_diagonal_preconditions_each_parameter() {
+        let extra = "parameters = [\"vs\", \"rho\"]\nhessian_probes = 2\nhessian_smoothing = 15.0";
+        let a = setup(&survey(SOLID, extra)).unwrap();
+        let b = setup(&survey(SOLID, extra)).unwrap();
+        let (p, q) = (
+            a.preconditioner.as_ref().unwrap(),
+            b.preconditioner.as_ref().unwrap(),
+        );
+        assert_eq!(p, q);
+        assert!(p.iter().all(|&v| v.is_finite() && v > 0.0));
+        let half = a.unknowns() / 2;
+        assert_ne!(p[..half], p[half..]);
+        let illumination = setup(&survey(SOLID, "parameters = [\"vs\", \"rho\"]")).unwrap();
+        let r = illumination.preconditioner.as_ref().unwrap();
+        assert_eq!(r[..half], r[half..]);
+        let both = survey(SOLID, "hessian_probes = 2\nreceiver_runs = 2");
+        assert!(setup(&both).is_err());
+        let bad = survey(SOLID, "hessian_probes = 2\nhessian_smoothing = -1.0");
+        assert!(setup(&bad).is_err());
+    }
+
+    /// Smoothing within a region keeps a constant constant up to the region's edges, and
+    /// spreads a spike as the Gaussian does, by each axis's spacing.
+    #[test]
+    fn smooths_within_a_region() {
+        let g = Grid::new([12, 10, 20], [10.0, 10.0, 5.0]);
+        let index = |[i, j, k]: [usize; 3]| i + 12 * (j + 10 * k);
+        // Every node at depth index 2 and below.
+        let nodes: Vec<usize> = (index([0, 0, 2])..g.interior_len()).collect();
+        let mut constant = vec![3.0; nodes.len()];
+        smooth_within(&g, &nodes, &mut constant, 12.0);
+        assert!(constant.iter().all(|v| (v - 3.0).abs() < 1e-12));
+        let mut spike = vec![0.0; nodes.len()];
+        let centre = index([6, 5, 9]) - nodes[0];
+        spike[centre] = 1.0;
+        smooth_within(&g, &nodes, &mut spike, 10.0);
+        // One node along x is σ away, and so are two along z (5 m apart); the kernels there
+        // lie wholly inside the region, so the indicator's smoothing is the same.
+        let ratio = |at: [usize; 3]| spike[index(at) - nodes[0]] / spike[centre];
+        let expect = (-0.5f64).exp();
+        assert!(
+            (ratio([7, 5, 9]) - expect).abs() < 1e-12,
+            "{}",
+            ratio([7, 5, 9])
+        );
+        assert!(
+            (ratio([6, 5, 11]) - expect).abs() < 1e-12,
+            "{}",
+            ratio([6, 5, 11])
+        );
+        assert!(spike.iter().all(|v| v.is_finite() && *v >= 0.0));
     }
 
     /// Sending from every receiver component at once with the signs of a Hadamard matrix's

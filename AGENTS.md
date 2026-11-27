@@ -59,6 +59,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 src/
   main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | extrude | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
+  born.rs        the Born run beside the forward one: the traces' change for a model change, J δm
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay or the field
                  rebuilt backwards from the band or inside a surface (Strategy), correlations
   inversion.rs   preconditioned L-BFGS over shots: relative unknowns, bounds, line search, stages
@@ -66,6 +67,8 @@ src/
                  mutes and windows
   config.rs      the TOML configuration (serde, deny_unknown_fields); default_courant
   grid.rs        the grid and its halo (as wide as the stencil), indexing
+  hessian.rs     the Hessian's products H δm, second-order terms included: Born and two adjoint
+                 runs, replayed from checkpoints
   memory.rs      the memory a run needs, from its configuration alone
   model.rs       vp, vs, rho on the nodes: layers, .npy files (on disk or in memory), spheres
   solver.rs      fields, staggered material, the update kernels (bands of rows marching up),
@@ -117,6 +120,8 @@ tests/
                  (ignored; `just drift`)
   gradient_accuracy.rs  gradients against the exact kernels (studies ignored; `just
                  gradient-accuracy`), and a baseline at the coarsest grid
+  hessian_study.rs  the Hessian probed on the sphere survey: point-spread functions from
+                 differences of the gradient, the Gauss–Newton diagonal from random probes (ignored)
   analytic_inversion.rs  the inversion against Born's Gauss–Newton solution in a full space:
                  J from Stokes's solution, checked against the kernels; studies ignored
   common/        closed-form solutions and setup helpers the tests share; stokes.rs: a point
@@ -159,6 +164,31 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The Hessian** (`src/born.rs`, `src/hessian.rs`, `Inversion::gauss_newton_product`,
+  `Inversion::hessian_product`, `[inversion] hessian_probes`; the log's "The Hessian",
+  2026-11-27). The Born run is the solver's own step on $\delta v$, $\delta\sigma$ with the
+  forward run's velocity change and strain rate as sources, through the material averaging
+  differentiated forward (`MaterialChange`): the gradient's correlations untransposed, so its
+  exact transpose ($\le 1.6 \times 10^{-7}$). Keep them in step: when `gradient::correlate` or
+  `to_nodes` changes, `MaterialChange` and `hessian::add_factors_change` must follow (the
+  Born and Hessian physics tests catch a miss). Full products add a second adjoint run, driven
+  by the residuals' change and by the adjoint wavefield scattered as the Born run scatters
+  the forward one, and the change of `to_nodes`'s factors (free surface, shear harmonic
+  means) and of the conversion to vp, vs, ρ; they match differences of the gradient to
+  $\le 6.3 \times 10^{-5}$, with Gauss–Newton 1.5–4.4% apart. Products replay checkpoints
+  whatever `reconstruct` says: the rebuilt field's drift made Gauss–Newton products
+  $1.4 \times 10^{-5}$ asymmetric ($2.3 \times 10^{-3}$ with the time error kept), against
+  $1.5 \times 10^{-6}$ replayed. L2 only (`Misfit::gauss_newton_source`). The Gauss–Newton
+  diagonal from random adjoint probes, as a preconditioner, was worse than the illumination
+  in every sphere case with the top fixed: unbalanced it hands vp a large share (cross-talk),
+  balanced its shape, falling hundreds of times faster with depth, still leaves vs
+  unrecovered. Opt-in, not a default. Against analytic answers: in Stokes's full space the
+  Gauss–Newton product is $J^T J$ from Stokes's solution to $3 \times 10^{-5}$; against
+  Lamb's problem the second-order part, which correlates the residual, is 8–70% off when the
+  data are Pekeris's, since the residual then holds the free surface's error, and 0.6–15%
+  with the solver's own data, so trust it only where the forward error is small next to the
+  residual. A uniform change fills the layers, where the Born and second adjoint runs' stress
+  sources lack the CPML's memory terms ($10^{-3}$ there, against $10^{-5}$ outside).
 - **Rebuilding inside a surface** (`src/surface.rs`, `Strategy::Surface`, `gradient
   --surface`; the log's "Rebuilding inside a surface", 2026-11-27). Aaker et al.'s method
   (GJI 2020, `aaker2020gji`, not the GPU paper `aaker2020`), kept for comparison with the
@@ -646,7 +676,10 @@ doesn't show.
   $\le 1.8 \times 10^{-6}$ of each array's peak (walls and water; $\le 1.2 \times 10^{-6}$
   node-sampled) and its gradient the replay's to
   $\le 6.2 \times 10^{-7}$, and on the reconstruction path the finite-difference checks give
-  the replay's numbers; the gradient against the exact
+  the replay's numbers; the Born run against extrapolated differences of the traces
+  $\le 1.6 \times 10^{-4}$ (walls and water's ρ; $\le 8.6 \times 10^{-5}$ at orders 4 and
+  8) and the gradient its transpose to $\le 1.6 \times 10^{-7}$; the Hessian's product
+  against differences of the gradient $\le 6.3 \times 10^{-5}$; the gradient against the exact
   kernels at 3.5 points per S wavelength (`tests/gradient_accuracy.rs`), the wavefields' part
   0.26% (S) and 0.12% (P) in the Fresnel zone, +0.19% and −0.10% along a smooth change; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. With Taylor coefficients: 0.002–0.006% (near exact

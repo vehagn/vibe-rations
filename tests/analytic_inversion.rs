@@ -1148,3 +1148,86 @@ fn lbfgs_against_gauss_newton() {
     }
     println!("  {:.0} s", t.elapsed().as_secs_f64());
 }
+
+/// The solver's Gauss–Newton products against Born's in the full space: JᵀJ c with J built
+/// from Stokes's solution as the grid samples the model, against the inversion's
+/// `gauss_newton_product` of the hats' nodal values, taken back to the hats (Pᵀ H P c, P the
+/// hats' interpolation), for the truth's coefficients, a single hat at the centre and two
+/// random sets. The misfit is unweighted (`balance = false`), as J is; the forward wavefield
+/// is replayed from checkpoints, so the products are exact for the discrete run and what
+/// differs is the run's error against Stokes's. About 6 minutes.
+///
+/// Measured: against JᵀJc with J as the grid samples the model, 1.6e-5 to 2.8e-5 (the quadratic
+/// forms to 1e-6 to 2.5e-5); against the continuous Born integral's (J at the nodes'
+/// quadrature), 1.3–3.3%: the grid's sampling of the model, not the wavefields.
+#[test]
+#[ignore]
+fn gauss_newton_products_against_born() {
+    let s = survey(1);
+    let t = Instant::now();
+    let j = jacobian(&s, None);
+    println!("J in {:.0} s", t.elapsed().as_secs_f64());
+    let mut settings = s.cfg.inversion.clone().unwrap();
+    settings.reconstruct = false;
+    let observed = s.record(&s.start);
+    let inv = Inversion::new(
+        &s.cfg,
+        s.start.clone(),
+        observed.into_iter().map(Into::into).collect(),
+        &settings,
+    )
+    .unwrap();
+    // Free nodes: every node outside the layers, z slowest, as `Inversion::new` lists them.
+    let ni = s.start.grid.n[0] - 2 * PML;
+    assert_eq!(inv.unknowns(), ni * ni * ni);
+    let free = |n: usize| {
+        let g = s.start.grid;
+        let (i, j, k) = (n % g.n[0], (n / g.n[0]) % g.n[1], n / (g.n[0] * g.n[1]));
+        ((k - PML) * ni + (j - PML)) * ni + (i - PML)
+    };
+    let boxed: Vec<usize> = box_nodes().into_iter().map(|b| s.node(b)).collect();
+    let mut seed = 0x5EED_u64;
+    let mut random = || -> Vec<f64> {
+        (0..K)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            })
+            .collect()
+    };
+    let mut centre_hat = vec![0.0; K];
+    centre_hat[K / 2] = 1.0;
+    let cases = [
+        ("the truth's Gaussian", truth_coefficients(1.0)),
+        ("the centre's hat", centre_hat),
+        ("random", random()),
+        ("random", random()),
+    ];
+    for (name, c) in cases {
+        let t = Instant::now();
+        let mut v = vec![0.0; inv.unknowns()];
+        for (&n, d) in boxed.iter().zip(nodal(&c)) {
+            v[free(n)] = d;
+        }
+        let hv = inv.gauss_newton_product(&s.start, &v).unwrap();
+        let mut solver = vec![0.0; K];
+        for (b, &n) in box_nodes().into_iter().zip(&boxed) {
+            for (k, w) in hats(b) {
+                solver[k] += w * hv[free(n)];
+            }
+        }
+        let born = transpose_apply(&j.grid, j.rows, &apply(&j.grid, j.rows, &c));
+        let point = transpose_apply(&j.point, j.rows, &apply(&j.point, j.rows, &c));
+        println!(
+            "{name}: PᵀHPc against JᵀJc {:.1e} (cᵀPᵀHPc {:.7e} against {:.7e}); against the \
+             continuous Born integral's {:.1e} ({:.0} s)",
+            relative(&solver, &born),
+            dot(&c, &solver),
+            dot(&c, &born),
+            relative(&solver, &point),
+            t.elapsed().as_secs_f64()
+        );
+    }
+}
