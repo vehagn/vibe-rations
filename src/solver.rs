@@ -653,6 +653,39 @@ impl Solver {
         self.strain_rate_into(v, sum, true);
     }
 
+    /// [`Solver::strain_rate`] at one position, the padded index `p` on the interior plane
+    /// `kz`: the same six values, bit for bit, for when a few positions are wanted and a pass
+    /// over the grid would cost more than the step it follows
+    /// ([`crate::hessian::hessian_block`]).
+    pub fn strain_rate_at(&self, v: [&[f32]; 3], p: usize, kz: usize) -> [f32; 6] {
+        let g = self.grid;
+        let ih = g.h.map(|h| (1.0 / h) as f32);
+        let [_, sy, sz] = g.strides();
+        let st = &self.stencil;
+        let [vx, vy, vz] = v;
+        let mut d = [[0.0f32; 1]; 9];
+        let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut d;
+        st.backward(d0, vx, p, 1, ih[0]);
+        st.backward(d1, vy, p, sy, ih[1]);
+        if !(self.free_surface && kz == 0) {
+            st.backward(d2, vz, p, sz, ih[2]);
+        }
+        st.forward(d3, vx, p, sy, ih[1]);
+        st.forward(d4, vy, p, 1, ih[0]);
+        st.forward(d5, vx, p, sz, ih[2]);
+        st.forward(d6, vz, p, 1, ih[0]);
+        st.forward(d7, vy, p, sz, ih[2]);
+        st.forward(d8, vz, p, sy, ih[1]);
+        [
+            d[0][0],
+            d[1][0],
+            d[2][0],
+            d[3][0] + d[4][0],
+            d[5][0] + d[6][0],
+            d[7][0] + d[8][0],
+        ]
+    }
+
     fn strain_rate_into(&self, v: [&[f32]; 3], out: &mut [Vec<f32>; 6], add: bool) {
         let g = self.grid;
         let update = StrainRate {
@@ -2351,6 +2384,43 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The strain rate at one position is the grid's there, bit for bit: with a free surface
+    /// and without, in layers too, since neither takes the CPML's terms.
+    #[test]
+    fn a_positions_strain_rate_is_the_grids() {
+        let g = Grid::new([16, 14, 12], [10.0, 5.0, 4.0]).with_halo(4);
+        for surface in [true, false] {
+            let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
+            let s = Solver::new(model, 1e-4, 3, surface, &pml())
+                .with_stencil(Stencil::taylor(8).unwrap());
+            let mut x = 0x9E37_79B9u32;
+            let v: [Vec<f32>; 3] = std::array::from_fn(|_| {
+                (0..g.padded_len())
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 17;
+                        x ^= x << 5;
+                        x as f32 / u32::MAX as f32 - 0.5
+                    })
+                    .collect()
+            });
+            let v = [&v[0][..], &v[1][..], &v[2][..]];
+            let mut out: [Vec<f32>; 6] = std::array::from_fn(|_| vec![0.0; g.padded_len()]);
+            s.strain_rate(v, &mut out);
+            let [nx, ny, nz] = g.n;
+            for k in 0..nz {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let p = g.idx(i, j, k);
+                        let here: [f32; 6] = std::array::from_fn(|c| out[c][p]);
+                        assert_eq!(s.strain_rate_at(v, p, k), here, "at {i}, {j}, {k}");
+                    }
+                }
+            }
+            assert!(out.iter().all(|e| e[g.idx(8, 7, 5)] != 0.0));
         }
     }
 

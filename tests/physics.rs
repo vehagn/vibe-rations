@@ -1733,6 +1733,128 @@ fn hessian_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
     }
 }
 
+/// The Hessian between a few nodes from one Born run per column
+/// ([`vibe_rations::hessian::hessian_block`]) is the products' ([`hessian_check`]'s
+/// surveys): each column of the block in vp, vs and ρ against H applied to a unit change of
+/// that parameter at that node, read at the nodes, and its Born-against-adjoint term against
+/// the product's. The nodes: neighbours along an axis and across a diagonal, which share
+/// velocity and shear positions, and one apart; with the free surface, one on it, in the
+/// water, and one on the seabed.
+///
+/// Measured, ‖block - products‖ / ‖products‖ over the matrix: order 8, the Hessian 6.8e-8
+/// and the term 6.7e-8; walls and water 2.1e-7 and 3.1e-8. The block's own asymmetry
+/// 3.7e-9 and 2.0e-9, against the products' few 10⁻⁷: its second-order part is B + Bᵀ by
+/// construction, and JᵀWJ inner products in double precision. Gauss–Newton is 0.77 and 2.6
+/// of the Hessian apart, so the second-order part is large here.
+#[test]
+fn the_hessian_between_nodes_is_the_products() {
+    hessian_block_check(
+        "order 8",
+        &[[20, 18, 12], [21, 18, 12], [21, 19, 12], [30, 24, 20]],
+        &|sphere| gradient_model(8, sphere),
+    );
+    hessian_block_check(
+        "walls and water",
+        &[[15, 14, 9], [15, 15, 10], [12, 16, 0], [20, 12, 2]],
+        &walls_and_water,
+    );
+}
+
+fn hessian_block_check(label: &str, at: &[[usize; 3]], config: &dyn Fn([f64; 3]) -> String) {
+    use vibe_rations::born::Change;
+    use vibe_rations::config::Config;
+    use vibe_rations::gradient::{balancing_weights, l2_misfit};
+    use vibe_rations::hessian::{hessian_block, hessian_product};
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let base = std::path::Path::new(".");
+    let mut cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let dt = Simulation::with_model(&cfg, model.clone())
+        .unwrap()
+        .solver
+        .dt;
+    cfg.time.dt = Some(dt);
+    cfg.time.courant = None;
+    cfg.boundary.pml_vp_max.get_or_insert(model.vp_range()[1]);
+    let mut truth = Config::from_toml(&config([1900.0, 950.0, 1950.0])).unwrap();
+    (truth.time, truth.boundary) = (cfg.time.clone(), cfg.boundary.clone());
+    let mut observed = Simulation::new(&truth, base).unwrap();
+    observed.run(None, false).unwrap();
+    let observed = observed.receivers;
+    let weights = balancing_weights(&observed.traces, &observed.components);
+    let observed = observed.traces;
+    let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
+    let curvature = |d: &[Vec<f32>]| -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(d.iter()
+            .zip(&weights)
+            .map(|(d, &w)| d.iter().map(|&x| (w * x as f64) as f32).collect())
+            .collect())
+    };
+
+    let g = model.grid;
+    let nodes: Vec<usize> = at
+        .iter()
+        .map(|&[i, j, k]| g.interior_idx(i, j, k))
+        .collect();
+    let n = nodes.len();
+    let side = 3 * n;
+    let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+    let block = hessian_block(&mut sim, &nodes, |r| misfit(&r.traces), curvature, None, 2).unwrap();
+    let hessian = block.velocities(&model);
+    let scattered = block.in_velocities(&model, &block.scattered);
+    let norm = |m: &[f64]| m.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let asymmetry = norm(
+        &(0..side * side)
+            .map(|i| hessian[i] - hessian[(i % side) * side + i / side])
+            .collect::<Vec<_>>(),
+    ) / norm(&hessian);
+
+    let (mut products, mut terms) = (vec![0.0; side * side], vec![0.0; side * side]);
+    for column in 0..side {
+        let (p, b) = (column / n, nodes[column % n]);
+        let mut speeds = [(); 3].map(|_| vec![0.0; g.interior_len()]);
+        // A change the size of the parameter, or of vp where vs is zero, for a Born
+        // wavefield of the forward one's size; the product is per unit of it.
+        let scale = [
+            model.vp[b],
+            model.vs[b].max(model.vp[b] / 2.0),
+            model.rho[b],
+        ][p] as f64;
+        speeds[p][b] = scale;
+        let by_ref = speeds.each_ref().map(Vec::as_slice);
+        let change = Change::from_velocities(&model, by_ref);
+        let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+        let product =
+            hessian_product(&mut sim, &change, |r| misfit(&r.traces), curvature, None).unwrap();
+        // The conversion's own change is linear in the change of the model too.
+        let whole = product.velocities(&model, by_ref);
+        let term = product.terms[0].velocities(&model);
+        for row in 0..side {
+            let (q, a) = (row / n, nodes[row % n]);
+            products[row * side + column] = whole[q][a] / scale;
+            terms[row * side + column] = term[q][a] / scale;
+        }
+    }
+    let apart = |ours: &[f64], theirs: &[f64]| {
+        let diff: Vec<f64> = ours.iter().zip(theirs).map(|(a, b)| a - b).collect();
+        norm(&diff) / norm(theirs)
+    };
+    let (whole, term) = (apart(&hessian, &products), apart(&scattered, &terms));
+    let gauss_newton = block.in_velocities(&model, &block.gauss_newton);
+    println!(
+        "Hessian between {n} nodes, {label}: the block and the products {whole:.1e} apart, \
+         their Born-against-adjoint terms {term:.1e}; the block's asymmetry {asymmetry:.1e}; \
+         Gauss–Newton {:.1e} of the Hessian apart",
+        apart(&gauss_newton, &hessian)
+    );
+    assert!(whole < 2e-6, "{label}: {whole}");
+    assert!(term < 2e-6, "{label}: {term}");
+    assert!(asymmetry < 2e-6, "{label}: {asymmetry}");
+    assert_eq!(block.jacobian.len(), side);
+}
+
 /// A small inversion: two shots of a vertical and a horizontal force, recorded on the free
 /// surface, of a model with a faster sphere, inverted for vp and vs from a homogeneous start,
 /// with the top 60 m (the sources and the receivers) held fixed and the gradient

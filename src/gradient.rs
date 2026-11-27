@@ -698,6 +698,39 @@ pub(crate) fn correlate(
         });
 }
 
+/// [`correlate`]'s terms at one position, on the interior plane `k`, into its sums `sum`:
+/// `adjoint` holds the adjoint velocities there and then the adjoint strain, `strain` the
+/// strain rates and `change` the velocities' change over the step, each as [`correlate`]
+/// reads it from its arrays. The same terms in the same order, so the sums come out bit for
+/// bit ([`crate::hessian::hessian_block`] correlates Born runs at a few positions with it).
+pub(crate) fn correlate_at(
+    s: &Solver,
+    k: usize,
+    sum: &mut [f64; 8],
+    adjoint: &[f32; 9],
+    strain: [f32; 6],
+    change: [f32; 3],
+) {
+    let w_normal = weight(s, Field::Sxx, k);
+    let a = |c: usize| adjoint[3 + c] as f64;
+    let e = |c: usize| strain[c] as f64;
+    let (xx, yy, zz) = (-w_normal * a(0), -w_normal * a(1), -w_normal * a(2));
+    let (exx, eyy, ezz) = (e(0), e(1), e(2));
+    if s.free_surface && k == 0 {
+        sum[3] += xx * exx + yy * eyy;
+        sum[4] += xx * eyy + yy * exx;
+    } else {
+        sum[3] += xx * exx + yy * eyy + zz * ezz;
+        sum[4] += xx * (eyy + ezz) + yy * (exx + ezz) + zz * (exx + eyy);
+    }
+    sum[5] += -weight(s, Field::Sxy, k) * a(3) * e(3);
+    sum[6] += -weight(s, Field::Sxz, k) * a(4) * e(4);
+    sum[7] += -weight(s, Field::Syz, k) * a(5) * e(5);
+    for c in 0..3 {
+        sum[c] += adjoint[c] as f64 * change[c] as f64;
+    }
+}
+
 /// |v|² at padded index `p`, each component of `v` taken where it is stored.
 #[inline(always)]
 fn energy(v: [&[f32]; 3], p: usize) -> f64 {
@@ -1078,6 +1111,83 @@ mod tests {
         )
         .unwrap();
         ((steps, r), sim.receivers.traces)
+    }
+
+    /// [`correlate_at`] adds a position's terms as [`correlate`] adds them, bit for bit, on
+    /// and below a free surface and without one, over two steps.
+    #[test]
+    fn a_position_correlates_as_the_grid_does() {
+        for surface in [true, false] {
+            let mut cfg = small_config();
+            cfg.boundary.free_surface = surface;
+            let sim = Simulation::new(&cfg, std::path::Path::new(".")).unwrap();
+            let s = &sim.solver;
+            let g = s.grid;
+            let len = g.padded_len();
+            let mut x = 0x2545_F491u32;
+            let mut array = || -> Vec<f32> {
+                (0..len)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 17;
+                        x ^= x << 5;
+                        x as f32 / u32::MAX as f32 - 0.5
+                    })
+                    .collect()
+            };
+            let mut sums: Sums = vec![[0.0; 8]; len];
+            let mut at: Sums = vec![[0.0; 8]; len];
+            let mut unused = vec![0.0; g.interior_len()];
+            for _ in 0..2 {
+                let mut adjoint = s.at_rest();
+                (adjoint.fields.vx, adjoint.fields.vy, adjoint.fields.vz) =
+                    (array(), array(), array());
+                let strains: [[Vec<f32>; 6]; 2] =
+                    std::array::from_fn(|_| std::array::from_fn(|_| array()));
+                let [before, after]: [[Vec<f32>; 3]; 2] =
+                    std::array::from_fn(|_| std::array::from_fn(|_| array()));
+                let (b, a) = (
+                    before.each_ref().map(Vec::as_slice),
+                    after.each_ref().map(Vec::as_slice),
+                );
+                let [adjoint_strain, strain] = &strains;
+                correlate(
+                    s,
+                    &adjoint,
+                    &mut sums,
+                    &mut unused,
+                    [adjoint_strain, strain],
+                    b,
+                    a,
+                );
+                let back = adjoint.fields.velocities();
+                let [nx, ny, nz] = g.n;
+                for k in 0..nz {
+                    for j in 0..ny {
+                        for i in 0..nx {
+                            let p = g.idx(i, j, k);
+                            let held: [f32; 9] = std::array::from_fn(|c| {
+                                if c < 3 {
+                                    back[c][p]
+                                } else {
+                                    adjoint_strain[c - 3][p]
+                                }
+                            });
+                            correlate_at(
+                                s,
+                                k,
+                                &mut at[p],
+                                &held,
+                                std::array::from_fn(|c| strain[c][p]),
+                                std::array::from_fn(|c| a[c][p] - b[c][p]),
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(sums.iter().any(|sum| sum.iter().all(|&v| v != 0.0)));
+            assert!(sums == at, "free surface {surface}");
+        }
     }
 
     /// The AVX2 loops give the plain loops' traces and gradients bit for bit (crate::simd),
