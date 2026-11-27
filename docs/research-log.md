@@ -4497,15 +4497,74 @@ or better. In the inversion's unknowns, at zero residual the full and Gauss–Ne
 are the same bit for bit; from a start 5% slow in $v_s$ and 3% light, $u^T H v$ and
 $v^T H u$ agree to $1.3 \times 10^{-8}$ and $Hu$ is $1.9 \times 10^{-2}$ from $J^T W J u$.
 
+**Against Stokes's full space** (`gauss_newton_products_against_born` in
+`tests/analytic_inversion.rs`, 6 minutes). The Jacobian of the 2026-11-24 entry, built from
+Stokes's solution for 125 trilinear hats of $v_s$ around the target, gives $J^T J c$; the
+inversion's Gauss–Newton product of the hats' nodal values, taken back to the hats
+($P^T H P c$), against it, for the truth's Gaussian, the centre's hat and two random sets:
+$1.6 \times 10^{-5}$ to $2.8 \times 10^{-5}$ with $J$ sampling the model as the grid does
+(the quadratic forms $c^T P^T H P c$ to $10^{-6}$–$2.5 \times 10^{-5}$), and 1.3–3.3% against
+the continuous Born integral's ($J$ by the nodes' quadrature), about twice what that sampling
+moves the Born data (0.83%). So in a full space the product is the analytic one to the
+wavefields' error, and what is left is how the grid samples the model.
+
+**Against Lamb's problem** (`hessian_against_lambs_problem` in `tests/accuracy.rs`, `just
+accuracy hessian_against_lambs_problem`, 20 minutes). The survey of "The free surface against
+Lamb's problem" (a vertical force on a Poisson solid, $v_z$ on the surface 150–330 m away),
+with the half-space's speeds ($v_p$ and $v_s$ together, so it stays a Poisson solid) and its
+density changed uniformly, every node and the layers' too. Pekeris's closed form gives the
+traces' derivatives (five-point differences in the speeds, in f64; $-d$ for density exactly,
+since $d \propto 1/\rho$ at fixed speeds) and the L2 misfit's 2 × 2 Hessian,
+$\chi''_{ij} = w \langle \partial_i d, \partial_j d \rangle + w \langle d - d_{\text{obs}},
+\partial_{ij} d \rangle$, against Pekeris's data for a solid 2% faster and 1% denser
+($w = 1/\lVert d_{\text{obs}} \rVert^2$; the residual is 40.7% of the data). The solver's own
+derivatives along the same directions come from five-point differences of its traces
+($h = 10^{-2}$; for density the scheme scales exactly as the solid does), and the solver's
+Hessian entries from those, with Pekeris's data and with its own for the faster, denser solid.
+
+| | 10 m | 5 m | 5 m, `surface_slope` |
+|---|---|---|---|
+| Traces against Pekeris's | 15.5–28.2% | 6.4–9.5% | 4.3–8.2% |
+| $\partial d / \partial(\text{speeds})$ against Pekeris's | 17.7–34.7% | 6.8–11.5% | 5.4–10.6% |
+| Born against the solver's derivative | $0.8$–$1.6 \times 10^{-3}$ | $1.1$–$2.0 \times 10^{-3}$ | $1.1$–$2.1 \times 10^{-3}$ |
+| Products against the solver's entries | $2$–$6 \times 10^{-4}$ | $3$–$6 \times 10^{-4}$ | $3$–$6 \times 10^{-4}$ |
+| Solver's residual against Pekeris's data | 24.2% | 37.1% | 35.1% |
+| $H$ (speeds², speeds–ρ, ρ²) against Pekeris's | +0.27, −33, +4.2% | +5.0, −3.9, +12.7% | −0.64, −11, −3.8% |
+| its Gauss–Newton part | +0.17, +4.0, +7.4% | +7.8, +9.4, +9.2% | −2.9, −1.9, −0.52% |
+| its second-order part | +2.1, −46, −8.1% | −70, −8.5, +26% | +53, −15, −16% |
+| $H$ with the solver's own data | +0.84, +1.5, +6.3% | +8.0, +8.3, +9.1% | −2.7, −2.5, −0.86% |
+| its second-order part | +15, +0.63, +2.5% | −2.7, +7.9, +8.6% | +7.8, −2.7, −2.2% |
+
+Four things. (1) The Born run and the products are the solver's own derivatives to
+$10^{-3}$ and a few $10^{-4}$; against the $10^{-5}$ of the physics test, the rest is the
+layers, which a uniform change fills, and where the Born run's and the second adjoint run's
+stress sources lack the CPML's memory terms (density's Born run is $1.1$–$1.5 \times
+10^{-2}$ of its derivative, about the same absolute error on a derivative twenty times
+smaller). An inversion keeps its unknowns outside the layers, where both are exact. (2) The
+free surface's error carries into $J$ about as it is: the derivative is 1.1–1.3 times as far
+from Pekeris's as the traces. (3) The Gauss–Newton part is off by about the traces' amplitude
+error, squared: +7.8 to +9.4% at 5 m from the mirrored $v_z$'s kink (the Rayleigh wave's
+swing 5.2–5.4% too large), within 0.5–2.9% with `surface_slope`; at 10 m it is close only
+because the dispersion's loss of peak offsets the kink's larger excess. (4) The second-order
+part correlates the residual with $\partial_{ij} d$, and against Pekeris's data the solver's
+residual holds its own error, as large as a good part of the true residual: that part is then
+8–70% off, and the whole entry up to 33% (10 m, speeds–density). With the solver's own data,
+whose residual leaves its error out, the second-order part is within 0.6–15% and the entries
+within about the Gauss–Newton part's error. So with real data the second-order terms are only
+as good as the forward modelling, which they amplify; the Gauss–Newton part degrades
+gracefully.
+
 **Decision.** The illumination stays the default preconditioner; the diagonal is opt-in
 (`hessian_probes`, default 0) and not worth its runs on this survey. The products are there
-for what needs them: truncated-Newton steps, point-spread functions and resolution, and
-checking against analytic answers (Lamb's problem, Stokes's full space), which comes next.
+for what needs them: truncated-Newton steps, point-spread functions and resolution. Where the
+forward error is a fair part of the residual (near a free surface at the default sampling),
+prefer the Gauss–Newton product, or check the second-order part against its size first.
 
 **Reproduce.** `just study gauss_newton_diagonal`; `cargo test --release --test hessian_study
 -- --ignored --nocapture --test-threads 1`; `just physics
 the_born_run_is_the_derivative_and_the_gradient_its_transpose`, `just physics
-the_hessian_product_is_the_gradients_derivative`; `just unit hessian`.
+the_hessian_product_is_the_gradients_derivative`; `just unit hessian`; `just accuracy hessian_against_lambs_problem`; `cargo test --release --test
+analytic_inversion gauss_newton_products_against_born -- --ignored --nocapture`.
 
 ## Open questions
 

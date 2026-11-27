@@ -607,3 +607,241 @@ fn the_free_surface_excess_by_frequency_and_depth() {
         }
     }
 }
+
+/// The Born run and the Hessian against Lamb's problem (`just accuracy
+/// hessian_against_lambs_problem`). For uniform changes of the half-space, of its speeds (vp
+/// and vs together, so that it stays a Poisson solid) and of its density, Pekeris's closed
+/// form gives the traces' derivatives and the L2 misfit's 2 × 2 Hessian,
+/// χ″_ij = w ⟨∂_i d, ∂_j d⟩ + w ⟨d - d_obs, ∂_ij d⟩, here against observed data from Pekeris
+/// for a solid 2% faster and 1% denser (w = 1/‖d_obs‖²). The solver's Born run and Hessian
+/// products (every node changed, the layers' too) are set beside it, and beside the solver's
+/// own derivatives along the same directions: central differences of its traces for the
+/// speeds (extrapolated, Δt, the layers and the operator held), and the exact scaling for
+/// density (d ∝ 1/ρ at fixed speeds, in the scheme as in the solid). So the error the free
+/// surface puts into the traces can be followed into J and H, at 10 m and 5 m, and at 5 m
+/// with `surface_slope`; and again with the solver's own data for the faster, denser solid,
+/// which leaves its error out of the residual. About 20 minutes.
+///
+/// Measured (the research log's "The Hessian", 2026-11-27): the speeds' derivative is 1.1–1.3
+/// times as far from Pekeris's as the traces are (17.7–34.7% at 10 m, 6.8–11.5% at 5 m,
+/// 5.4–10.6% with the slope); the Born run and the products are the solver's own to 0.8–2.1e-3
+/// and 2–6e-4, the layers' share (density's Born run 1.1–1.5e-2 of its smaller derivative).
+/// The Gauss–Newton entries are off by about the traces' amplitude error squared (+7.8 to
+/// +9.4% at 5 m, -2.9 to -0.5% with the slope); the second-order ones, which correlate the
+/// residual, by 8–70% against Pekeris's data, whose residual holds the solver's error, and
+/// by 0.6–15% against its own.
+#[test]
+#[ignore]
+fn hessian_against_lambs_problem() {
+    use common::lamb::{Lamb, survey};
+    use vibe_rations::born::{Change, born};
+    use vibe_rations::config::Config;
+    use vibe_rations::hessian::hessian_product;
+    use vibe_rations::model::Model;
+
+    const FASTER: f64 = 0.02;
+    const DENSER: f64 = 0.01;
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let rel = |a: f64, b: f64| (a - b) / b.abs();
+    for (h, slope) in [(10.0, false), (5.0, false), (5.0, true)] {
+        let started = Instant::now();
+        let label = format!("{h} m{}", if slope { ", surface slope" } else { "" });
+        let text = survey::config(h, "", "");
+        let text = if slope {
+            text.replace(
+                "free_surface = true",
+                "free_surface = true\nsurface_slope = true",
+            )
+        } else {
+            text
+        };
+        let mut cfg = Config::from_toml(&text).unwrap();
+        let base = std::path::Path::new(".");
+        let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+        let sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+        cfg.time.dt = Some(sim.solver.dt);
+        cfg.time.courant = None;
+        cfg.boundary.pml_vp_max = Some(model.vp_range()[1]);
+        cfg.scheme.optimised_for = Some(sim.info.points_per_wavelength.max(2.0 / 0.9));
+        let times = sim.sample_times();
+        drop(sim);
+
+        // Pekeris's traces for the speeds and density scaled by 1 + a and 1 + b, receiver by
+        // receiver, at the solver's sample times.
+        let exact = |a: f64, b: f64| -> Vec<f64> {
+            let lamb = Lamb {
+                vs: survey::vs() * (1.0 + a),
+                rho: survey::RHO * (1.0 + b),
+                ..survey::lamb()
+            };
+            survey::RECEIVERS
+                .iter()
+                .flat_map(|p| {
+                    let r = norm(sub(*p, survey::SOURCE));
+                    times
+                        .iter()
+                        .map(move |&t| lamb.velocity(r, t))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let observed = exact(FASTER, DENSER);
+        let w = 1.0 / dot(&observed, &observed);
+        let observed32: Vec<f32> = observed.iter().map(|&v| v as f32).collect();
+        // Five-point differences in a, from traces at a = ±s, ±2s.
+        let differences = |at: &dyn Fn(f64) -> Vec<f64>, s: f64| {
+            let (m2, m1, z, p1, p2) = (at(-2.0 * s), at(-s), at(0.0), at(s), at(2.0 * s));
+            let first: Vec<f64> = (0..z.len())
+                .map(|i| (8.0 * (p1[i] - m1[i]) - (p2[i] - m2[i])) / (12.0 * s))
+                .collect();
+            let second: Vec<f64> = (0..z.len())
+                .map(|i| {
+                    (-p2[i] + 16.0 * p1[i] - 30.0 * z[i] + 16.0 * m1[i] - m2[i]) / (12.0 * s * s)
+                })
+                .collect();
+            (z, first, second)
+        };
+        // The 2 × 2 Hessian, speeds then density, from d, ∂_a d and ∂_aa d, with density's
+        // derivatives from d ∝ 1/ρ: ∂_b d = -d, ∂_bb d = 2d, ∂_ab d = -∂_a d.
+        let hessian = |d: &[f64], da: &[f64], daa: &[f64], observed: &[f64]| {
+            let r: Vec<f64> = d.iter().zip(observed).map(|(d, o)| d - o).collect();
+            let db: Vec<f64> = d.iter().map(|v| -v).collect();
+            let dab: Vec<f64> = da.iter().map(|v| -v).collect();
+            let dbb: Vec<f64> = d.iter().map(|v| 2.0 * v).collect();
+            let gn = [
+                [w * dot(da, da), w * dot(da, &db)],
+                [w * dot(&db, da), w * dot(&db, &db)],
+            ];
+            let second = [
+                [w * dot(&r, daa), w * dot(&r, &dab)],
+                [w * dot(&r, &dab), w * dot(&r, &dbb)],
+            ];
+            (gn, second)
+        };
+        let (d, da, daa) = differences(&|a| exact(a, 0.0), 1e-3);
+        let (gn_exact, second_exact) = hessian(&d, &da, &daa, &observed);
+
+        // The solver's traces for the speeds scaled by 1 + a everywhere.
+        let scaled = |a: f64| {
+            let mut m = model.clone();
+            m.vp.iter_mut()
+                .for_each(|v| *v = (*v as f64 * (1.0 + a)) as f32);
+            m.vs.iter_mut()
+                .for_each(|v| *v = (*v as f64 * (1.0 + a)) as f32);
+            m
+        };
+        let traces = |m: Model| -> Vec<f64> {
+            let mut sim = Simulation::with_model(&cfg, m).unwrap();
+            sim.run(None, false).unwrap();
+            sim.receivers.traces[0].iter().map(|&v| v as f64).collect()
+        };
+        let (s, sa, saa) = differences(&|a| traces(scaled(a)), 1e-2);
+        let (gn_solver, second_solver) = hessian(&s, &sa, &saa, &observed);
+        // The same with the solver's own data for the faster, denser solid: its error left
+        // out of the residual.
+        let own = {
+            let mut m = scaled(FASTER);
+            m.rho
+                .iter_mut()
+                .for_each(|v| *v = (*v as f64 * (1.0 + DENSER)) as f32);
+            traces(m)
+        };
+        let (_, second_own) = hessian(&s, &sa, &saa, &own);
+
+        // Born runs and Hessian products for the two directions.
+        let n = model.vp.len();
+        let to_f64 = |v: &[f32]| v.iter().map(|&x| x as f64).collect::<Vec<f64>>();
+        let speeds_up = [to_f64(&model.vp), to_f64(&model.vs), vec![0.0; n]];
+        let denser = [vec![0.0; n], vec![0.0; n], to_f64(&model.rho)];
+        let directions = [speeds_up, denser];
+        let mut jacobian = Vec::new();
+        let mut products = Vec::new();
+        for speeds in &directions {
+            let speeds = speeds.each_ref().map(Vec::as_slice);
+            let change = Change::from_velocities(&model, speeds);
+            let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+            jacobian.push(to_f64(&born(&mut sim, &change).unwrap().traces[0]));
+            let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+            let product = hessian_product(
+                &mut sim,
+                &change,
+                |r| {
+                    let res = r.traces[0]
+                        .iter()
+                        .zip(&observed32)
+                        .map(|(&s, &o)| (w * (s as f64 - o as f64)) as f32)
+                        .collect();
+                    Ok((0.0, vec![res]))
+                },
+                |d| Ok(vec![d[0].iter().map(|&x| (w * x as f64) as f32).collect()]),
+                None,
+            )
+            .unwrap();
+            products.push(product.velocities(&model, speeds));
+        }
+        let mut full = [[0.0; 2]; 2];
+        for (i, u) in directions.iter().enumerate() {
+            for (j, p) in products.iter().enumerate() {
+                full[i][j] = (0..3).map(|c| dot(&u[c], &p[c])).sum();
+            }
+        }
+        let gn_born = [
+            [
+                w * dot(&jacobian[0], &jacobian[0]),
+                w * dot(&jacobian[0], &jacobian[1]),
+            ],
+            [
+                w * dot(&jacobian[1], &jacobian[0]),
+                w * dot(&jacobian[1], &jacobian[1]),
+            ],
+        ];
+
+        println!(
+            "Lamb's problem, {label} ({:.0} s):",
+            started.elapsed().as_secs_f64()
+        );
+        let samples = times.len();
+        for (k, p) in survey::RECEIVERS.iter().enumerate() {
+            let at = k * samples..(k + 1) * samples;
+            let r = norm(sub(*p, survey::SOURCE));
+            println!(
+                "  {r:5.1} m: traces against Pekeris {:.2}%; ∂d/∂(speeds): solver's against \
+                 Pekeris's {:.2}%, Born against the solver's {:.1e}",
+                100.0 * misfit(&s[at.clone()], &d[at.clone()]),
+                100.0 * misfit(&sa[at.clone()], &da[at.clone()]),
+                misfit(&jacobian[0][at.clone()], &sa[at.clone()]),
+            );
+        }
+        println!(
+            "  ∂d/∂(density): Born against -d {:.1e}; the residual's size: Pekeris's {:.2}%, \
+             the solver's against Pekeris's data {:.2}%, against its own {:.2}%",
+            misfit(&jacobian[1], &s.iter().map(|v| -v).collect::<Vec<_>>()),
+            100.0 * misfit(&d, &observed),
+            100.0 * misfit(&s, &observed),
+            100.0 * misfit(&s, &own),
+        );
+        let names = ["speeds, speeds", "speeds, density", "density, density"];
+        for (name, (i, j)) in names.iter().zip([(0, 0), (0, 1), (1, 1)]) {
+            let (exact, solver) = (
+                gn_exact[i][j] + second_exact[i][j],
+                gn_solver[i][j] + second_solver[i][j],
+            );
+            println!(
+                "  H({name}): Pekeris {exact:.5e} (Gauss–Newton {:.5e}, second order {:+.5e}); \
+                 the solver's {:+.2}% off it (GN {:+.2}%, second order {:+.2}%); the product \
+                 {:.1e} from the solver's, Born's GN {:.1e}, the off-diagonal products agree to \
+                 {:.1e}; with the solver's own data {:+.2}% (second order {:+.2}%)",
+                gn_exact[i][j],
+                second_exact[i][j],
+                100.0 * rel(solver, exact),
+                100.0 * rel(gn_solver[i][j], gn_exact[i][j]),
+                100.0 * rel(second_solver[i][j], second_exact[i][j]),
+                rel(full[i][j], solver),
+                rel(gn_born[i][j], gn_solver[i][j]),
+                rel(full[0][1], full[1][0]),
+                100.0 * rel(gn_solver[i][j] + second_own[i][j], exact),
+                100.0 * rel(second_own[i][j], second_exact[i][j]),
+            );
+        }
+    }
+}

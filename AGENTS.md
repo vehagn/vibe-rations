@@ -182,7 +182,13 @@ doesn't show.
   diagonal from random adjoint probes, as a preconditioner, was worse than the illumination
   in every sphere case with the top fixed: unbalanced it hands vp a large share (cross-talk),
   balanced its shape, falling hundreds of times faster with depth, still leaves vs
-  unrecovered. Opt-in, not a default.
+  unrecovered. Opt-in, not a default. Against analytic answers: in Stokes's full space the
+  Gauss–Newton product is $J^T J$ from Stokes's solution to $3 \times 10^{-5}$; against
+  Lamb's problem the second-order part, which correlates the residual, is 8–70% off when the
+  data are Pekeris's, since the residual then holds the free surface's error, and 0.6–15%
+  with the solver's own data, so trust it only where the forward error is small next to the
+  residual. A uniform change fills the layers, where the Born and second adjoint runs' stress
+  sources lack the CPML's memory terms ($10^{-3}$ there, against $10^{-5}$ outside).
 - **Rebuilding inside a surface** (`src/surface.rs`, `Strategy::Surface`, `gradient
   --surface`; the log's "Rebuilding inside a surface", 2026-11-27). Aaker et al.'s method
   (GJI 2020, `aaker2020gji`, not the GPU paper `aaker2020`), kept for comparison with the
