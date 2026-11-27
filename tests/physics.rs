@@ -1742,10 +1742,11 @@ fn hessian_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
 /// water, and one on the seabed.
 ///
 /// Measured, ‖block - products‖ / ‖products‖ over the matrix: order 8, the Hessian 6.8e-8
-/// and the term 6.7e-8; walls and water 2.1e-7 and 3.1e-8. The block's own asymmetry
-/// 3.7e-9 and 2.0e-9, against the products' few 10⁻⁷: its second-order part is B + Bᵀ by
-/// construction, and JᵀWJ inner products in double precision. Gauss–Newton is 0.77 and 2.6
-/// of the Hessian apart, so the second-order part is large here.
+/// and the term 6.7e-8; walls and water 2.1e-7 and 3.1e-8; in 2D 1.2e-7 and 2.7e-8, and
+/// 5.7e-8 and 7.2e-8. The block's own asymmetry 3.7e-9 and 2.0e-9 (1.5e-9 and 6.8e-9 in
+/// 2D), against the products' few 10⁻⁷: its second-order part is B + Bᵀ by construction, and
+/// JᵀWJ inner products in double precision. Gauss–Newton is 0.77 and 2.6 of the Hessian
+/// apart (0.64 and 0.15 in 2D), so the second-order part is large here.
 #[test]
 fn the_hessian_between_nodes_is_the_products() {
     hessian_block_check(
@@ -1757,6 +1758,16 @@ fn the_hessian_between_nodes_is_the_products() {
         "walls and water",
         &[[15, 14, 9], [15, 15, 10], [12, 16, 0], [20, 12, 2]],
         &walls_and_water,
+    );
+    hessian_block_check(
+        "order 8 in 2D",
+        &[[20, 0, 12], [21, 0, 12], [21, 0, 13], [30, 0, 20]],
+        &|sphere| planar(&gradient_model(8, sphere)),
+    );
+    hessian_block_check(
+        "walls and water in 2D",
+        &[[15, 0, 9], [16, 0, 10], [12, 0, 0], [20, 0, 2]],
+        &|sphere| planar(&walls_and_water(sphere)),
     );
 }
 

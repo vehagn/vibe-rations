@@ -666,16 +666,19 @@ impl Solver {
         let mut d = [[0.0f32; 1]; 9];
         let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = &mut d;
         st.backward(d0, vx, p, 1, ih[0]);
-        st.backward(d1, vy, p, sy, ih[1]);
         if !(self.free_surface && kz == 0) {
             st.backward(d2, vz, p, sz, ih[2]);
         }
-        st.forward(d3, vx, p, sy, ih[1]);
         st.forward(d4, vy, p, 1, ih[0]);
         st.forward(d5, vx, p, sz, ih[2]);
         st.forward(d6, vz, p, 1, ih[0]);
         st.forward(d7, vy, p, sz, ih[2]);
-        st.forward(d8, vz, p, sy, ih[1]);
+        // Nothing varies along y on a 2D grid, which has no halo there to read.
+        if g.spans(1) {
+            st.backward(d1, vy, p, sy, ih[1]);
+            st.forward(d3, vx, p, sy, ih[1]);
+            st.forward(d8, vz, p, sy, ih[1]);
+        }
         [
             d[0][0],
             d[1][0],
@@ -2391,8 +2394,14 @@ mod tests {
     /// and without, in layers too, since neither takes the CPML's terms.
     #[test]
     fn a_positions_strain_rate_is_the_grids() {
-        let g = Grid::new([16, 14, 12], [10.0, 5.0, 4.0]).with_halo(4);
-        for surface in [true, false] {
+        let three_d = Grid::new([16, 14, 12], [10.0, 5.0, 4.0]).with_halo(4);
+        let two_d = Grid::new([16, 1, 12], [10.0, 5.0, 4.0]).with_halo(4);
+        for (g, surface) in [
+            (three_d, true),
+            (three_d, false),
+            (two_d, true),
+            (two_d, false),
+        ] {
             let model = Model::homogeneous(g, 3000.0, 1700.0, 2500.0);
             let s = Solver::new(model, 1e-4, 3, surface, &pml())
                 .with_stencil(Stencil::taylor(8).unwrap());
@@ -2420,7 +2429,9 @@ mod tests {
                     }
                 }
             }
-            assert!(out.iter().all(|e| e[g.idx(8, 7, 5)] != 0.0));
+            // Every component but, on a 2D grid, those with a derivative along y alone.
+            let alive = out.iter().filter(|e| e[g.idx(8, 0, 5)] != 0.0).count();
+            assert_eq!(alive, if g.is_2d() { 5 } else { 6 });
         }
     }
 
