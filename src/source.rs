@@ -202,7 +202,9 @@ impl Source {
         self.op.inject(fields, -self.value(n, t));
     }
 
-    fn value(&self, n: usize, t: f64) -> f32 {
+    /// The wavelet's value during step `n`, at time `t` (see [`Source::offset`]): what
+    /// [`Source::inject`] adds per unit of its operator.
+    pub fn value(&self, n: usize, t: f64) -> f32 {
         let value = match &self.series {
             Some(series) => series.get(n).copied().unwrap_or(0.0),
             None => self.wavelet.value(t),

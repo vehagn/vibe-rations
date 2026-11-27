@@ -196,24 +196,43 @@ struct StrategyArgs {
     /// instead of replaying it from checkpoints: less memory, one more pass, and exact only up
     /// to single-precision round-off. With `memory --invert`, as `[inversion] reconstruct =
     /// true` does.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "surface")]
     reconstruct: bool,
-    /// With --reconstruct: steps per segment, each but the last replayed from a checkpoint to
-    /// save its band (by default the length that needs least memory; the run's length or more
-    /// saves the band for the whole run and replays nothing).
-    #[arg(long, requires = "reconstruct")]
+    /// Rebuild the forward wavefield inside a closed surface one node wide from the velocities
+    /// and tractions recorded on it, injected as sources (Aaker et al. 2020): less memory than
+    /// --reconstruct, approximate, and the gradient means something only inside the surface.
+    /// For comparisons; `gradient` and `memory --gradient` only.
+    #[arg(long)]
+    surface: bool,
+    /// With --surface: nodes between the absorbing layers and the surface (by default, and at
+    /// least, the stencil's half-length).
+    #[arg(long, requires = "surface")]
+    inset: Option<usize>,
+    /// With --reconstruct or --surface: steps per segment, each but the last replayed from a
+    /// checkpoint to save its band or surface (by default the length that needs least memory;
+    /// the run's length or more saves it for the whole run and replays nothing).
+    #[arg(long)]
     segment: Option<usize>,
 }
 
 impl StrategyArgs {
-    fn strategy(&self) -> Strategy {
-        if self.reconstruct {
+    fn strategy(&self) -> Result<Strategy> {
+        ensure!(
+            self.segment.is_none() || self.reconstruct || self.surface,
+            "--segment goes with --reconstruct or --surface"
+        );
+        Ok(if self.surface {
+            Strategy::Surface {
+                segment: self.segment,
+                inset: self.inset,
+            }
+        } else if self.reconstruct {
             Strategy::Reconstruct {
                 segment: self.segment,
             }
         } else {
             Strategy::Checkpoints { every: None }
-        }
+        })
     }
 }
 
@@ -415,6 +434,11 @@ fn run() -> Result<()> {
                     "an inversion rebuilds in segments of the length that needs least memory; \
                      --segment is for --gradient"
                 );
+                ensure!(
+                    !strategy.surface,
+                    "an inversion rebuilds from the band around the layers; --surface is for \
+                     --gradient"
+                );
                 let inversion = cfg
                     .inversion
                     .as_mut()
@@ -422,7 +446,7 @@ fn run() -> Result<()> {
                 inversion.reconstruct |= strategy.reconstruct;
             }
             let kind = match (gradient, invert) {
-                (true, _) => Kind::Gradient(strategy.strategy()),
+                (true, _) => Kind::Gradient(strategy.strategy()?),
                 (_, true) => Kind::Invert,
                 _ => Kind::Run,
             };
@@ -438,6 +462,10 @@ fn run() -> Result<()> {
                 Kind::Gradient(Strategy::Reconstruct { .. }) => Some((
                     Kind::Gradient(Strategy::Checkpoints { every: None }),
                     "without --reconstruct".to_string(),
+                )),
+                Kind::Gradient(Strategy::Surface { .. }) => Some((
+                    Kind::Gradient(Strategy::Reconstruct { segment: None }),
+                    "with --reconstruct instead".to_string(),
                 )),
                 Kind::Invert => {
                     let inversion = cfg.inversion.as_mut().expect("checked above");
@@ -593,13 +621,14 @@ fn run() -> Result<()> {
             balance,
             strategy,
         } => {
-            let strategy = strategy.strategy();
+            let strategy = strategy.strategy()?;
             let (cfg, mut sim, planned) = load(&config, Kind::Gradient(strategy))?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
             let (how, flag) = match strategy {
                 Strategy::Checkpoints { .. } => ("the checkpoints", ""),
                 Strategy::Reconstruct { .. } => ("the band around the layers", " --reconstruct"),
+                Strategy::Surface { .. } => ("the surface inside the layers", " --surface"),
             };
             eprintln!(
                 "gradient  {} at most, with {how} and the adjoint run; \
@@ -661,6 +690,7 @@ fn run() -> Result<()> {
             let how = match run.strategy {
                 Strategy::Checkpoints { .. } => "checkpoints every",
                 Strategy::Reconstruct { .. } => "rebuilt in segments of",
+                Strategy::Surface { .. } => "rebuilt inside the surface in segments of",
             };
             eprintln!(
                 "misfit {:.6e}; {how} {} steps; {} at most",

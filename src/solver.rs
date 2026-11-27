@@ -552,6 +552,25 @@ impl Solver {
         self.step = n;
     }
 
+    /// Advances the stresses alone, as the second half of [`Solver::step_with`] does, with
+    /// `moment` adding to them, without counting a step: the first half step of a run that
+    /// starts with stress and velocity at the same time (the Kirchhoff–Helmholtz rebuild's,
+    /// [`crate::surface`]).
+    pub fn advance_stress_with(&mut self, moment: impl FnOnce(&mut Fields)) {
+        self.update_stress(1.0, true);
+        moment(&mut self.fields);
+        if self.free_surface {
+            self.mirror_stress();
+        }
+    }
+
+    /// Clears the absorbing layers' memory, as for a run starting from the fields it holds.
+    pub fn clear_layers(&mut self) {
+        for p in self.psi_v.iter_mut().chain(&mut self.psi_s) {
+            p.fill(0.0);
+        }
+    }
+
     /// The nodes outside the absorbing layers along x, y and z, where the update is the same
     /// at every node and can be taken back.
     pub fn interior(&self) -> [std::ops::Range<usize>; 3] {

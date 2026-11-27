@@ -4170,6 +4170,205 @@ literature (staging $v_p$ before $v_s$, $v_z$ before $v_x$); the plan's step 8 m
 `slowness_shallow_first_l2`; about 2.1 hours each on gauss), after `convert.sh`;
 `cargo test --release --lib frees_only` for `fixed_below`.
 
+## 2026-11-27 — Rebuilding inside a surface
+
+**Question.** Aaker et al. [@aaker2020gji] rebuild the forward wavefield inside a closed
+surface one cell wide by injecting the particle velocities and tractions recorded on it: six
+values per surface node and step, the velocity–stress form of Mittet's Kirchhoff-integral
+reconstruction [@mittet1994], equivalent to Vasmel and Robertsson's multiple point sources
+[@vasmel2016]. The band (2026-11-20) saves about $6L$ values per face node instead, so that
+each step can be undone exactly. How do the two compare in the rebuilt field's and the
+gradient's accuracy, in memory and in time? Aaker et al. name the surface's corners as the
+largest error and warn against placing it near a fluid–solid contact.
+
+**Method** (`src/surface.rs`, `Strategy::Surface`, `gradient --surface [--inset N]
+[--segment N]`). *The sources, discretely.* The field truncated to the box $\Omega$, $w = Xu$
+with $X$ the box's indicator ($\frac12$ on its faces), satisfies the solver's own equations
+plus the commutators of $X$ with the derivatives, $B\,[X, D]\,\sigma$ and $C\,[X, D]\,v$,
+which live only around the faces. In the continuum they are a force
+$\mathbf n \cdot \sigma\,\delta_{\partial\Omega}$ and a stress source
+$c : (\mathbf v \otimes \mathbf n)\,\delta_{\partial\Omega}$, which need only $\mathbf v$ and
+$\mathbf n \cdot \sigma$ on the surface. On the grid the commutator of an order-$2L$ stencil
+spreads over $2L$ nodes across the face, so the one-node surface stands in for it: each
+recorded value is read onto the face's node plane with the stencil's own interpolation along
+the normal (`Solver::stagger_weights`; each field keeps its own lattice along the face) and
+spread back with its transpose, as Aaker et al. shift values with interpolators of the
+stencil's length and optimisation. Each value's share is the product of the masks along the
+three axes, so edges take $\frac14$ and corners $\frac18$ of a node-lattice value without
+special cases. At second order the commutator has exactly this support, so the rebuild is
+exact; at higher orders it leaks. *Time reversal.* With $\tilde v = v$ and
+$\tilde\sigma = -\sigma$, a forward step of $(\tilde v, \tilde\sigma)$ undoes a step of
+$(v, \sigma)$, if the sources are withdrawn (forces) or added (moments) instead, so the
+rebuild runs the solver's ordinary step, layers, sponge and mirrors included; what leaks out
+of $\Omega$ the layers absorb. Record $R_n$ is the state before forward step $n$: the
+reversed step for $n$ takes its forces from $R_n$'s stresses and its stress sources (for step
+$n - 1$'s stress update) from $R_n$'s velocities. A segment starts from its end state,
+exact, truncated to $\Omega$, with the CPML memory cleared and a lone stress update, so it
+needs $k + 1$ records. The physical sources are truncated by the same mask. *Along a free
+surface* the box is open at the top: the mirrors carry the truncated field as they carry the
+whole one, and on the surface plane the stress sources use the plane-stress moduli.
+*Placement.* The surface sits at least $L$ nodes inside the layers (`--inset`, by default
+$L$), so that nothing it injects reaches them; the gradient means something only $L + 1$
+nodes inside it (`Bounds::region`), where the strain rates and material averages read
+nothing on or outside the faces, so the inset and $L + 1$ nodes more (at least $2L + 1$)
+inside each absorbing side are lost to it; and
+the sources must sit well inside (a force two nodes from a face gave errors of 0.3). The
+memory plan counts the records and operators exactly
+(`counts_what_a_rebuilding_gradient_run_allocates`).
+
+**Results: second order is exact** (`gradient::tests::surface_gradients_approach_the_replay`;
+a $44 \times 40 \times 40$ grid, 10 m, two layers, a sphere, a force and an explosion at
+18 Hz, 0.25 s). The largest difference from the replay's gradient, inside the region,
+relative to each parameter's largest value: order 2 with Taylor coefficients
+$4.5 \times 10^{-8}$–$1.4 \times 10^{-7}$, along a free surface and with layers all round,
+default segments or the whole run: round-off, which checks the masks, the signs, the time
+pairing, the sources' truncation and the free surface. Order 4 (optimised):
+$3.4 \times 10^{-4}$–$1.6 \times 10^{-3}$; order 8: $1.1$–$4.0 \times 10^{-3}$ along a free
+surface, $4.5 \times 10^{-4}$–$1.5 \times 10^{-3}$ all round.
+
+**Results: the rebuilt field** (`just drift surface`, `tests/reconstruction.rs`; a
+$64 \times 56 \times 48$ grid, 10 m, 8-node layers, two layers, a sphere, a force and an
+explosion at 14 Hz, `optimised_for = 4`). The largest difference from the run it retraces,
+at nodes one or more inside the faces, relative to each array's peak over the run, after
+stepping back the given number of steps from the end. By run length (order 8, $C = 0.85$,
+free surface, 2,926 steps):
+
+| Steps back | 1 | 10 | 100 | 300 | 1000 | 2000 | 2926 |
+|---|---|---|---|---|---|---|---|
+| Band | $5.4 \times 10^{-12}$ | $5.4 \times 10^{-12}$ | $8.7 \times 10^{-12}$ | $1.5 \times 10^{-11}$ | $2.7 \times 10^{-11}$ | $8.3 \times 10^{-11}$ | $4.4 \times 10^{-7}$ |
+| Surface | $1.1 \times 10^{-6}$ | $1.1 \times 10^{-6}$ | $6.7 \times 10^{-7}$ | $8.2 \times 10^{-7}$ | $6.2 \times 10^{-7}$ | $1.4 \times 10^{-5}$ | $2.5 \times 10^{-4}$ |
+
+The largest over the whole rebuild: band $4.5 \times 10^{-7}$, surface $6.2 \times 10^{-3}$.
+By forward step, with the field's own level:
+
+| Step | 2000 | 1000 | 500 | 300 | 200 | 150 | 100 | 50 | 0 |
+|---|---|---|---|---|---|---|---|---|---|
+| Surface | $9.0 \times 10^{-7}$ | $1.2 \times 10^{-5}$ | $1.8 \times 10^{-4}$ | $4.3 \times 10^{-3}$ | $4.7 \times 10^{-3}$ | $1.5 \times 10^{-3}$ | $5.5 \times 10^{-4}$ | $3.0 \times 10^{-4}$ | $2.5 \times 10^{-4}$ |
+| Field | $1.1 \times 10^{-5}$ | $1.4 \times 10^{-4}$ | $4.3 \times 10^{-3}$ | $6.9 \times 10^{-2}$ | $0.14$ | $0.13$ | $0.84$ | $0.29$ | 0 |
+
+From step 300 on, while the field crosses the faces, the error is 3–9% of the field's level
+at that step: what the surface leaks is a share of what crosses it, not round-off. Earlier,
+with the field still around the sources, what is left of it is $2.5$–$5.5 \times 10^{-4}$,
+since the leakage leaves through the layers. By how far
+inside the surface the nodes lie, all the way back: $6.2 \times 10^{-3}$ (one node or more),
+$1.4 \times 10^{-3}$ (two), $4.6 \times 10^{-4}$ (four), $3.1 \times 10^{-4}$ (six),
+$2.7 \times 10^{-4}$ (nine). By order, 1.2 s, all the way back (band; surface; values a step):
+order 4 $5.6 \times 10^{-7}$, $3.3 \times 10^{-3}$, 45,200; 8 $8.7 \times 10^{-7}$,
+$6.4 \times 10^{-3}$, 38,064; 12 $9.1 \times 10^{-7}$, $7.9 \times 10^{-3}$, 31,504; 16
+$6.4 \times 10^{-7}$, $9.1 \times 10^{-3}$, 25,520 (the box shrinks as the layers' inset
+grows). Higher orders leak more, as the commutator the surface stands in for widens. At order
+8, the surface six and eight nodes in from the layers rather than four: $6.7 \times 10^{-3}$
+and $7.4 \times 10^{-3}$, no better. By the wavelets' frequency, order 8, 1.2 s
+(`surface_drift_with_frequency`): 14, 10 and 7 Hz, 3.1, 4.4 and 6.3 points per S wavelength
+at $2.5 f_0$, give $6.4$, $6.2$ and $5.2 \times 10^{-3}$ all the way back (the band
+$0.9$–$1.7 \times 10^{-6}$). So the leak is not a dispersion error, which would fall fast as
+the waves are better sampled: it is the shape of what is injected, one plane read and spread
+with interpolation weights, against the commutator's own shape over $2L$ nodes, wrong by a
+fixed share of the field at the face whatever its wavelength, and most of it stays within a
+few nodes of the faces. By boundary, order 8, 976 steps (100 and 300 steps
+back, then all the way; the band all the way):
+
+| Boundary | 100 | 300 | All the way | Band |
+|---|---|---|---|---|
+| Layers, free surface | $1.6 \times 10^{-5}$ | $7.3 \times 10^{-5}$ | $6.4 \times 10^{-3}$ | $8.7 \times 10^{-7}$ |
+| Layers all round | $1.8 \times 10^{-7}$ | $3.4 \times 10^{-7}$ | $4.8 \times 10^{-3}$ | $9.8 \times 10^{-7}$ |
+| Rigid walls, free surface | $4.5 \times 10^{-3}$ | $4.9 \times 10^{-3}$ | $6.9 \times 10^{-3}$ | $1.1 \times 10^{-6}$ |
+| Layers, 60 m of water at the surface | $5.6 \times 10^{-6}$ | $2.5 \times 10^{-5}$ | $1.2 \times 10^{-2}$ | $2.5 \times 10^{-6}$ |
+| All round, seabed 60 m (top face 6 nodes below it, in rock) | $1.1 \times 10^{-6}$ | $8.2 \times 10^{-6}$ | $5.0 \times 10^{-3}$ | $7.3 \times 10^{-7}$ |
+| All round, seabed 120 m (on the top face) | $3.3 \times 10^{-6}$ | $6.2 \times 10^{-6}$ | $8.9 \times 10^{-3}$ | $1.2 \times 10^{-6}$ |
+| All round, seabed 150 m (top face 3 nodes above it, in water) | $7.2 \times 10^{-4}$ | $8.0 \times 10^{-4}$ | $4.8 \times 10^{-3}$ | $1.3 \times 10^{-6}$ |
+| All round, seabed 200 m (top face 8 nodes above it, in water) | $1.2 \times 10^{-3}$ | $2.0 \times 10^{-3}$ | $7.8 \times 10^{-3}$ | $3.4 \times 10^{-6}$ |
+
+(With layers all round the force was moved down to 260 m, 14 nodes below the top face; the
+first run, with it two nodes from the face, gave $2.5 \times 10^{-2}$.) Closing the top adds
+four edges and four corners and changes little, so with the masks' shares the corners are
+not the main error here. With rigid walls the leakage comes back: the late error is
+$4.5 \times 10^{-3}$ instead of $1.6 \times 10^{-5}$, so the method needs absorbing layers
+around the surface. Water: with the seabed crossing the side faces (water at the top under
+the free surface) the worst error doubles; with the top face on the seabed it is the largest
+measured; with the top face in the water, the late field (100–300 steps back) is
+$10^{-3}$, thousands of times the solid's; with the face in rock six nodes below the seabed, no
+different from no water. Aaker et al.'s advice holds: keep the faces in the solid, clear of
+the seabed.
+
+**Results: the gradient.** The rebuilt gradients against the replay's at the 20,460 nodes of
+the region (order 8, free surface), with the memory and time of each (4 cores):
+
+| | 976 steps | | | | | 2,926 steps | | | | |
+|---|---|---|---|---|---|---|---|---|---|---|
+| | $v_p$ | $v_s$ | $\rho$ | memory | time | $v_p$ | $v_s$ | $\rho$ | memory | time |
+| Checkpoints | | | | 447 MiB | 13.0 s | | | | 725 MiB | 38.4 s |
+| Band, default segments (122; 209) | $1.5 \times 10^{-7}$ | $1.4 \times 10^{-7}$ | $1.7 \times 10^{-7}$ | 264 MiB | 15.4 s | $3.7 \times 10^{-8}$ | $1.2 \times 10^{-7}$ | $4.6 \times 10^{-8}$ | 411 MiB | 44.3 s |
+| Band, the whole run | $1.3 \times 10^{-7}$ | $8.0 \times 10^{-7}$ | $4.6 \times 10^{-7}$ | 939 MiB | 13.3 s | $1.4 \times 10^{-7}$ | $8.5 \times 10^{-7}$ | $4.6 \times 10^{-7}$ | 2.60 GiB | 38.0 s |
+| Surface, default segments (244; 488) | $4.0 \times 10^{-4}$ | $2.3 \times 10^{-3}$ | $1.7 \times 10^{-3}$ | 146 MiB | 15.8 s | $2.8 \times 10^{-4}$ | $4.2 \times 10^{-4}$ | $2.8 \times 10^{-4}$ | 205 MiB | 46.6 s |
+| Surface, the whole run | $2.8 \times 10^{-4}$ | $4.2 \times 10^{-4}$ | $2.8 \times 10^{-4}$ | 218 MiB | 13.2 s | $2.8 \times 10^{-4}$ | $4.2 \times 10^{-4}$ | $2.8 \times 10^{-4}$ | 501 MiB | 38.2 s |
+
+(Times from the first of two runs; the second was 5–20% slower throughout, with the same
+differences.) With 60 m of water at the top, inside the box, which is open there, and its
+sides crossing the seabed (976 steps): the band $9.9 \times 10^{-8}$–$1.1 \times 10^{-7}$ in
+default segments and $1.8$–$7.8 \times 10^{-7}$ for the whole run; the surface
+$1.6$–$2.6 \times 10^{-3}$ and $2.2$–$9.9 \times 10^{-4}$, up to four times the solid
+model's.
+
+The surface's gradient is $3 \times 10^{-4}$–$2 \times 10^{-3}$ off, a thousand times the
+band's; shorter segments make it worse, not better as for the band, since each starts from
+its end truncated while the field may be loud at the faces. On `examples/layered.toml` (the
+2026-11-20 entry's test: the upper crust's $v_s$ lowered from 2600 to 2500 m/s; 1,666 steps;
+16-node layers, so the surface at nodes 20 and 108 across and 60 down, and the region nodes
+25–103 across and 0–55 down), on the container's 4 cores, with the plan's peak and the
+process's largest resident set:
+
+| Strategy | Memory | Resident | Time | $v_p$ | $v_s$ | $\rho$ |
+|---|---|---|---|---|---|---|
+| Checkpoints, every 71 | 3.66 GiB | 3.70 GiB | 128.8 s | | | |
+| Band, segments of 209 | 1.70 GiB | 1.74 GiB | 148.0 s | $4.4 \times 10^{-6}$ | $1.2 \times 10^{-6}$ | $1.0 \times 10^{-6}$ |
+| Band, the whole run | 5.85 GiB | 5.83 GiB | 127.1 s | $3.2 \times 10^{-6}$ | $9.3 \times 10^{-7}$ | $7.5 \times 10^{-7}$ |
+| Surface, segments of 417 | 1.00 GiB | 1.04 GiB | 164.3 s | $1.0 \times 10^{-4}$ | $2.4 \times 10^{-5}$ | $2.2 \times 10^{-5}$ |
+| Surface, the whole run | 1.59 GiB | 1.57 GiB | 159.4 s | $2.9 \times 10^{-5}$ | $8.1 \times 10^{-6}$ | $4.8 \times 10^{-6}$ |
+
+The last three columns are the largest difference from the replay's gradient in the region,
+relative to its largest value there (the band's are the same over all its nodes; the
+surface's, over all of them, $8.2 \times 10^{-2}$ for $v_p$, since near and outside the faces
+it means nothing). The misfits agree to every printed digit. A surface record is 176,266
+values against the band's 862,968, a fifth, and the surface's gradient needs 41% less memory
+than the band's with segments; but the solvers and the correlation sums, which neither
+changes, are most of it. Here the surface is 6–23 times the band's error, far less than on
+the small model. Not because its waves are better sampled, which the frequency study rules
+out; the small model's sources sit 13–14 nodes from the faces, this one's 20–44, but what sets
+the difference is not settled. It
+is the slowest: its rebuild is an ordinary step, CPML included, which the band's step back
+skips (the layers hold 55% of these nodes), and the injection runs on one thread; 24–28%
+over checkpoints against the band's $-1$ to $+15$%. On the same model grown to
+$1001 \times 1001 \times 401$ nodes (`memory --gradient`): checkpoints 803 GiB, the band 247
+GiB in segments and 478 GiB for the whole run, the surface 174 and 204 GiB.
+
+**Decision.** Keep the band as the inversion's reconstruction; offer the surface as
+`gradient --surface`, for comparisons, and not to `invert`. The surface saves memory (a
+gradient run needs 41% less than with the band on `examples/layered.toml`, 30% less on a
+grid 300 times larger), but its
+error is the injection's shape, not round-off: $10^{-5}$–$10^{-3}$ of the gradient's largest
+value against the band's $10^{-7}$–$10^{-6}$, growing with the order, largest within a few
+nodes of the faces and near a seabed, and the same at any sampling. It is also slower than
+the band (its rebuild runs the layers) and constrains the survey: the gradient is lost over
+the inset and $L + 1$ nodes more (at least $2L + 1$) inside every absorbing side, the
+sources must sit well inside, and the faces must stay in rock clear of the seabed, which a
+marine survey can't arrange: along a free surface its sides cross the water and the seabed
+(which doubled the error here), and a top face under the seabed would lose the sediments
+there, where Marmousi2's gradient is largest. The Marmousi2 configurations, 41 nodes across
+with 16-node layers, leave 9 nodes inside, too few for a surface at all. Made exact, the
+surface would need everything the stencil reads across each face, $L$ planes deep, which is
+what the band records (about $6L$ values per face node): in this scheme the band is the
+exact version of the method, and the one-node surface its approximation at a quarter to a
+fifth of the records.
+
+**Reproduce:** `just drift surface` (the field and the gradient study); `cargo test --release
+--lib surface` (second order); `just memory <config> --gradient --surface [--segment 100000]`;
+for `examples/layered.toml`, as in the 2026-11-20 entry, `just run examples/layered.toml
+--out out/surface/layered/observed`, then `just gradient guess.toml
+out/surface/layered/observed [--reconstruct | --surface] [--segment 100000]` with `guess.toml`
+the example with the upper crust's `vs = 2500.0`, and compare the `grad_*.npy` inside the
+region.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -4271,9 +4470,13 @@ literature (staging $v_p$ before $v_s$, $v_z$ before $v_x$); the plan's step 8 m
   differences (the gradient entry), with an exactly replayed forward field, and the error of
   rebuilding it backwards from the band (2026-11-20: single-precision round-off,
   $10^{-7}$–$10^{-6}$ of the gradient, set by the field's loudest stretch in a segment; the
-  layers and the free surface add nothing). Still open there: why a water layer drifts five
+  layers and the free surface add nothing), against rebuilding it inside a one-node surface
+  as Aaker et al. do [@aaker2020gji] (2026-11-27: $10^{-5}$–$10^{-3}$ of the gradient, the
+  injection's shape, not round-off). Still open there: why a water layer drifts five
   times more (and with band-limited layers twice that again, 2026-11-22), and whether that
-  drift moves an inversion. Dispersion in a homogeneous full space
+  drift moves an inversion; why the surface's gradient error was 10–100 times smaller on
+  `examples/layered.toml` than on the small study model, and whether recording a second
+  plane (a dipole term) would close most of its gap to the band for far fewer values. Dispersion in a homogeneous full space
   is settled too, against the exact kernels (2026-11-21, "The gradient against the exact
   kernels"): at the defaults the wavefields put 0.26% into the gradient at 3.5 points per
   shortest S wavelength and $\le 0.05\%$ from 4.6, less than into the traces; with the time

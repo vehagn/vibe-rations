@@ -83,10 +83,11 @@ study *args:
     cargo test --release --test inversion_study {{ args }} -- --ignored --nocapture --test-threads 1
 
 # The reconstruction study: how far the forward wavefield rebuilt backwards drifts, in the
-# field and the gradient, by run length, order, time step and boundary (a few minutes).
+# field and the gradient, by run length, order, time step and boundary, from the band around
+# the layers and inside a surface (about 20 minutes; `just drift surface` for the surface's).
 [group("check")]
-drift:
-    cargo test --release --test reconstruction -- --ignored --nocapture --test-threads 1
+drift *args:
+    cargo test --release --test reconstruction {{ args }} -- --ignored --nocapture --test-threads 1
 
 # Builds the command-line program for macOS on Apple silicon into out/mac/vibe-rations, to run
 # natively on the host with all its cores and memory: `out/mac/vibe-rations invert ...`. Cross-
