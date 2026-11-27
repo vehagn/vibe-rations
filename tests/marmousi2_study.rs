@@ -33,6 +33,10 @@
 //!   (the hard-seabed control: Poisson's ratio capped at 0.25, the parts `central-hard` and
 //!   `west-hard`); `shallow_first_l2`, `west_shallow_first_l2`, `slowness_shallow_first_l2`
 //!   (layer stripping: the 250 m under the seafloor first, then everything).
+//! - `true_top_l2`, `west_true_top_l2`, `thin_true_top_l2`, `west_thin_true_top_l2`,
+//!   `true_top_phase_check`: the true-seabed-top control (after Aaker et al. 2020): L2 from
+//!   the smooth start with the truth put back under the seafloor (`with_true_top`), which
+//!   says how much of the centre's wrong-way vs update comes from the start's error there.
 //! - `whole_by_region`: the whole-section inversion's result (`examples/marmousi2/whole.toml`)
 //!   in 1 km windows along x, next to how far its start's seafloor vs is from the truth's.
 //! - `l2`, `frequency_stages`, `time_shifts_then_l2`, `phase_then_l2`,
@@ -1960,6 +1964,177 @@ fn west_shallow_first_l2() {
 #[ignore = "a study: `just marmousi2-study slowness_shallow_first_l2` (about 2 hours)"]
 fn slowness_shallow_first_l2() {
     shallow_first("slowness-shallow-first-l2", "central", "slowness");
+}
+
+/// `start` with the truth's vp and vs put back under the seafloor: in each column the truth
+/// from its first solid node down `thickness` m, over the next `taper` m a raised cosine
+/// from the truth to the start, so that no step is left where they meet, and the start
+/// below. The water, and the density, stay the start's.
+fn with_true_top(start: &Model, truth: &Model, thickness: f64, taper: f64) -> Model {
+    let g = start.grid;
+    let [nx, ny, nz] = g.n;
+    let mut m = start.clone();
+    for j in 0..ny {
+        for i in 0..nx {
+            let Some(top) = (0..nz).find(|&k| truth.vs[g.interior_idx(i, j, k)] > 0.0) else {
+                continue;
+            };
+            for k in top..nz {
+                let below = (k - top) as f64 * g.h[2] - thickness;
+                if below >= taper {
+                    break;
+                }
+                let w = if below <= 0.0 {
+                    1.0
+                } else {
+                    0.5 * (1.0 + (std::f64::consts::PI * below / taper).cos())
+                };
+                let n = g.interior_idx(i, j, k);
+                let blend = |t: f32, s: f32| (w * t as f64 + (1.0 - w) * s as f64) as f32;
+                m.vp[n] = blend(truth.vp[n], start.vp[n]);
+                m.vs[n] = blend(truth.vs[n], start.vs[n]);
+            }
+        }
+    }
+    m
+}
+
+/// The true top of [`true_top`]'s main runs, thickness and taper (m): the truth at the ten
+/// depths from the seafloor's first solid node, 475–700 m, which are the ten
+/// `seafloor_speeds` averages over and all but the last of those `shallow_first` frees
+/// first; halfway at 725 m; the smooth start from 750 m, where the second depth band begins,
+/// so that every band below the first starts exactly as `l2`'s does.
+const TRUE_TOP: [f64; 2] = [225.0, 50.0];
+
+/// A thinner one: the truth at 475–575 m, halfway at 600 m, the smooth start from 625 m. How
+/// much of the top has to be right?
+const THIN_TRUE_TOP: [f64; 2] = [100.0, 50.0];
+
+/// `part`'s smooth start with the truth under the seafloor (`with_true_top`), written to
+/// `out/marmousi2/study/starts/<name>`, as a case with `l2`'s inversion.
+fn true_top_case(name: &str, part: &str, [thickness, taper]: [f64; 2]) -> Case {
+    let smooth = Case::part(part, L2);
+    let start = with_true_top(
+        &smooth.model(&smooth.start),
+        &smooth.model(&smooth.truth),
+        thickness,
+        taper,
+    );
+    write_model(&Path::new("out/marmousi2/study/starts").join(name), &start);
+    Case::part_with(
+        part,
+        &format!("../../out/marmousi2/study/starts/{name}"),
+        L2,
+    )
+}
+
+/// The true-seabed-top control: `l2` from the smooth start with the truth put back under the
+/// seafloor, as Aaker et al. (2020) start their inversion of the SEG/EAGE Overthrust model
+/// from a smoothed truth whose uppermost part below the seabed is the truth itself, to keep
+/// the surface waves' complications out. It uses the truth, so it is no recipe: it is the
+/// start's side of the hard-seabed control (`hard_l2`, which changes the truth instead), and
+/// says how much of the centre's wrong-way vs update below 750 m comes from the start's
+/// error under the seafloor. Reported as `invert` does, against its own start (the same as
+/// the smooth one below the top), and at the end against the smooth start, beside `l2`.
+fn true_top(name: &str, part: &str, top: [f64; 2]) {
+    let smooth = Case::part(part, L2);
+    let case = true_top_case(name, part, top);
+    let (original, truth) = (smooth.model(&smooth.start), smooth.model(&smooth.truth));
+    print_seafloor_speeds(name, &case);
+    println!("{name}: the start, against the smooth start");
+    print_bands(name, &smooth, &case.model(&case.start), &original, &truth);
+    invert(name, &case);
+    let end = Case::part_with(
+        part,
+        &format!("../../out/marmousi2/study/{name}/stage-0"),
+        L2,
+    );
+    println!("{name}: against the smooth start");
+    print_bands(name, &smooth, &end.model(&end.start), &original, &truth);
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study true_top_l2` (about 45 minutes)"]
+fn true_top_l2() {
+    true_top("true-top-l2", "central", TRUE_TOP);
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_true_top_l2` (about 45 minutes)"]
+fn west_true_top_l2() {
+    true_top("west-true-top-l2", "west", TRUE_TOP);
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study thin_true_top_l2` (about 45 minutes)"]
+fn thin_true_top_l2() {
+    true_top("thin-true-top-l2", "central", THIN_TRUE_TOP);
+}
+
+#[test]
+#[ignore = "a study: `just marmousi2-study west_thin_true_top_l2` (about 45 minutes)"]
+fn west_thin_true_top_l2() {
+    true_top("west-thin-true-top-l2", "west", THIN_TRUE_TOP);
+}
+
+/// The phase check of the slow waves from the starts with the true top: does the truth under
+/// the seafloor bring them within half a cycle of the data at every offset?
+#[test]
+#[ignore = "a study: `just marmousi2-study true_top_phase_check` (about 10 minutes)"]
+fn true_top_phase_check() {
+    for part in ["central", "west"] {
+        for (label, top) in [("true top", TRUE_TOP), ("thin true top", THIN_TRUE_TOP)] {
+            let name = format!("{part}-{}-check", label.replace(' ', "-"));
+            phase_check_on(
+                &format!("{part}, {label}"),
+                &true_top_case(&name, part, top),
+            );
+        }
+    }
+}
+
+/// `with_true_top` on a small model with water above an uneven seafloor: the truth from each
+/// column's first solid node down the thickness, halfway in the middle of the taper, the
+/// start from its end; the water and the density untouched.
+#[test]
+fn the_true_top_blends_into_the_start() {
+    let cfg = Config::from_toml(
+        "[grid]\npoints = [8, 8, 12]\nspacing = 25.0\n[time]\nduration = 0.1\n\
+         [[model.layer]]\ntop = 0.0\nvp = 2000.0\nvs = 1000.0\nrho = 2000.0",
+    )
+    .unwrap();
+    let g = Simulation::grid(&cfg).unwrap();
+    let mut start = Model::homogeneous(g, 2000.0, 1000.0, 2000.0);
+    let mut truth = Model::homogeneous(g, 1800.0, 400.0, 1900.0);
+    // Water two nodes deep, three in the first column.
+    let seafloor = |i: usize| if i == 0 { 3 } else { 2 };
+    for k in 0..g.n[2] {
+        for j in 0..g.n[1] {
+            for i in 0..g.n[0] {
+                let n = g.interior_idx(i, j, k);
+                if k < seafloor(i) {
+                    (start.vp[n], start.vs[n]) = (1500.0, 0.0);
+                    (truth.vp[n], truth.vs[n]) = (1500.0, 0.0);
+                }
+            }
+        }
+    }
+    let m = with_true_top(&start, &truth, 50.0, 50.0);
+    assert_eq!(m.rho, start.rho);
+    for k in 0..g.n[2] {
+        for j in 0..g.n[1] {
+            for i in 0..g.n[0] {
+                let n = g.interior_idx(i, j, k);
+                let (vp, vs) = match k as isize - seafloor(i) as isize {
+                    ..0 => (1500.0, 0.0),
+                    0..=2 => (1800.0, 400.0),
+                    3 => (1900.0, 700.0),
+                    _ => (2000.0, 1000.0),
+                };
+                assert_eq!((m.vp[n], m.vs[n]), (vp, vs), "node {i}, {j}, {k}");
+            }
+        }
+    }
 }
 
 /// L2 from the start smoothed through its slownesses, on the central part.
