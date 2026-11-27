@@ -30,6 +30,7 @@ use crate::born::{Change, born};
 use crate::config::{Coefficients, Config, InversionConfig, Parameter, StageConfig, shot_dir};
 use crate::gradient::{Strategy, gradient_with, illuminate};
 use crate::grid::Grid;
+use crate::hessian::hessian_product;
 use crate::misfit::{Measure, Misfit};
 use crate::model::Model;
 use crate::npy;
@@ -1009,6 +1010,33 @@ impl Inversion {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
             let run = gradient_with(&mut sim, |_| Ok((0.0, source)), self.strategy())?;
             for (s, g) in sum.iter_mut().zip(run.gradient.velocities(model)) {
+                s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
+            }
+        }
+        Ok(self.unknowns_of(&sum))
+    }
+
+    /// The Hessian of the misfit with respect to the unknowns at `model`, applied to `v`, the
+    /// second-order terms included ([`crate::hessian`]): exact for the L2 misfit, to
+    /// round-off, at any residual. Per shot a forward, a Born and two adjoint runs, the
+    /// forward wavefields replayed from checkpoints whatever `reconstruct` says. At zero
+    /// residual it is [`Inversion::gauss_newton_product`].
+    pub fn hessian_product(&self, model: &Model, v: &[f64]) -> Result<Vec<f64>> {
+        let speeds = self.speeds_of(model, v)?;
+        let speeds = speeds.each_ref().map(Vec::as_slice);
+        let change = Change::from_velocities(model, speeds);
+        let n = model.grid.interior_len();
+        let mut sum = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+        for shot in &self.shots {
+            let mut sim = Simulation::with_model(&shot.config, model.clone())?;
+            let product = hessian_product(
+                &mut sim,
+                &change,
+                |r| shot.misfit.evaluate(&r.traces),
+                |d| shot.misfit.gauss_newton_source(d),
+                None,
+            )?;
+            for (s, g) in sum.iter_mut().zip(product.velocities(model, speeds)) {
                 s.iter_mut().zip(g).for_each(|(s, g)| *s += g);
             }
         }
@@ -2330,6 +2358,60 @@ mod tests {
         assert!(uu > 0.0 && vv > 0.0);
         let asymmetry = (a - b).abs() / (uu * vv).sqrt();
         assert!(asymmetry < 1e-6, "{a} against {b}: {asymmetry}");
+    }
+
+    /// The full Hessian's products: at zero residual the Gauss–Newton products, to round-off
+    /// (the second-order terms vanish with the adjoint wavefield); with a residual, from a
+    /// start 5% slower in vs and 3% lighter than the data's model, symmetric, and apart from
+    /// the Gauss–Newton products. Measured: the same bit for bit at zero residual; with the
+    /// residual, u·Hv and v·Hu agree to 1.3·10⁻⁸, and Hu is 1.9·10⁻² from the Gauss–Newton
+    /// product.
+    #[test]
+    fn full_hessian_products_are_symmetric_and_gauss_newton_at_zero_residual() {
+        let cfg = survey(
+            &format!("{SOLID}\n[scheme]\norder = 4"),
+            "parameters = [\"vp\", \"vs\", \"rho\"]\nfixed_above = 20.0\nreconstruct = false",
+        );
+        let inv = setup(&cfg).unwrap();
+        let mut rng = 11u64;
+        let mut random = |n: usize| -> Vec<f64> {
+            (0..n)
+                .map(|_| (splitmix64(&mut rng) >> 11) as f64 / (1u64 << 53) as f64)
+                .collect()
+        };
+        let (u, v) = (random(inv.unknowns()), random(inv.unknowns()));
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+        let norm = |a: &[f64]| dot(a, a).sqrt();
+        let apart = |a: &[f64], b: &[f64]| {
+            let d: Vec<f64> = a.iter().zip(b).map(|(a, b)| a - b).collect();
+            norm(&d) / norm(b)
+        };
+        let full = inv.hessian_product(&inv.model, &u).unwrap();
+        let gauss_newton = inv.gauss_newton_product(&inv.model, &u).unwrap();
+        let at_zero = apart(&full, &gauss_newton);
+        println!("zero residual: full against Gauss–Newton {at_zero:.1e}");
+        assert!(at_zero < 1e-12, "{at_zero}");
+
+        let mut model = start(&cfg);
+        model.vs.iter_mut().for_each(|v| *v *= 0.95);
+        model.rho.iter_mut().for_each(|v| *v *= 0.97);
+        let settings = cfg.inversion.clone().unwrap();
+        let inv = Inversion::new(&cfg, model, vec![recorded(&cfg)], &settings).unwrap();
+        let (hu, hv) = (
+            inv.hessian_product(&inv.model, &u).unwrap(),
+            inv.hessian_product(&inv.model, &v).unwrap(),
+        );
+        let (a, b) = (dot(&u, &hv), dot(&v, &hu));
+        let (uu, vv) = (dot(&u, &hu), dot(&v, &hv));
+        let asymmetry = (a - b).abs() / (uu.abs() * vv.abs()).sqrt();
+        let gauss_newton = inv.gauss_newton_product(&inv.model, &u).unwrap();
+        let second_order = apart(&hu, &gauss_newton);
+        println!(
+            "with a residual: u·Hv {a:.6e}, v·Hu {b:.6e}, asymmetry {asymmetry:.1e}; \
+             full against Gauss–Newton {second_order:.1e}"
+        );
+        assert!(asymmetry < 1e-6, "{a} against {b}: {asymmetry}");
+        assert!(second_order > 1e-3, "{second_order}");
     }
 
     /// The estimate divides each parameter by its own diagonal, so their preconditioners

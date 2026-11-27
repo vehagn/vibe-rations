@@ -131,17 +131,42 @@ impl Adjoint {
 
     /// Takes the next step back.
     pub fn step(&mut self) {
+        self.step_adding(|_| {}, |_| {});
+    }
+
+    /// Takes the next step back, `velocity` and `stress` adding sources of their own after
+    /// the residuals: the scattering the change of a model makes in an adjoint run of its
+    /// own (`crate::hessian`).
+    pub(crate) fn step_adding(
+        &mut self,
+        velocity: impl FnOnce(&mut Fields),
+        stress: impl FnOnce(&mut Fields),
+    ) {
         assert!(self.remaining() > 0, "the adjoint run is over");
         let n = self.steps - 1 - self.solver.step;
         let (solver, at) = self.parts();
         solver.step_with(
-            |f, _| at.inject(f, n, false),
+            |f, _| {
+                at.inject(f, n, false);
+                velocity(f);
+            },
             |f, _| {
                 if let Some(earlier) = n.checked_sub(1) {
                     at.inject(f, earlier, true);
                 }
+                stress(f);
             },
         );
+    }
+
+    /// Adds to the stresses the run starts from, before its first step, and mirrors them
+    /// again across a free surface.
+    pub(crate) fn add_to_start(&mut self, add: impl FnOnce(&mut Fields)) {
+        assert_eq!(self.solver.step, 0, "the adjoint run has started");
+        add(&mut self.solver.fields);
+        if self.solver.free_surface {
+            self.solver.mirror_stress();
+        }
     }
 
     /// The solver, and the residuals borrowed apart from it.

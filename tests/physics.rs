@@ -1514,6 +1514,158 @@ fn born_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
     }
 }
 
+/// The Hessian's product is the gradient's derivative, second-order terms and all: for a
+/// random change of vp, of vs or of ρ at every node outside the layers, at a model whose data
+/// misfit the observed (the gradient checks' guessed sphere against another), H δm matches
+/// the central differences of the balanced L2 misfit's gradient (in vp, vs and ρ, extrapolated
+/// in the step, with Δt and the layers held), and differs from the Gauss–Newton product
+/// JᵀWJ δm, which leaves out the terms through the adjoint wavefield.
+///
+/// Measured, for changes of (vp, vs, ρ), the largest of the three parameters' errors relative
+/// to its size: order 8 1.6e-5, 3.6e-6, 1.8e-5, with the Gauss–Newton product 4.4e-2, 1.7e-2,
+/// 1.5e-2 apart; walls and water 9.5e-6, 8.2e-6, 6.3e-5, and 1.6e-2, 2.5e-2, 2.5e-2 apart. So
+/// the second-order terms are right to a few 10⁻³ of their size or better.
+#[test]
+fn the_hessian_product_is_the_gradients_derivative() {
+    hessian_check("order 8", 8, &|sphere| gradient_model(8, sphere));
+    hessian_check("walls and water", 0, &walls_and_water);
+}
+
+/// [`the_hessian_product_is_the_gradients_derivative`] in the model `config` makes, every node
+/// outside layers `pml` nodes thick changed.
+fn hessian_check(label: &str, pml: usize, config: &dyn Fn([f64; 3]) -> String) {
+    use vibe_rations::born::Change;
+    use vibe_rations::config::Config;
+    use vibe_rations::gradient::{balancing_weights, gradient_with, l2_misfit};
+    use vibe_rations::hessian::hessian_product;
+    use vibe_rations::model::Model;
+    use vibe_rations::simulation::Simulation;
+
+    let base = std::path::Path::new(".");
+    let mut cfg = Config::from_toml(&config([2050.0, 1000.0, 2000.0])).unwrap();
+    let model = Model::from_config(Simulation::grid(&cfg).unwrap(), &cfg.model, base).unwrap();
+    let dt = Simulation::with_model(&cfg, model.clone())
+        .unwrap()
+        .solver
+        .dt;
+    cfg.time.dt = Some(dt);
+    cfg.time.courant = None;
+    cfg.boundary.pml_vp_max.get_or_insert(model.vp_range()[1]);
+    let mut truth = Config::from_toml(&config([1900.0, 950.0, 1950.0])).unwrap();
+    (truth.time, truth.boundary) = (cfg.time.clone(), cfg.boundary.clone());
+    let mut observed = Simulation::new(&truth, base).unwrap();
+    observed.run(None, false).unwrap();
+    let observed = observed.receivers;
+    let weights = balancing_weights(&observed.traces, &observed.components);
+    let observed = observed.traces;
+    let misfit = |traces: &[Vec<f32>]| l2_misfit(traces, &observed, &weights);
+    // The L2 misfit's second derivative in the samples: w_c on component c.
+    let curvature = |d: &[Vec<f32>]| -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(d.iter()
+            .zip(&weights)
+            .map(|(d, &w)| d.iter().map(|&x| (w * x as f64) as f32).collect())
+            .collect())
+    };
+    let gradient = |m: Model| {
+        let mut sim = Simulation::with_model(&cfg, m.clone()).unwrap();
+        let run = gradient_with(&mut sim, |r| misfit(&r.traces), Strategy::default()).unwrap();
+        run.gradient.velocities(&m)
+    };
+
+    let g = model.grid;
+    let [nx, ny, nz] = g.n;
+    let mut mask = vec![0.0f64; g.interior_len()];
+    for k in 0..nz - pml {
+        for j in pml..ny - pml {
+            for i in pml..nx - pml {
+                mask[g.interior_idx(i, j, k)] = 1.0;
+            }
+        }
+    }
+    for (p, seed) in [(0, 23), (1, 24), (2, 25)] {
+        let name = ["vp", "vs", "rho"][p];
+        let u: Vec<f64> = noise(g.interior_len(), seed)
+            .iter()
+            .zip(&mask)
+            .map(|(v, m)| v * m)
+            .collect();
+        let values = |m: &Model| [&m.vp, &m.vs, &m.rho][p].clone();
+        let start = values(&model);
+        let mut speeds = [vec![0.0; u.len()], vec![0.0; u.len()], vec![0.0; u.len()]];
+        speeds[p] = u.iter().zip(&start).map(|(u, &m)| u * m as f64).collect();
+        let speeds = speeds.each_ref().map(Vec::as_slice);
+        let change = Change::from_velocities(&model, speeds);
+        let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+        let product = hessian_product(&mut sim, &change, |r| misfit(&r.traces), curvature, None)
+            .unwrap()
+            .velocities(&model, speeds);
+        // Without the residuals: the Gauss–Newton product.
+        let mut sim = Simulation::with_model(&cfg, model.clone()).unwrap();
+        let zeros = |r: &vibe_rations::receiver::Receivers| {
+            Ok((0.0, r.traces.iter().map(|t| vec![0.0; t.len()]).collect()))
+        };
+        let gauss_newton = hessian_product(&mut sim, &change, zeros, curvature, None)
+            .unwrap()
+            .velocities(&model, speeds);
+
+        let perturbed = |h: f64| {
+            let mut m = model.clone();
+            let target = [&mut m.vp, &mut m.vs, &mut m.rho]
+                .into_iter()
+                .nth(p)
+                .unwrap();
+            for (v, &w) in target.iter_mut().zip(&u) {
+                *v = (*v as f64 * (1.0 + h * w)) as f32;
+            }
+            m
+        };
+        let difference = |h: f64| -> Vec<Vec<f64>> {
+            let (a, b) = (gradient(perturbed(h)), gradient(perturbed(-h)));
+            a.iter()
+                .zip(&b)
+                .map(|(a, b)| a.iter().zip(b).map(|(a, b)| (a - b) / (2.0 * h)).collect())
+                .collect()
+        };
+        let h = 1.6e-2;
+        let (coarse, fine) = (difference(h), difference(h / 2.0));
+        let extrapolated: Vec<Vec<f64>> = coarse
+            .iter()
+            .zip(&fine)
+            .map(|(c, f)| c.iter().zip(f).map(|(c, f)| (4.0 * f - c) / 3.0).collect())
+            .collect();
+        // Each parameter's error relative to its own size, outside the layers.
+        let error = |a: &[Vec<f64>]| {
+            a.iter()
+                .zip(&product)
+                .map(|(a, b)| {
+                    let diff: f64 = a
+                        .iter()
+                        .zip(b)
+                        .zip(&mask)
+                        .map(|((a, b), m)| m * (a - b).powi(2))
+                        .sum();
+                    let size: f64 = b.iter().zip(&mask).map(|(b, m)| m * b * b).sum();
+                    (diff / size).sqrt()
+                })
+                .fold(0.0f64, f64::max)
+        };
+        println!(
+            "Hessian, {label}, {name}: against central differences of the gradient {:.1e} \
+             (h {h:.1e}), {:.1e} (h/2), extrapolated {:.1e}; Gauss–Newton {:.1e} apart",
+            error(&coarse),
+            error(&fine),
+            error(&extrapolated),
+            error(&gauss_newton)
+        );
+        assert!(
+            error(&extrapolated) < 5e-4,
+            "{label}, {name}: {}",
+            error(&extrapolated)
+        );
+        assert!(error(&gauss_newton) > 5e-3, "{label}, {name}");
+    }
+}
+
 /// A small inversion: two shots of a vertical and a horizontal force, recorded on the free
 /// surface, of a model with a faster sphere, inverted for vp and vs from a homogeneous start,
 /// with the top 60 m (the sources and the receivers) held fixed and the gradient

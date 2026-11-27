@@ -225,7 +225,7 @@ pub fn checkpoint_interval(steps: usize, requested: Option<usize>) -> usize {
 /// The correlations summed over the run, on the padded grid, per position: the density
 /// terms Σ ṽ Δv for vx, vy, vz, then the stiffness terms for l2m and lam (on the free surface
 /// the plane-stress a and b instead) and for mxy, mxz, myz, already weighted by -W.
-type Sums = Vec<[f64; 8]>;
+pub(crate) type Sums = Vec<[f64; 8]>;
 
 /// Runs `sim` (fresh, at step 0) forward, recording its receivers and keeping a checkpoint
 /// every `checkpoint_every` steps (by default [`checkpoint_interval`]'s); hands the
@@ -546,12 +546,12 @@ impl Correlator {
 }
 
 /// A copy of the velocities `s` holds.
-fn velocities(s: &Solver) -> [Vec<f32>; 3] {
+pub(crate) fn velocities(s: &Solver) -> [Vec<f32>; 3] {
     s.fields.velocities().map(<[f32]>::to_vec)
 }
 
 /// The pressure residuals, as they enter the adjoint strain.
-struct PressureResiduals {
+pub(crate) struct PressureResiduals {
     /// For each receiver, the terms it reads pressure from: (normal component 0–2, padded
     /// index, its interpolation weight / (3W) there). On a node, one per component.
     terms: Vec<Vec<(usize, usize, f32)>>,
@@ -562,7 +562,7 @@ struct PressureResiduals {
 }
 
 impl PressureResiduals {
-    fn new(sim: &Simulation, residuals: &[Vec<f32>]) -> Self {
+    pub(crate) fn new(sim: &Simulation, residuals: &[Vec<f32>]) -> Self {
         let r = &sim.receivers;
         let s = &sim.solver;
         let g = s.grid;
@@ -601,13 +601,13 @@ impl PressureResiduals {
         }
     }
 
-    fn memory_bytes(&self) -> usize {
+    pub(crate) fn memory_bytes(&self) -> usize {
         4 * self.values.as_ref().map_or(0, Vec::len)
     }
 
     /// Adds -W⁻¹ r_σ⁽ⁿ⁾, the residual of the pressure read from σ⁽ⁿ⁾ (recorded after forward
     /// step n - 1), to the normal components of the adjoint strain.
-    fn add(&self, adjoint_strain: &mut [Vec<f32>; 6], n: usize) {
+    pub(crate) fn add(&self, adjoint_strain: &mut [Vec<f32>; 6], n: usize) {
         let Some(values) = &self.values else {
             return;
         };
@@ -642,7 +642,7 @@ fn weight(s: &Solver, field: Field, k: usize) -> f64 {
 /// written twice, and `after` read twice. Each sum gets the same terms in the same order as
 /// before, so the gradient is the same bit for bit. The weight and buoyancy of the density
 /// terms come in when the sums go to the nodes.
-fn correlate(
+pub(crate) fn correlate(
     s: &Solver,
     adjoint: &Solver,
     sums: &mut Sums,
@@ -721,7 +721,7 @@ pub(crate) fn illuminate(g: &Grid, illumination: &mut [f64], v: [&[f32]; 3]) {
 }
 
 /// Takes the sums from the staggered positions to ρ, λ and μ at the nodes.
-fn to_nodes(s: &Solver, sums: &Sums) -> Gradient {
+pub(crate) fn to_nodes(s: &Solver, sums: &Sums) -> Gradient {
     let g = s.grid;
     let [nx, ny, nz] = g.n;
     let dt = s.dt;

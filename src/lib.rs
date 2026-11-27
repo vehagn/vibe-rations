@@ -13,6 +13,7 @@ pub mod cpml;
 pub mod fd;
 pub mod gradient;
 pub mod grid;
+pub mod hessian;
 pub mod image;
 pub mod inversion;
 pub mod memory;
