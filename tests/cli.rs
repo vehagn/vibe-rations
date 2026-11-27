@@ -169,6 +169,85 @@ fn run_writes_traces_gathers_snapshots_and_settings() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// Every file under `dir`, by its path from there.
+fn files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut left = vec![dir.to_path_buf()];
+    while let Some(d) = left.pop() {
+        for entry in fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                left.push(path);
+            } else {
+                found.push(path.strip_prefix(dir).unwrap().to_path_buf());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// With --gpu the run steps on an NVIDIA GPU and writes what `run` writes, byte for byte;
+/// where there is no GPU, or nothing to compile its kernels, it says what is missing.
+#[test]
+fn run_on_a_gpu_writes_what_run_writes_or_says_what_is_missing() {
+    let dir = scratch("gpu");
+    let config = dir.join("tiny.toml");
+    fs::write(&config, TINY).unwrap();
+    let run = |out: &Path, more: &[&str]| {
+        let mut args = vec![
+            "run",
+            config.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--quiet",
+        ];
+        args.extend(more);
+        vibe(&args)
+    };
+    let (cpu, gpu) = (dir.join("cpu"), dir.join("gpu"));
+    let on_gpu = run(&gpu, &["--gpu"]);
+    if on_gpu.status.success() {
+        let on_cpu = run(&cpu, &[]);
+        assert!(on_cpu.status.success(), "{}", stderr(&on_cpu));
+        assert_eq!(files(&cpu), files(&gpu));
+        for file in files(&cpu) {
+            let (a, b) = (
+                fs::read(cpu.join(&file)).unwrap(),
+                fs::read(gpu.join(&file)).unwrap(),
+            );
+            if file.ends_with("run.json") {
+                // The same but for the device that stepped it.
+                let mut a: serde_json::Value = serde_json::from_slice(&a).unwrap();
+                let b: serde_json::Value = serde_json::from_slice(&b).unwrap();
+                assert!(a.get("device").is_none());
+                a["device"] = b["device"].clone();
+                assert!(b["device"].as_str().unwrap().contains("CUDA"), "{b}");
+                assert_eq!(a, b);
+            } else {
+                assert!(a == b, "{} differs", file.display());
+            }
+        }
+    } else {
+        let err = stderr(&on_gpu);
+        assert!(
+            err.contains("no NVIDIA driver here")
+                || err.contains("no CUDA device here")
+                || err.contains("no NVRTC here"),
+            "{err}"
+        );
+        assert!(!gpu.join("run.json").exists());
+    }
+    let both = run(&gpu, &["--gpu", "--remote", "nowhere"]);
+    assert!(!both.status.success());
+    assert!(
+        stderr(&both).contains("cannot be used with"),
+        "{}",
+        stderr(&both)
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// With --shots each source fires on its own, into its own directory.
 #[test]
 fn run_fires_shots_one_at_a_time() {

@@ -57,7 +57,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run [--remote | --shots] | check | memory | gradient | invert | extrude | serve | remote
+  main.rs        the CLI: run [--remote | --shots | --gpu] | check | memory | gradient | invert | extrude | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   born.rs        the Born run beside the forward one: the traces' change for a model change, J δm
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay or the field
@@ -76,6 +76,10 @@ src/
                  free surface, PointOp
   simd.rs        which compiled update loops run: AVX2 chosen at run time, or the plain ones
                  (`VIBE_RATIONS_SIMD=off`)
+  cuda.rs        the time step on an NVIDIA GPU (`run --gpu`): a solver's state on a Device,
+                 stepped by cuda/kernels.cu (CUDA C compiled at run time); cuda/driver.rs finds
+                 the driver and NVRTC with the system's loader, cuda/host.rs and host.c run the
+                 same kernels on a CPU for the tests
   fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid

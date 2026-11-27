@@ -91,13 +91,19 @@ impl Receivers {
 
     /// Records the next sample, if there is room for it.
     pub fn record(&mut self, solver: &Solver) {
+        self.record_with(|op| op.sample(&solver.fields));
+    }
+
+    /// Records the next sample, if there is room for it, as `read` gives each operator's: it
+    /// is asked for them in the order of [`Receivers::ops`], component by component.
+    pub fn record_with(&mut self, mut read: impl FnMut(&PointOp) -> f32) {
         if self.recorded == self.samples {
             return;
         }
         let m = self.recorded;
         for (ops, data) in self.ops.iter().zip(&mut self.traces) {
             for (r, op) in ops.iter().enumerate() {
-                data[r * self.samples + m] = op.sample(&solver.fields);
+                data[r * self.samples + m] = read(op);
             }
         }
         self.recorded += 1;
