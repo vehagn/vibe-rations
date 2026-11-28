@@ -99,7 +99,8 @@ pub struct RunInfo {
     /// they were designed for.
     pub coefficients: Coefficients,
     pub band: Option<f64>,
-    /// The compiled update loops it runs (crate::simd): AVX2 or plain, the same results.
+    /// The compiled update loops it runs (crate::simd): AVX2 or plain, the same results, or
+    /// the fused ones, close to them.
     pub kernels: Kernels,
     /// What stepped it, when that wasn't this CPU (crate::cuda): a GPU's name and arithmetic.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,6 +470,19 @@ impl Simulation {
             info,
             finished: false,
         })
+    }
+
+    /// Steps with the fused update loops (crate::simd, `run --fma`): a product and the sum it
+    /// feeds rounded once, on CPUs with the instruction for it. The results are then close to
+    /// the other loops', no longer the same bit for bit.
+    pub fn fuse(&mut self) -> Result<()> {
+        ensure!(
+            Kernels::Fma.available(),
+            "this CPU has no fused multiply-add the update loops can use (x86-64 needs AVX2 \
+             and FMA)"
+        );
+        self.info.kernels = self.solver.set_kernels(Kernels::Fma);
+        Ok(())
     }
 
     /// Receivers outside the absorbing layers that still read a velocity the layers damp. A

@@ -5,6 +5,7 @@
 //! (the "slab"): the first `lo` and the last `hi` nodes along the axis, in that order.
 
 use crate::grid::Grid;
+use crate::simd::Arithmetic;
 
 /// How the layers damp.
 #[derive(Clone, Copy, Debug)]
@@ -183,7 +184,7 @@ impl CpmlAxis {
     /// holds them, and `psi` the memory of those in a layer ([`CpmlAxis::slabs`]). Always
     /// inlined, like the rest of the update loops (crate::simd).
     #[inline(always)]
-    pub fn apply_along(
+    pub fn apply_along<A: Arithmetic>(
         &self,
         nodes: std::ops::Range<usize>,
         d: &mut [f32],
@@ -199,7 +200,7 @@ impl CpmlAxis {
         for ((a, b), slab) in [(low, low.0), (high, lo + high.0 - start)] {
             if b > a {
                 let s = slab..slab + (b - a);
-                update(
+                update::<A>(
                     &mut d[a - nodes.start..b - nodes.start],
                     &mut psi[s.start - first..s.end - first],
                     &p.a[s.clone()],
@@ -213,21 +214,27 @@ impl CpmlAxis {
     /// Damps a row of derivatives taken along this axis while the row runs across it, so the
     /// whole row sits at slab index `slab`.
     #[inline(always)]
-    pub fn apply_across(&self, slab: usize, d: &mut [f32], psi: &mut [f32], at: Stagger) {
+    pub fn apply_across<A: Arithmetic>(
+        &self,
+        slab: usize,
+        d: &mut [f32],
+        psi: &mut [f32],
+        at: Stagger,
+    ) {
         let p = self.profile(at);
         let (a, b, k) = (p.a[slab], p.b[slab], p.inv_kappa[slab]);
         for (d, psi) in d.iter_mut().zip(psi) {
-            *psi = b * *psi + a * *d;
-            *d = *d * k + *psi;
+            *psi = A::product_plus(b, *psi, a * *d);
+            *d = A::product_plus(*d, k, *psi);
         }
     }
 }
 
 #[inline(always)]
-fn update(d: &mut [f32], psi: &mut [f32], a: &[f32], b: &[f32], inv_kappa: &[f32]) {
+fn update<A: Arithmetic>(d: &mut [f32], psi: &mut [f32], a: &[f32], b: &[f32], inv_kappa: &[f32]) {
     for ((((d, psi), a), b), k) in d.iter_mut().zip(psi).zip(a).zip(b).zip(inv_kappa) {
-        *psi = b * *psi + a * *d;
-        *d = *d * k + *psi;
+        *psi = A::product_plus(*b, *psi, a * *d);
+        *d = A::product_plus(*d, *k, *psi);
     }
 }
 
@@ -254,6 +261,7 @@ fn push(p: &mut Profile, x: f64, d0: f64, dt: f64, s: &PmlSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simd::Separate;
 
     fn settings() -> PmlSettings {
         PmlSettings {
@@ -307,7 +315,7 @@ mod tests {
         assert_eq!(c.slab(0), None);
         let mut d = [1.0f32; 10];
         assert_eq!(c.slabs(0..10), 0..0);
-        c.apply_along(0..10, &mut d, &mut [], Stagger::Node);
+        c.apply_along::<Separate>(0..10, &mut d, &mut [], Stagger::Node);
         assert_eq!(d, [1.0; 10]);
     }
 
@@ -324,7 +332,7 @@ mod tests {
         let row: Vec<f32> = (0..40).map(|i| (i as f32 * 0.37).sin()).collect();
         let memory: Vec<f32> = (0..11).map(|s| (s as f32 * 1.3).cos()).collect();
         let (mut whole, mut psi) = (row.clone(), memory.clone());
-        c.apply_along(0..40, &mut whole, &mut psi, Stagger::Half);
+        c.apply_along::<Separate>(0..40, &mut whole, &mut psi, Stagger::Half);
         for cuts in [
             vec![0, 40],
             vec![0, 3, 7, 33, 36, 40],
@@ -334,7 +342,7 @@ mod tests {
             let (mut parts, mut psi_parts) = (row.clone(), memory.clone());
             for w in cuts.windows(2) {
                 let (nodes, slabs) = (w[0]..w[1], c.slabs(w[0]..w[1]));
-                c.apply_along(
+                c.apply_along::<Separate>(
                     nodes.clone(),
                     &mut parts[nodes],
                     &mut psi_parts[slabs],
@@ -366,11 +374,11 @@ mod tests {
         let (a, b, k) = (p.a[3], p.b[3], p.inv_kappa[3]);
         let mut psi = [0.0f32; 2];
         let mut d = [1.0f32; 2];
-        c.apply_across(3, &mut d, &mut psi, Stagger::Node);
+        c.apply_across::<Separate>(3, &mut d, &mut psi, Stagger::Node);
         assert!((psi[0] - a).abs() < 1e-7 && (d[0] - (k + a)).abs() < 1e-6);
         for _ in 0..20_000 {
             d = [1.0; 2];
-            c.apply_across(3, &mut d, &mut psi, Stagger::Node);
+            c.apply_across::<Separate>(3, &mut d, &mut psi, Stagger::Node);
         }
         let settled = a / (1.0 - b);
         assert!(

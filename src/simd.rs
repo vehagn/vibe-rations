@@ -13,6 +13,12 @@
 //! machines where AVX2 misbehaves. In a build for the host's CPU (`-C target-cpu=native`) the
 //! plain loops are themselves compiled with its features, so running without AVX2 means the
 //! default build.
+//!
+//! A third version fuses: where the loops add a product to something, a·b + c, it rounds the
+//! result once ([`Fused`], `f32::mul_add`) instead of the product and then the sum
+//! ([`Separate`]). That is one instruction instead of two on CPUs that have it (x86-64 with
+//! FMA beside AVX2, any 64-bit ARM), but other bits: the results are close to the others',
+//! not the same. So it runs only when asked for, `VIBE_RATIONS_SIMD=fma` or `run --fma`.
 
 use std::sync::OnceLock;
 
@@ -29,6 +35,9 @@ pub enum Kernels {
     Plain,
     /// Compiled with AVX2, on x86-64 CPUs that have it.
     Avx2,
+    /// With fused multiply-adds: compiled with AVX2 and FMA on x86-64 CPUs that have both,
+    /// for the build's target on 64-bit ARM. Not the others' results bit for bit.
+    Fma,
 }
 
 impl Kernels {
@@ -37,6 +46,7 @@ impl Kernels {
         match self {
             Kernels::Plain => true,
             Kernels::Avx2 => has_avx2(),
+            Kernels::Fma => has_fma(),
         }
     }
 
@@ -64,6 +74,7 @@ impl Kernels {
         match self {
             Kernels::Plain => "plain",
             Kernels::Avx2 => "avx2",
+            Kernels::Fma => "fma",
         }
     }
 }
@@ -81,8 +92,9 @@ fn choice() -> &'static (Kernels, Option<String>) {
 }
 
 /// The kernels a value of [`SIMD_VARIABLE`] asks for, given this CPU: `off` (or `plain`) the
-/// plain loops; unset, empty, `auto` or `avx2` the AVX2 ones where the CPU has them. Anything
-/// else is ignored with a warning, as is `avx2` where the CPU hasn't got it.
+/// plain loops; unset, empty, `auto` or `avx2` the AVX2 ones where the CPU has them; `fma`
+/// the fused ones. Anything else is ignored with a warning, as are `avx2` and `fma` where the
+/// CPU can't run them.
 fn decide(value: Option<&str>) -> (Kernels, Option<String>) {
     let best = Kernels::Avx2.or_plain();
     match value.map(str::trim) {
@@ -95,10 +107,19 @@ fn decide(value: Option<&str>) -> (Kernels, Option<String>) {
                 "{SIMD_VARIABLE}=avx2, but this CPU can't run AVX2: running the plain loops"
             )),
         ),
+        Some("fma") if Kernels::Fma.available() => (Kernels::Fma, None),
+        Some("fma") => (
+            best,
+            Some(format!(
+                "{SIMD_VARIABLE}=fma, but this CPU has no fused multiply-add the loops can use: \
+                 running the {best} loops"
+            )),
+        ),
         Some(other) => (
             best,
             Some(format!(
-                "{SIMD_VARIABLE}={other} means nothing (it takes off or avx2): running the {best} loops"
+                "{SIMD_VARIABLE}={other} means nothing (it takes off, avx2 or fma): running the \
+                 {best} loops"
             )),
         ),
     }
@@ -112,6 +133,49 @@ fn has_avx2() -> bool {
     #[cfg(not(target_arch = "x86_64"))]
     {
         false
+    }
+}
+
+/// Whether the fused loops have an instruction to run on: FMA beside AVX2 on x86-64 (every CPU
+/// with one has had the other, bar a few), always on 64-bit ARM, and nowhere else (without the
+/// instruction a fused product is a call into a maths library for every value).
+fn has_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        cfg!(target_arch = "aarch64")
+    }
+}
+
+/// How the update loops round a product added to something, a·b + c: the one place where the
+/// compiled versions' arithmetic may differ. The loops take it as a type, so each version is
+/// compiled with its own.
+pub trait Arithmetic {
+    /// a·b + c.
+    fn product_plus(a: f32, b: f32, c: f32) -> f32;
+}
+
+/// The product rounded, then the sum: the reference, the same on every machine.
+pub struct Separate;
+
+/// Product and sum rounded once (a fused multiply-add): half a unit in the last place closer
+/// to a·b + c each time, and so not [`Separate`]'s bits.
+pub struct Fused;
+
+impl Arithmetic for Separate {
+    #[inline(always)]
+    fn product_plus(a: f32, b: f32, c: f32) -> f32 {
+        a * b + c
+    }
+}
+
+impl Arithmetic for Fused {
+    #[inline(always)]
+    fn product_plus(a: f32, b: f32, c: f32) -> f32 {
+        a.mul_add(b, c)
     }
 }
 
@@ -133,6 +197,29 @@ mod tests {
         let (k, warning) = decide(Some("sse"));
         assert_eq!(k, best);
         assert!(warning.unwrap().contains("sse"));
+        // The fused loops only when asked for, and only where they have an instruction.
+        let (k, warning) = decide(Some("fma"));
+        if Kernels::Fma.available() {
+            assert_eq!((k, warning), (Kernels::Fma, None));
+        } else {
+            assert_eq!(k, best);
+            assert!(warning.unwrap().contains("fma"));
+        }
+    }
+
+    /// A fused product is the exact a·b + c rounded once: where the product alone isn't a
+    /// single-precision number, the two differ.
+    #[test]
+    fn fused_products_round_once() {
+        let (a, b, c) = (1.0 + f32::EPSILON, 1.0 + f32::EPSILON, -1.0);
+        // (1 + ε)² = 1 + 2ε + ε²: the product drops ε², the fused sum keeps it.
+        assert_eq!(Separate::product_plus(a, b, c), 2.0 * f32::EPSILON);
+        assert_eq!(
+            Fused::product_plus(a, b, c),
+            2.0 * f32::EPSILON + f32::EPSILON * f32::EPSILON
+        );
+        assert_eq!(Separate::product_plus(3.0, 4.0, 5.0), 17.0);
+        assert_eq!(Fused::product_plus(3.0, 4.0, 5.0), 17.0);
     }
 
     #[test]
@@ -141,6 +228,7 @@ mod tests {
         if !cfg!(target_arch = "x86_64") {
             assert!(!Kernels::Avx2.available());
             assert_eq!(Kernels::Avx2.or_plain(), Kernels::Plain);
+            assert_eq!(Kernels::Fma.available(), cfg!(target_arch = "aarch64"));
         }
     }
 }

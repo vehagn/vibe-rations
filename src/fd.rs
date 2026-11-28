@@ -16,6 +16,8 @@ use std::sync::Mutex;
 
 use anyhow::{Result, ensure};
 
+use crate::simd::Arithmetic;
+
 /// The longest stencil offered: 16 points.
 pub const MAX_ORDER: usize = 16;
 
@@ -272,25 +274,39 @@ impl Stencil {
     /// The derivative half a node forward of each node, at p + s/2. Always inlined, so the
     /// solver's AVX2 sweep (crate::simd) compiles it with AVX2.
     #[inline(always)]
-    pub fn forward(&self, out: &mut [f32], f: &[f32], start: usize, stride: usize, inv_h: f32) {
+    pub fn forward<A: Arithmetic>(
+        &self,
+        out: &mut [f32],
+        f: &[f32],
+        start: usize,
+        stride: usize,
+        inv_h: f32,
+    ) {
         let len = out.len();
         for (k, &c) in self.single.iter().enumerate() {
             let a = c * inv_h;
             let hi = &f[start + (k + 1) * stride..start + (k + 1) * stride + len];
             let lo = &f[start - k * stride..start - k * stride + len];
-            accumulate(out, a, hi, lo, k == 0);
+            accumulate::<A>(out, a, hi, lo, k == 0);
         }
     }
 
     /// The derivative half a node backward of each node, at p - s/2.
     #[inline(always)]
-    pub fn backward(&self, out: &mut [f32], f: &[f32], start: usize, stride: usize, inv_h: f32) {
+    pub fn backward<A: Arithmetic>(
+        &self,
+        out: &mut [f32],
+        f: &[f32],
+        start: usize,
+        stride: usize,
+        inv_h: f32,
+    ) {
         let len = out.len();
         for (k, &c) in self.single.iter().enumerate() {
             let a = c * inv_h;
             let hi = &f[start + k * stride..start + k * stride + len];
             let lo = &f[start - (k + 1) * stride..start - (k + 1) * stride + len];
-            accumulate(out, a, hi, lo, k == 0);
+            accumulate::<A>(out, a, hi, lo, k == 0);
         }
     }
 }
@@ -569,9 +585,10 @@ fn weighted_least_squares(rows: &[Row], weights: &[f64]) -> Vec<f64> {
     x.iter().zip(&scale).map(|(x, s)| x * s).collect()
 }
 
-/// out = a (hi - lo), or out += a (hi - lo) after the first term.
+/// out = a (hi - lo), or out += a (hi - lo) after the first term, the product and the sum
+/// rounded as `A` says.
 #[inline(always)]
-fn accumulate(out: &mut [f32], a: f32, hi: &[f32], lo: &[f32], first: bool) {
+fn accumulate<A: Arithmetic>(out: &mut [f32], a: f32, hi: &[f32], lo: &[f32], first: bool) {
     let n = out.len();
     let (hi, lo) = (&hi[..n], &lo[..n]);
     if first {
@@ -580,7 +597,7 @@ fn accumulate(out: &mut [f32], a: f32, hi: &[f32], lo: &[f32], first: bool) {
         }
     } else {
         for i in 0..n {
-            out[i] += a * (hi[i] - lo[i]);
+            out[i] = A::product_plus(a, hi[i] - lo[i], out[i]);
         }
     }
 }
@@ -588,6 +605,7 @@ fn accumulate(out: &mut [f32], a: f32, hi: &[f32], lo: &[f32], first: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simd::Separate;
 
     /// A remembered design is the design, bit for bit, and comes back far faster.
     #[test]
@@ -677,7 +695,7 @@ mod tests {
         for order in (2..=MAX_ORDER).step_by(2) {
             let s = Stencil::taylor(order).unwrap();
             let mut out = [0.0f32; 4];
-            s.forward(&mut out, &f, 10, 1, 1.0 / h);
+            s.forward::<Separate>(&mut out, &f, 10, 1, 1.0 / h);
             for (i, v) in out.iter().enumerate() {
                 let x = (10 + i) as f32 * h + h / 2.0;
                 assert!(
@@ -685,7 +703,7 @@ mod tests {
                     "order {order} forward at {x}: {v}"
                 );
             }
-            s.backward(&mut out, &f, 10, 1, 1.0 / h);
+            s.backward::<Separate>(&mut out, &f, 10, 1, 1.0 / h);
             for (i, v) in out.iter().enumerate() {
                 let x = (10 + i) as f32 * h - h / 2.0;
                 assert!(
@@ -836,9 +854,9 @@ mod tests {
         let mut out = [0.0f32; 1];
         for order in [4, 8] {
             let s = Stencil::taylor(order).unwrap();
-            s.forward(&mut out, &f, 20, 2, 1.0);
+            s.forward::<Separate>(&mut out, &f, 20, 2, 1.0);
             assert!((out[0] - 2.0).abs() < 1e-3, "order {order}");
-            s.backward(&mut out, &f, 20, 2, 1.0);
+            s.backward::<Separate>(&mut out, &f, 20, 2, 1.0);
             assert!((out[0] - 2.0).abs() < 1e-3, "order {order}");
         }
     }

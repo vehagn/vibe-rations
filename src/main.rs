@@ -54,6 +54,12 @@ enum Command {
         /// for bit. Needs the NVIDIA driver and CUDA's run-time compiler (libnvrtc).
         #[arg(long, conflicts_with = "remote")]
         gpu: bool,
+        /// Step with fused multiply-adds, a product and the sum it feeds rounded once instead
+        /// of twice: on the CPU where it has them (x86-64 with AVX2 and FMA, 64-bit ARM), with
+        /// --gpu on the card. The results are then close to the default's, no longer the same
+        /// bit for bit.
+        #[arg(long, conflicts_with = "remote")]
+        fma: bool,
     },
     /// Keep simulations for clients that come and go: the command line's `--remote` and the
     /// web page. Listens on localhost only by default; reach it through an SSH tunnel.
@@ -331,14 +337,21 @@ fn run() -> Result<()> {
             quiet,
             shots,
             gpu,
+            fma,
             ..
         } => {
-            let (cfg, sim, _) = load(&config, Kind::Run)?;
+            let (cfg, mut sim, _) = load(&config, Kind::Run)?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
+            // On a GPU the card fuses; the CPU's loops step nothing there.
+            let fuse = |sim: &mut Simulation| match fma && !gpu {
+                true => sim.fuse(),
+                false => Ok(()),
+            };
+            fuse(&mut sim)?;
             report(&sim);
             let run = |sim: &mut Simulation, dir: &Path| -> Result<()> {
                 if gpu {
-                    run_on_gpu(sim, dir, !quiet)?;
+                    run_on_gpu(sim, dir, fma, !quiet)?;
                 } else {
                     sim.run(Some(dir), !quiet)?;
                 }
@@ -349,13 +362,13 @@ fn run() -> Result<()> {
                 drop(sim);
                 for s in 0..cfg.sources.len() {
                     let mut shot = Simulation::new(&cfg.shot(s)?, base(&config))?;
+                    fuse(&mut shot)?;
                     if !quiet {
                         eprintln!("shot {} of {}", s + 1, cfg.sources.len());
                     }
                     run(&mut shot, &out.join(shot_dir(s)))?;
                 }
             } else {
-                let mut sim = sim;
                 run(&mut sim, &out)?;
             }
             eprintln!("wrote {}", out.display());
@@ -770,15 +783,15 @@ fn load(path: &Path, kind: Kind) -> Result<(Config, Simulation, memory::Memory)>
     Ok((cfg, sim, m))
 }
 
-/// Runs `sim` on this machine's GPU (`run --gpu`).
+/// Runs `sim` on this machine's GPU (`run --gpu`), with fused multiply-adds if `fma`.
 #[cfg(unix)]
-fn run_on_gpu(sim: &mut Simulation, out: &Path, progress: bool) -> Result<()> {
-    let device = vibe_rations::cuda::Cuda::open()?;
+fn run_on_gpu(sim: &mut Simulation, out: &Path, fma: bool, progress: bool) -> Result<()> {
+    let device = vibe_rations::cuda::Cuda::open()?.fuse(fma);
     vibe_rations::cuda::run(sim, device, Some(out), progress)
 }
 
 #[cfg(not(unix))]
-fn run_on_gpu(_: &mut Simulation, _: &Path, _: bool) -> Result<()> {
+fn run_on_gpu(_: &mut Simulation, _: &Path, _: bool, _: bool) -> Result<()> {
     anyhow::bail!("--gpu finds the NVIDIA driver as Unix systems load libraries; not here")
 }
 

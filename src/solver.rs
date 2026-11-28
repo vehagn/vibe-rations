@@ -45,7 +45,9 @@ use crate::fd::Stencil;
 use crate::grid::{AsPoint, Grid};
 use crate::model::Model;
 use crate::receiver::Component;
-use crate::simd::Kernels;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::simd::Fused;
+use crate::simd::{Arithmetic, Kernels, Separate};
 
 /// How many values below a free surface estimate a field's slope there, one-sidedly
 /// ([`Solver::continue_with_slope`]): fifth order. Four points misread a vertically incident P
@@ -384,9 +386,11 @@ impl Solver {
     }
 
     /// Runs the update loops compiled as `kernels` say where this CPU can, else the plain
-    /// ones; returns those it will run. Both give the same results bit for bit.
+    /// ones; returns those it will run. The plain and the AVX2 loops give the same results
+    /// bit for bit; the fused ones don't.
     pub fn set_kernels(&mut self, kernels: Kernels) -> Kernels {
-        // Only a CPU that has them may run the AVX2 loops: `sweep` relies on it.
+        // Only a CPU that has their instructions may run the AVX2 or the fused loops: `sweep`
+        // relies on it.
         self.kernels = kernels.or_plain();
         self.kernels
     }
@@ -1295,23 +1299,24 @@ fn mirror_plane(v: &mut [f32], len: usize, dst: usize, src: usize, sign: f32) {
 }
 
 /// out += sign · b · (x + y + z). A sign of ±1 changes nothing but the sign, so taking a
-/// step back subtracts exactly what the step added.
+/// step back subtracts exactly what the step added; and (sign · b) · s is sign · (b · s) to
+/// the bit, which leaves the product next to the sum for `A` to round.
 #[inline(always)]
-fn add_sum(out: &mut [f32], sign: f32, b: &[f32], x: &[f32], y: &[f32], z: &[f32]) {
+fn add_sum<A: Arithmetic>(out: &mut [f32], sign: f32, b: &[f32], x: &[f32], y: &[f32], z: &[f32]) {
     let n = out.len();
     let (b, x, y, z) = (&b[..n], &x[..n], &y[..n], &z[..n]);
     for i in 0..n {
-        out[i] += sign * (b[i] * (x[i] + y[i] + z[i]));
+        out[i] = A::product_plus(sign * b[i], x[i] + y[i] + z[i], out[i]);
     }
 }
 
 /// out += sign · m · (x + y)
 #[inline(always)]
-fn add_sum2(out: &mut [f32], sign: f32, m: &[f32], x: &[f32], y: &[f32]) {
+fn add_sum2<A: Arithmetic>(out: &mut [f32], sign: f32, m: &[f32], x: &[f32], y: &[f32]) {
     let n = out.len();
     let (m, x, y) = (&m[..n], &x[..n], &y[..n]);
     for i in 0..n {
-        out[i] += sign * (m[i] * (x[i] + y[i]));
+        out[i] = A::product_plus(sign * m[i], x[i] + y[i], out[i]);
     }
 }
 
@@ -1512,7 +1517,14 @@ impl<'a, const N: usize> Outputs<'a, N> {
 /// (crate::simd), inlining it, so it and everything it calls in its loops must be
 /// `#[inline(always)]`: a call left out of line would run the plain loops.
 trait Update<const N: usize>: Sync {
-    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, k: usize, row: RowOut<'_, N>);
+    fn row<A: Arithmetic>(
+        &self,
+        d: [&mut [f32]; 9],
+        i: Range<usize>,
+        j: usize,
+        k: usize,
+        row: RowOut<'_, N>,
+    );
 }
 
 /// Runs `update` on every node of `blocks`, which tile the interior ([`blocks`]), in
@@ -1529,22 +1541,32 @@ fn sweep<const N: usize>(
     blocks.par_iter().for_each_init(
         || Rows::new(width),
         |rows, block| {
+            // SAFETY (both): a solver holds Kernels::Avx2 or Kernels::Fma only where the CPU
+            // has the instructions (Solver::set_kernels, Kernels::chosen).
             #[cfg(target_arch = "x86_64")]
-            if kernels == Kernels::Avx2 {
-                // SAFETY: a solver holds Kernels::Avx2 only where the CPU has AVX2
-                // (Solver::set_kernels, Kernels::chosen).
-                return unsafe { block_avx2(update, g, cpml, &outputs, rows, block) };
+            match kernels {
+                Kernels::Avx2 => {
+                    return unsafe { block_avx2(update, g, cpml, &outputs, rows, block) };
+                }
+                Kernels::Fma => {
+                    return unsafe { block_fma(update, g, cpml, &outputs, rows, block) };
+                }
+                Kernels::Plain => {}
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
+            if kernels == Kernels::Fma {
+                return block_fused(update, g, cpml, &outputs, rows, block);
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             debug_assert_eq!(kernels, Kernels::Plain);
             block_plain(update, g, cpml, &outputs, rows, block);
         },
     );
 }
 
-/// A block's rows, plane by plane upwards.
+/// A block's rows, plane by plane upwards, with `A`'s arithmetic.
 #[inline(always)]
-fn block<const N: usize>(
+fn block<A: Arithmetic, const N: usize>(
     update: &impl Update<N>,
     g: &Grid,
     cpml: &[CpmlAxis; 3],
@@ -1557,7 +1579,7 @@ fn block<const N: usize>(
             // SAFETY: the blocks tile the interior, so no other task holds these nodes, and
             // this one holds a row at a time.
             let row = unsafe { outputs.row(g, cpml, block.i.clone(), j, k) };
-            update.row(rows.take(block.i.len()), block.i.clone(), j, k, row);
+            update.row::<A>(rows.take(block.i.len()), block.i.clone(), j, k, row);
         }
     }
 }
@@ -1570,7 +1592,7 @@ fn block_plain<const N: usize>(
     rows: &mut Rows,
     b: &Block,
 ) {
-    block(update, g, cpml, outputs, rows, b);
+    block::<Separate, N>(update, g, cpml, outputs, rows, b);
 }
 
 /// [`block_plain`] compiled with AVX2, without FMA: the same operations, eight values at a
@@ -1585,7 +1607,35 @@ fn block_avx2<const N: usize>(
     rows: &mut Rows,
     b: &Block,
 ) {
-    block(update, g, cpml, outputs, rows, b);
+    block::<Separate, N>(update, g, cpml, outputs, rows, b);
+}
+
+/// The loops compiled with AVX2 and FMA, their products fused into their sums: other bits.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn block_fma<const N: usize>(
+    update: &impl Update<N>,
+    g: &Grid,
+    cpml: &[CpmlAxis; 3],
+    outputs: &Outputs<'_, N>,
+    rows: &mut Rows,
+    b: &Block,
+) {
+    block::<Fused, N>(update, g, cpml, outputs, rows, b);
+}
+
+/// The loops with their products fused into their sums, which 64-bit ARM always can: other
+/// bits.
+#[cfg(target_arch = "aarch64")]
+fn block_fused<const N: usize>(
+    update: &impl Update<N>,
+    g: &Grid,
+    cpml: &[CpmlAxis; 3],
+    outputs: &Outputs<'_, N>,
+    rows: &mut Rows,
+    b: &Block,
+) {
+    block::<Fused, N>(update, g, cpml, outputs, rows, b);
 }
 
 /// What the velocity update reads.
@@ -1603,7 +1653,14 @@ struct VelocityUpdate<'a> {
 
 impl Update<3> for VelocityUpdate<'_> {
     #[inline(always)]
-    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, kz: usize, row: RowOut<'_, 3>) {
+    fn row<A: Arithmetic>(
+        &self,
+        d: [&mut [f32]; 9],
+        i: Range<usize>,
+        j: usize,
+        kz: usize,
+        row: RowOut<'_, 3>,
+    ) {
         let Self {
             g,
             sign,
@@ -1617,16 +1674,16 @@ impl Update<3> for VelocityUpdate<'_> {
         let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
         let r = g.idx(i.start, j, kz);
         let n = i.len();
-        st.forward(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
-        st.backward(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
-        st.backward(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
-        st.backward(d5, syz, r, sz, ih[2]); // ∂z σyz at k
-        st.backward(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
-        st.forward(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
+        st.forward::<A>(d0, sxx, r, 1, ih[0]); // ∂x σxx at i+½
+        st.backward::<A>(d2, sxz, r, sz, ih[2]); // ∂z σxz at k
+        st.backward::<A>(d3, sxy, r, 1, ih[0]); // ∂x σxy at i
+        st.backward::<A>(d5, syz, r, sz, ih[2]); // ∂z σyz at k
+        st.backward::<A>(d6, sxz, r, 1, ih[0]); // ∂x σxz at i
+        st.forward::<A>(d8, szz, r, sz, ih[2]); // ∂z σzz at k+½
         if g.spans(1) {
-            st.backward(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
-            st.forward(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
-            st.backward(d7, syz, r, sy, ih[1]); // ∂y σyz at j
+            st.backward::<A>(d1, sxy, r, sy, ih[1]); // ∂y σxy at j
+            st.forward::<A>(d4, syy, r, sy, ih[1]); // ∂y σyy at j+½
+            st.backward::<A>(d7, syz, r, sy, ih[1]); // ∂y σyz at j
         } else {
             // Nothing varies along y on a 2D grid, which has no halo there to read.
             for d in [&mut *d1, &mut *d4, &mut *d7] {
@@ -1635,25 +1692,25 @@ impl Update<3> for VelocityUpdate<'_> {
         }
 
         if let Some([p0, p1, p2]) = row.x {
-            cx.apply_along(i.clone(), d0, p0, Stagger::Half);
-            cx.apply_along(i.clone(), d3, p1, Stagger::Node);
-            cx.apply_along(i.clone(), d6, p2, Stagger::Node);
+            cx.apply_along::<A>(i.clone(), d0, p0, Stagger::Half);
+            cx.apply_along::<A>(i.clone(), d3, p1, Stagger::Node);
+            cx.apply_along::<A>(i.clone(), d6, p2, Stagger::Node);
         }
         if let Some((s, [p0, p1, p2])) = row.y {
-            cy.apply_across(s, d1, p0, Stagger::Node);
-            cy.apply_across(s, d4, p1, Stagger::Half);
-            cy.apply_across(s, d7, p2, Stagger::Node);
+            cy.apply_across::<A>(s, d1, p0, Stagger::Node);
+            cy.apply_across::<A>(s, d4, p1, Stagger::Half);
+            cy.apply_across::<A>(s, d7, p2, Stagger::Node);
         }
         if let Some((s, [p0, p1, p2])) = row.z {
-            cz.apply_across(s, d2, p0, Stagger::Node);
-            cz.apply_across(s, d5, p1, Stagger::Node);
-            cz.apply_across(s, d8, p2, Stagger::Half);
+            cz.apply_across::<A>(s, d2, p0, Stagger::Node);
+            cz.apply_across::<A>(s, d5, p1, Stagger::Node);
+            cz.apply_across::<A>(s, d8, p2, Stagger::Half);
         }
 
         let [vx, vy, vz] = row.out;
-        add_sum(vx, *sign, &m.bx[r..r + n], d0, d1, d2);
-        add_sum(vy, *sign, &m.by[r..r + n], d3, d4, d5);
-        add_sum(vz, *sign, &m.bz[r..r + n], d6, d7, d8);
+        add_sum::<A>(vx, *sign, &m.bx[r..r + n], d0, d1, d2);
+        add_sum::<A>(vy, *sign, &m.by[r..r + n], d3, d4, d5);
+        add_sum::<A>(vz, *sign, &m.bz[r..r + n], d6, d7, d8);
     }
 }
 
@@ -1672,7 +1729,14 @@ struct StressUpdate<'a> {
 
 impl Update<6> for StressUpdate<'_> {
     #[inline(always)]
-    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, kz: usize, row: RowOut<'_, 6>) {
+    fn row<A: Arithmetic>(
+        &self,
+        d: [&mut [f32]; 9],
+        i: Range<usize>,
+        j: usize,
+        kz: usize,
+        row: RowOut<'_, 6>,
+    ) {
         let Self {
             g,
             sign,
@@ -1689,20 +1753,20 @@ impl Update<6> for StressUpdate<'_> {
         let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
         let r = g.idx(i.start, j, kz);
         let n = i.len();
-        st.backward(d0, vx, r, 1, ih[0]); // ∂x vx at i
+        st.backward::<A>(d0, vx, r, 1, ih[0]); // ∂x vx at i
         if surface {
             d2.fill(0.0); // ∂z vz: replaced by the condition σzz = 0
         } else {
-            st.backward(d2, vz, r, sz, ih[2]); // ∂z vz at k
+            st.backward::<A>(d2, vz, r, sz, ih[2]); // ∂z vz at k
         }
-        st.forward(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
-        st.forward(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
-        st.forward(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
-        st.forward(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
+        st.forward::<A>(d4, vy, r, 1, ih[0]); // ∂x vy at i+½
+        st.forward::<A>(d5, vx, r, sz, ih[2]); // ∂z vx at k+½
+        st.forward::<A>(d7, vy, r, sz, ih[2]); // ∂z vy at k+½
+        st.forward::<A>(d6, vz, r, 1, ih[0]); // ∂x vz at i+½
         if g.spans(1) {
-            st.backward(d1, vy, r, sy, ih[1]); // ∂y vy at j
-            st.forward(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
-            st.forward(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
+            st.backward::<A>(d1, vy, r, sy, ih[1]); // ∂y vy at j
+            st.forward::<A>(d3, vx, r, sy, ih[1]); // ∂y vx at j+½
+            st.forward::<A>(d8, vz, r, sy, ih[1]); // ∂y vz at j+½
         } else {
             for d in [&mut *d1, &mut *d3, &mut *d8] {
                 d.fill(0.0);
@@ -1710,19 +1774,19 @@ impl Update<6> for StressUpdate<'_> {
         }
 
         if let Some([p0, p1, p2]) = row.x {
-            cx.apply_along(i.clone(), d0, p0, Stagger::Node);
-            cx.apply_along(i.clone(), d4, p1, Stagger::Half);
-            cx.apply_along(i.clone(), d6, p2, Stagger::Half);
+            cx.apply_along::<A>(i.clone(), d0, p0, Stagger::Node);
+            cx.apply_along::<A>(i.clone(), d4, p1, Stagger::Half);
+            cx.apply_along::<A>(i.clone(), d6, p2, Stagger::Half);
         }
         if let Some((s, [p0, p1, p2])) = row.y {
-            cy.apply_across(s, d1, p0, Stagger::Node);
-            cy.apply_across(s, d3, p1, Stagger::Half);
-            cy.apply_across(s, d8, p2, Stagger::Half);
+            cy.apply_across::<A>(s, d1, p0, Stagger::Node);
+            cy.apply_across::<A>(s, d3, p1, Stagger::Half);
+            cy.apply_across::<A>(s, d8, p2, Stagger::Half);
         }
         if let Some((s, [p0, p1, p2])) = row.z {
-            cz.apply_across(s, d2, p0, Stagger::Node);
-            cz.apply_across(s, d5, p1, Stagger::Half);
-            cz.apply_across(s, d7, p2, Stagger::Half);
+            cz.apply_across::<A>(s, d2, p0, Stagger::Node);
+            cz.apply_across::<A>(s, d5, p1, Stagger::Half);
+            cz.apply_across::<A>(s, d7, p2, Stagger::Half);
         }
 
         let [sxx, syy, szz, sxy, sxz, syz] = row.out;
@@ -1736,21 +1800,21 @@ impl Update<6> for StressUpdate<'_> {
                 let (l, l2) = (lam[i], l2m[i]);
                 let q = if l2 > 0.0 { l * l / l2 } else { 0.0 };
                 let (a, b) = (l2 - q, l - q);
-                sxx[i] += sign * (a * d0[i] + b * d1[i]);
-                syy[i] += sign * (b * d0[i] + a * d1[i]);
+                sxx[i] += sign * A::product_plus(a, d0[i], b * d1[i]);
+                syy[i] += sign * A::product_plus(b, d0[i], a * d1[i]);
                 szz[i] = 0.0;
             }
         } else {
             for i in 0..n {
                 let (l, l2) = (lam[i], l2m[i]);
-                sxx[i] += sign * (l2 * d0[i] + l * (d1[i] + d2[i]));
-                syy[i] += sign * (l2 * d1[i] + l * (d0[i] + d2[i]));
-                szz[i] += sign * (l2 * d2[i] + l * (d0[i] + d1[i]));
+                sxx[i] += sign * A::product_plus(l2, d0[i], l * (d1[i] + d2[i]));
+                syy[i] += sign * A::product_plus(l2, d1[i], l * (d0[i] + d2[i]));
+                szz[i] += sign * A::product_plus(l2, d2[i], l * (d0[i] + d1[i]));
             }
         }
-        add_sum2(sxy, sign, &m.mxy[r..r + n], d3, d4);
-        add_sum2(sxz, sign, &m.mxz[r..r + n], d5, d6);
-        add_sum2(syz, sign, &m.myz[r..r + n], d7, d8);
+        add_sum2::<A>(sxy, sign, &m.mxy[r..r + n], d3, d4);
+        add_sum2::<A>(sxz, sign, &m.mxz[r..r + n], d5, d6);
+        add_sum2::<A>(syz, sign, &m.myz[r..r + n], d7, d8);
     }
 }
 
@@ -1768,7 +1832,14 @@ struct StrainRate<'a> {
 
 impl Update<6> for StrainRate<'_> {
     #[inline(always)]
-    fn row(&self, d: [&mut [f32]; 9], i: Range<usize>, j: usize, kz: usize, row: RowOut<'_, 6>) {
+    fn row<A: Arithmetic>(
+        &self,
+        d: [&mut [f32]; 9],
+        i: Range<usize>,
+        j: usize,
+        kz: usize,
+        row: RowOut<'_, 6>,
+    ) {
         let Self {
             g,
             ih,
@@ -1781,20 +1852,20 @@ impl Update<6> for StrainRate<'_> {
         let [d0, d1, d2, d3, d4, d5, d6, d7, d8] = d;
         let r = g.idx(i.start, j, kz);
         let n = i.len();
-        st.backward(d0, vx, r, 1, ih[0]);
+        st.backward::<A>(d0, vx, r, 1, ih[0]);
         if *free_surface && kz == 0 {
             d2.fill(0.0);
         } else {
-            st.backward(d2, vz, r, sz, ih[2]);
+            st.backward::<A>(d2, vz, r, sz, ih[2]);
         }
-        st.forward(d4, vy, r, 1, ih[0]);
-        st.forward(d5, vx, r, sz, ih[2]);
-        st.forward(d6, vz, r, 1, ih[0]);
-        st.forward(d7, vy, r, sz, ih[2]);
+        st.forward::<A>(d4, vy, r, 1, ih[0]);
+        st.forward::<A>(d5, vx, r, sz, ih[2]);
+        st.forward::<A>(d6, vz, r, 1, ih[0]);
+        st.forward::<A>(d7, vy, r, sz, ih[2]);
         if g.spans(1) {
-            st.backward(d1, vy, r, sy, ih[1]);
-            st.forward(d3, vx, r, sy, ih[1]);
-            st.forward(d8, vz, r, sy, ih[1]);
+            st.backward::<A>(d1, vy, r, sy, ih[1]);
+            st.forward::<A>(d3, vx, r, sy, ih[1]);
+            st.forward::<A>(d8, vz, r, sy, ih[1]);
         } else {
             for d in [&mut *d1, &mut *d3, &mut *d8] {
                 d.fill(0.0);
@@ -2334,6 +2405,50 @@ mod tests {
                 assert!(p == v, "array {a} differs");
             }
         }
+    }
+
+    /// The fused loops (crate::simd) round a product and the sum it feeds once instead of
+    /// twice, so they leave other bits, close to the plain loops': after 40 steps, the strain
+    /// rates and 40 steps back, no value further off than 10⁻⁵ of its array's largest (of the
+    /// field's largest before the steps back, for those: they end near rest). Where the CPU
+    /// can't fuse there is nothing to compare.
+    #[test]
+    fn the_fused_loops_stay_close_to_the_plain_ones() {
+        if !Kernels::Fma.available() {
+            return;
+        }
+        let plain = bits_of_a_run(Kernels::Plain, None);
+        let fused = bits_of_a_run(Kernels::Fma, None);
+        assert_eq!(plain.len(), fused.len());
+        let (mut changed, mut worst) = (0, 0.0f32);
+        for (a, (p, f)) in plain.iter().zip(&fused).enumerate() {
+            assert_eq!(p.len(), f.len());
+            let pairs = || {
+                p.iter()
+                    .zip(f)
+                    .map(|(&x, &y)| (f32::from_bits(x), f32::from_bits(y)))
+            };
+            // The fields come first and, stepped back, last.
+            let reference = &plain[if a >= plain.len() - 9 {
+                a + 9 - plain.len()
+            } else {
+                a
+            }];
+            let peak = reference
+                .iter()
+                .fold(0.0f32, |m, &x| m.max(f32::from_bits(x).abs()));
+            let apart = pairs().fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+            assert!(
+                apart <= 1e-5 * peak,
+                "array {a}: {apart:e} apart, peak {peak:e}"
+            );
+            if peak > 0.0 {
+                worst = worst.max(apart / peak);
+            }
+            changed += p.iter().zip(f).filter(|(x, y)| x != y).count();
+        }
+        eprintln!("fused: {changed} values differ, by up to {worst:.3e} of their array's peak");
+        assert!(changed > 0, "the fused loops fused nothing");
     }
 
     /// However the nodes are split into blocks, every node's arithmetic is the same, so the

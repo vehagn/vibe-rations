@@ -23,10 +23,6 @@ const RTLD_NOW: c_int = 2;
 /// The environment variable that names NVRTC's library, where the loader wouldn't find it.
 pub const NVRTC_VARIABLE: &str = "VIBE_RATIONS_NVRTC";
 
-/// The environment variable that lets the GPU fuse products into sums (`on`): faster perhaps,
-/// but no longer the CPU's results bit for bit.
-pub const FMAD_VARIABLE: &str = "VIBE_RATIONS_CUDA_FMAD";
-
 /// A shared library opened at run time. It stays open for the life of the process: closing
 /// the driver's library under it is not worth the risk.
 pub(super) struct Library {
@@ -200,29 +196,25 @@ impl Cuda {
         let name = unsafe { CStr::from_ptr(name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        let fused = matches!(
-            std::env::var(FMAD_VARIABLE).as_deref().map(str::trim),
-            Ok("on" | "true" | "1")
-        );
         Ok(Self {
             api,
             context,
             functions: None,
             name,
             capability,
-            fused,
+            fused: false,
             compiler: String::new(),
         })
     }
 
-    /// Whether the kernels may fuse products into sums ([`FMAD_VARIABLE`]): then the results
-    /// are no longer the CPU's bit for bit.
+    /// Whether the kernels may fuse products into sums ([`Cuda::fuse`]).
     pub fn fused(&self) -> bool {
         self.fused
     }
 
-    /// Lets the kernels fuse products into sums, or not, whatever [`FMAD_VARIABLE`] says.
-    /// Before the kernels are compiled.
+    /// Lets the compiler fuse the kernels' products into sums, each rounded once instead of
+    /// twice (`run --gpu --fma`), or not, as a device is opened. Fused, the results are no
+    /// longer the CPU's bit for bit. Before the kernels are compiled.
     pub fn fuse(mut self, on: bool) -> Self {
         self.fused = on;
         self

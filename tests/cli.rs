@@ -238,6 +238,19 @@ fn run_on_a_gpu_writes_what_run_writes_or_says_what_is_missing() {
         );
         assert!(!gpu.join("run.json").exists());
     }
+    // With fused multiply-adds: a run that says so in `run.json`, with the same files, or the
+    // same word on what is missing.
+    let fused = dir.join("fused");
+    let with_fma = run(&fused, &["--gpu", "--fma"]);
+    assert_eq!(with_fma.status.success(), on_gpu.status.success());
+    if with_fma.status.success() {
+        assert_eq!(files(&gpu), files(&fused));
+        let info: serde_json::Value =
+            serde_json::from_slice(&fs::read(fused.join("run.json")).unwrap()).unwrap();
+        assert!(info["device"].as_str().unwrap().contains("fused"), "{info}");
+    } else {
+        assert!(!fused.join("run.json").exists());
+    }
     let both = run(&gpu, &["--gpu", "--remote", "nowhere"]);
     assert!(!both.status.success());
     assert!(
@@ -249,6 +262,53 @@ fn run_on_a_gpu_writes_what_run_writes_or_says_what_is_missing() {
 }
 
 /// With --shots each source fires on its own, into its own directory.
+/// `run --fma` steps with the fused loops where the CPU has the instruction, and `run.json`
+/// says so; the files are the same ones, their values close (the solver's tests measure how
+/// close). Where it hasn't, the run says why and writes nothing.
+#[test]
+fn run_fuses_multiply_adds_when_asked_or_says_why_not() {
+    let dir = scratch("fma");
+    let config = dir.join("tiny.toml");
+    fs::write(&config, TINY).unwrap();
+    let run = |out: &Path, more: &[&str]| {
+        let mut args = vec![
+            "run",
+            config.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--quiet",
+        ];
+        args.extend(more);
+        vibe(&args)
+    };
+    let (plain, fused) = (dir.join("plain"), dir.join("fused"));
+    let kernels = |out: &Path| {
+        let info: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("run.json")).unwrap()).unwrap();
+        info["kernels"].as_str().unwrap().to_string()
+    };
+    let default = run(&plain, &[]);
+    assert!(default.status.success(), "{}", stderr(&default));
+    assert_ne!(kernels(&plain), "fma");
+    let with_fma = run(&fused, &["--fma"]);
+    if with_fma.status.success() {
+        assert_eq!(kernels(&fused), "fma");
+        assert_eq!(files(&plain), files(&fused));
+    } else {
+        let err = stderr(&with_fma);
+        assert!(err.contains("no fused multiply-add"), "{err}");
+        assert!(!fused.join("run.json").exists());
+    }
+    let remote = run(&fused, &["--fma", "--remote", "nowhere"]);
+    assert!(!remote.status.success());
+    assert!(
+        stderr(&remote).contains("cannot be used with"),
+        "{}",
+        stderr(&remote)
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn run_fires_shots_one_at_a_time() {
     let dir = scratch("shots");

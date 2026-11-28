@@ -36,7 +36,7 @@ use crate::source::Source;
 mod driver;
 mod host;
 
-pub use driver::{Cuda, FMAD_VARIABLE, NVRTC_VARIABLE, compile};
+pub use driver::{Cuda, NVRTC_VARIABLE, compile};
 pub use host::Host;
 
 /// The kernels' source: CUDA C, in what it shares with C.
@@ -864,10 +864,14 @@ mod tests {
     /// there is no GPU: set it where there should be one.
     const REQUIRE: &str = "VIBE_RATIONS_CUDA_REQUIRED";
 
+    /// How far from the solver's a fused run's values may be, as a fraction of their array's
+    /// largest.
+    const FUSED_APART: f32 = 1e-4;
+
     /// A GPU to test on, or None where there is none (unless [`REQUIRE`] is set).
     fn gpu() -> Option<Cuda> {
         match Cuda::open() {
-            Ok(device) => Some(device.fuse(false)),
+            Ok(device) => Some(device),
             Err(e) if std::env::var_os(REQUIRE).is_some() => panic!("no GPU: {e:#}"),
             Err(e) => {
                 eprintln!("no GPU to test on, skipped: {e:#}");
@@ -883,6 +887,48 @@ mod tests {
             let Some(device) = gpu() else { return };
             eprintln!("{name} on {}", device.name());
             runs_alike(name, text, device);
+        }
+    }
+
+    /// With fused multiply-adds (`run --gpu --fma`) a GPU's results are the solver's no longer,
+    /// but stay close: products feeding sums are rounded once instead of twice, an error of
+    /// half a unit in the last place a time, here and there. Each array's largest difference
+    /// is printed as a fraction of the array's largest value.
+    #[test]
+    fn a_gpu_with_fused_multiply_adds_stays_close_to_the_solver() {
+        for (name, text) in CASES {
+            let Some(device) = gpu() else { return };
+            let device = device.fuse(true);
+            assert!(device.fused() && device.name().contains("fused"));
+            let mut cpu = simulation(text);
+            cpu.run(None, false).unwrap();
+            let mut gpu = simulation(text);
+            run(&mut gpu, device, None, false).unwrap();
+            assert_eq!(gpu.solver.step, cpu.solver.step);
+            let (mut worst, mut changed) = (0.0f32, 0);
+            for ((what, a), (_, b)) in bits(&cpu).into_iter().zip(bits(&gpu)) {
+                assert_eq!(a.len(), b.len(), "{name}, {what}");
+                let pairs = || {
+                    a.iter()
+                        .zip(&b)
+                        .map(|(&x, &y)| (f32::from_bits(x), f32::from_bits(y)))
+                };
+                let peak = pairs().fold(0.0f32, |m, (x, _)| m.max(x.abs()));
+                let apart = pairs().fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+                assert!(apart.is_finite(), "{name}, {what}: not finite");
+                if peak > 0.0 {
+                    worst = worst.max(apart / peak);
+                    assert!(
+                        apart <= FUSED_APART * peak,
+                        "{name}, {what}: {:.3e} of its largest value apart",
+                        apart / peak
+                    );
+                }
+                changed += a.iter().zip(&b).filter(|(x, y)| x != y).count();
+            }
+            eprintln!(
+                "{name}: fused, {changed} values differ, by up to {worst:.3e} of an array's peak"
+            );
         }
     }
 
