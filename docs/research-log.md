@@ -4766,6 +4766,129 @@ the_line_sources_closed_forms_sum_the_point_sources`; `just unit 2d`; `just unit
 counts_what`; the speeds, `cargo test --release --test physics
 hessian_products_side_by_side_in_2d -- --ignored --nocapture`.
 
+## 2026-11-28 — Marmousi2: the true model under the seafloor in the start
+
+**Question.** The 2026-11-26 entries left the centre's wrong-way $v_s$ update below 750 m
+with two readings. Either the start's sediments under the seafloor, 18.2% fast, are the
+cause, and L2 spreads their error over the slow waves' whole depth; or the soft seabed
+itself, however well the start has it, is what these data and L2 can't see through (without
+it, on the hard model, $v_s$ moved the right way). The control that separates them is the
+start's side of the hard-seabed one: put the truth back under the seafloor and change nothing
+else. Aaker et al. start their Overthrust inversion that way, from a smoothed truth whose
+uppermost part below the seabed is the truth itself, to keep the surface waves' complications
+out of the inversion [@aaker2020gji]. How much of the centre's wrong-way update comes from
+the start's error there (G1: central $v_s$ at most 1.00 at 750–1500 m, the west within 0.01
+of plain L2)? It uses the truth, so it is a diagnosis, not a recipe.
+
+**Method** (`tests/marmousi2_study.rs`: `with_true_top`, `true_top`). The smooth start's
+$v_p$ and $v_s$ with the truth's put back column by column, from the seafloor's first solid
+node: the truth down a thickness, then a raised cosine from the truth to the start, so that
+no step is left where they meet, and the start below. The water and the density are the
+start's (the density is the truth's in every start here). Two tops:
+
+- *the true top* (`true_top_l2`, `west_true_top_l2`): the truth at 475–700 m, the ten depths
+  `seafloor_speeds` averages over; halfway at 725 m; the smooth start from 750 m. So every
+  depth band from 750 m down starts exactly as `l2`'s does, and its error ratio and cosine
+  against the smooth start compare with `l2`'s directly;
+- *a thin top* (`thin_true_top_l2`, `west_thin_true_top_l2`): the truth at 475–575 m, halfway
+  at 600 m, the smooth start from 625 m. How much of the top has to be right?
+
+Five L2 iterations as `l2`, with everything below 500 m free, the top included. Each is
+reported against the smooth start, so beside `l2` and `west_l2` (2026-11-23 and 26), and the
+slow-wave phase check was run from each start (`true_top_phase_check`). On gauss, one study
+at a time (6,282, 5,385, 4,573 and 4,688 s, the first two beside other jobs on the machine;
+the check 919 s for its four starts).
+
+**Results.** The starts:
+
+| part | start | $v_s$ over the 250 m under the seafloor, harmonic mean, true / start | the start's L2 misfit | error at 500–750 m against the smooth start's, $v_p$ / $v_s$ |
+|---|---|---|---|---|
+| central | smooth | 414 / 490 m/s (+18.2%) | 0.660 | 1 / 1 |
+| | thin top | 414 / 441 m/s (+6.4%) | 0.341 | 0.746 / 0.742 |
+| | true top | 414 / 414 m/s | 0.224 | 0.165 / 0.164 |
+| west | smooth | 431 / 448 m/s (+4.0%) | 0.234 | 1 / 1 |
+| | thin top | 431 / 437 m/s (+1.6%) | 0.105 | 0.678 / 0.716 |
+| | true top | 431 / 431 m/s | 0.076 | 0.130 / 0.149 |
+
+After five iterations, error ratio and cosine with the true update, both against the smooth
+start (at 500–750 m they include the truth put back; from 750 m down they are the
+inversion's alone), and the misfit left, of its own start's and of the smooth start's:
+
+| | L2 left | | 500–750 m | 750–1000 m | 1000–1500 m | 1500–2500 m | 2500–3125 m |
+|---|---|---|---|---|---|---|---|
+| central, true top | 31.3%, 10.6% | $v_p$ | 0.235, +0.97 | 0.959, +0.28 | 1.002, +0.08 | 0.999, +0.05 | 1.004, −0.20 |
+| | | $v_s$ | 0.226, +0.97 | 1.056, +0.10 | 1.076, −0.03 | 0.991, +0.19 | 0.998, +0.22 |
+| central, thin top | 36.1%, 18.6% | $v_p$ | 0.709, +0.71 | 0.993, +0.15 | 1.014, −0.02 | 1.000, −0.00 | 1.004, −0.24 |
+| | | $v_s$ | 0.635, +0.78 | 1.228, −0.34 | 1.089, −0.10 | 0.994, +0.14 | 0.999, +0.16 |
+| central, smooth (`l2`) | 57.9% | $v_p$ | 0.900, +0.44 | 0.994, +0.12 | 1.020, −0.15 | 1.001, −0.02 | 1.003, −0.24 |
+| | | $v_s$ | 0.973, +0.25 | 1.095, −0.15 | 1.070, −0.17 | 0.999, +0.04 | 0.999, +0.15 |
+| west, true top | 21.9%, 7.1% | $v_p$ | 0.284, +0.96 | 1.156, +0.14 | 1.030, +0.21 | 0.998, +0.07 | 1.007, −0.32 |
+| | | $v_s$ | 0.289, +0.96 | 1.017, +0.43 | 0.938, +0.36 | 0.999, +0.07 | 0.997, +0.30 |
+| west, thin top | 21.5%, 9.7% | $v_p$ | 0.740, +0.67 | 1.025, +0.22 | 0.994, +0.19 | 0.999, +0.06 | 1.005, −0.33 |
+| | | $v_s$ | 0.551, +0.84 | 1.042, +0.32 | 0.932, +0.36 | 1.000, +0.03 | 0.998, +0.29 |
+| west, smooth (`west_l2`) | 17.3% | $v_p$ | 1.227, +0.05 | 0.988, +0.26 | 0.986, +0.19 | 0.999, +0.06 | 1.004, −0.33 |
+| | | $v_s$ | 0.714, +0.70 | 1.018, +0.31 | 0.935, +0.36 | 1.000, +0.05 | 0.998, +0.28 |
+
+- *The truth under the seafloor is two thirds of the start's misfit* on both parts (0.660 to
+  0.224, 0.234 to 0.076), and five iterations from it leave a tenth of the smooth start's
+  misfit in the centre, where `l2` leaves 57.9%.
+- *In the centre it takes the wrong direction out of $v_s$'s update below 750 m, but not
+  the growth of the error.* The cosines are +0.10 and −0.03 at 750–1000 and 1000–1500 m,
+  against `l2`'s −0.15 and −0.17, and the error ratios 1.056 and 1.076 against 1.095 and
+  1.070. From $r^2 = 1 - 2s\cos\theta + s^2$ the update there is 0.45 and 0.37 times as long
+  as the true one, where `l2`'s is 0.32 and 0.25: longer, and at a right angle to the true
+  update instead of pointing away from it. On the hard model the cosines were +0.26 and
+  +0.22. $v_p$ gains at both depths (0.959 and 1.002 against 0.994 and 1.020). So G1 isn't
+  met even with the truth in the top.
+- *Left free, the true top is spoilt.* At 500–750 m the error grows from 0.165 to 0.235 of
+  the smooth start's for $v_p$ and from 0.164 to 0.226 for $v_s$ in the centre, and in the
+  west from 0.130 and 0.149 to 0.284 and 0.289. What the data still miss below is partly put
+  into the top, where the slow waves are most sensitive: the trade between the top and what
+  lies under it runs both ways. (The thin tops, whose error at 600–725 m is still the smooth
+  start's, improve there instead, except the west's $v_p$: 0.678 to 0.740.)
+- *A top that is half right is worse than the smooth start at 750–1000 m*: from the thin
+  top, still 6.4% fast over the 250 m, $v_s$ there ends at 1.228 with a cosine of −0.34,
+  against `l2`'s 1.095 and −0.15 (1.089 and −0.10 at 1000–1500 m). The start smoothed through
+  its slownesses, 11.4% fast, gave 1.147 and −0.41 against its own start (2026-11-26). So as
+  the start's error under the seafloor shrinks, the wrong-way update at 750–1000 m grows,
+  until the error is gone.
+- *In the west*, whose smooth start was within 4%, $v_s$ below 750 m ends where `west_l2`
+  leaves it (1.017 and 0.938 against 1.018 and 0.935) and $v_p$ worse at 750–1500 m (1.156
+  and 1.030 against 0.988 and 0.986), much as after layer stripping (1.133 and 1.022). From
+  the thin top it ends in between ($v_s$ 1.042 and 0.932, $v_p$ 1.025 and 0.994). So where
+  the smooth start already predicted the slow waves, the truth in the top gains nothing
+  below it and costs $v_p$ a little.
+- *The slow-wave phase check still cuts the centre with the truth in the top.* From these
+  starts the line is at 485 m/s on both parts (the truth's slowest seabed, 345 m/s; the
+  smooth starts put it at 616 and 690 m/s), so the windows end at 1250 m, and the truth's
+  delays put no limit inside a window up to 1.2 Hz. The data's phase at 1.2 Hz still cuts 5
+  of 10 sides in the centre from the true top, at 275–725 m, and 6 from the thin top (four at
+  275–695 m, two within 75 m of the windows' end), where the smooth start had 6 cut, with its
+  own line and windows to 1.6 km; in the west 2 and 1, against 2. The lines and windows
+  differ, so the counts compare only roughly, but they say what the inversions do: with the
+  top exactly right, the centre's traces after the slow waves' line are still more than half
+  a cycle from the data on half the sides, so what the check finds there is not the top's
+  error alone.
+
+**Decision.** The start's error under the seafloor is not what keeps the centre's $v_s$
+from improving below 750 m. With the truth there the update no longer points away, but it
+doesn't point at the truth either, and the error still grows; the hard-seabed control, which
+moved the right way, differs in the truth, not in how well the start has it. So a better
+shallow start from the data (the slow waves' dispersion inverted for $v_s$ under the
+seafloor, where the last two entries pointed) can't be the remedy by itself: at best it does
+what this control does, fits two thirds of the misfit and helps $v_p$, and done by halves it
+makes 750–1000 m worse. The whole section stays unrun. Next, the one run this control leaves
+open: the true top held fixed (`fixed_above = 750` from the same start), which says whether
+the deeper update turns towards the truth once it can't trade with the top. If it does, the
+order of work is a shallow model from the data and then holding it; if it doesn't, the
+remedy has to act on the misfit below the top (the soft-seabed staging of the literature,
+$v_p$ before $v_s$ and $v_z$ before $v_x$) and not on the start.
+
+**Reproduce:** `just in marmousi2-study true_top_l2` (and `west_true_top_l2`,
+`thin_true_top_l2`, `west_thin_true_top_l2`; about 77 minutes each on gauss),
+`true_top_phase_check` (15 minutes), after `just marmousi2`;
+`cargo test --release --test marmousi2_study the_true_top` for the blend.
+
 ## Open questions
 
 - **A test that discriminates the misfits.** The slow start (2026-11-21) left the deep model
@@ -4816,7 +4939,11 @@ hessian_products_side_by_side_in_2d -- --ignored --nocapture`.
   up rather than removing it; with Poisson's ratio capped at 0.25, as in the literature,
   $v_s$ moves the right way at every depth. Layer stripping by depth (`fixed_below`; 2026-11-26,
   "Marmousi2: layer stripping by depth") ends where L2 alone does in the centre, whose top
-  250 m inverted alone barely moves, and costs the west $v_p$. Not written: the phase misfit with
+  250 m inverted alone barely moves, and costs the west $v_p$. With the truth put back under
+  the seafloor in the start (2026-11-28, "Marmousi2: the true model under the seafloor in the
+  start") the centre's $v_s$ update below 750 m no longer points away but still adds error,
+  and the top, left free, is spoilt; the same start with the top held fixed is not run. Not
+  written: the phase misfit with
   the mute; a
   first stage below 0.6 Hz (a 0.45 Hz low-pass keeps 0.8% of a 1.2 Hz Ricker's energy, a 0.6 Hz
   one 2.9%, enough for noise-free data); the slow waves' speed picked from the observed gathers,

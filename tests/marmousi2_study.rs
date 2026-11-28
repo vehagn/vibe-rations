@@ -2029,9 +2029,9 @@ fn true_top_case(name: &str, part: &str, [thickness, taper]: [f64; 2]) -> Case {
 }
 
 /// The true-seabed-top control: `l2` from the smooth start with the truth put back under the
-/// seafloor, as Aaker et al. (2020) start their inversion of the SEG/EAGE Overthrust model
-/// from a smoothed truth whose uppermost part below the seabed is the truth itself, to keep
-/// the surface waves' complications out. It uses the truth, so it is no recipe: it is the
+/// seafloor, as Aaker et al. (2020) start their Overthrust inversion from a smoothed truth
+/// whose uppermost part below the seabed is the truth itself, to keep the surface waves'
+/// complications out. It uses the truth, so it is no recipe: it is the
 /// start's side of the hard-seabed control (`hard_l2`, which changes the truth instead), and
 /// says how much of the centre's wrong-way vs update below 750 m comes from the start's
 /// error under the seafloor. Reported as `invert` does, against its own start (the same as
@@ -2080,7 +2080,7 @@ fn west_thin_true_top_l2() {
 /// The phase check of the slow waves from the starts with the true top: does the truth under
 /// the seafloor bring them within half a cycle of the data at every offset?
 #[test]
-#[ignore = "a study: `just marmousi2-study true_top_phase_check` (about 10 minutes)"]
+#[ignore = "a study: `just marmousi2-study true_top_phase_check` (about 15 minutes)"]
 fn true_top_phase_check() {
     for part in ["central", "west"] {
         for (label, top) in [("true top", TRUE_TOP), ("thin true top", THIN_TRUE_TOP)] {
