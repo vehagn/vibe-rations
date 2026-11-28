@@ -353,7 +353,15 @@ impl Device for Cuda {
                 null_mut(),
             )
         };
-        self.api.check(code, kernel.name())
+        // CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES when a block's threads need more registers
+        // between them than the card gives a block.
+        self.api.check(code, kernel.name()).with_context(|| {
+            let [x, y, z] = block;
+            format!(
+                "launching blocks of {x} × {y} × {z} threads ({} sets fewer)",
+                super::BLOCK_VARIABLE
+            )
+        })
     }
 
     fn wait(&mut self) -> Result<()> {

@@ -10,11 +10,6 @@
  *
  * Arrays are the solver's padded ones, x fastest. STENCIL_L, the stencil's half-length, is
  * defined when compiling for a GPU, so that the loops over it unroll.
- *
- * A thread of the updates climbs a column of planes, keeping the 2 L values of each field its
- * derivatives along z read: a plane then costs one new value of each from memory instead of
- * 2 L, and what is computed from them is the same. `march` planes a thread; with 1 a thread
- * updates one node and reads everything afresh.
  */
 
 #ifdef __cplusplus
@@ -52,8 +47,6 @@ typedef struct Args {
     int row;            /* the step whose values to inject; the sample to gather into */
     int sources;        /* values in a row */
     int check;          /* layout: comes back if the structure arrived whole */
-    int march;          /* planes a thread of the updates climbs */
-    int spare;          /* keeps the four-byte members even in number */
     float sign;         /* +1 a step, -1 a step taken back; the mirrors' sign */
     float c[3][8];      /* the stencil's coefficients over the spacing along x, y, z */
 } Args;
@@ -77,20 +70,6 @@ static __forceinline__ __device__ float backward(const float *f, int r, int s, c
     float d = c[0] * (f[r] - f[r - s]);
     for (int k = 1; k < l; k++)
         d += c[k] * (f[r + k * s] - f[r - (k + 1) * s]);
-    return d;
-}
-
-/* The longest stencil's half-length: it sizes what a thread keeps of its column. */
-#define MAX_L 8
-
-/* A derivative along z from the 2 l values q a thread keeps of its column: Stencil::backward
- * when they start l planes below the node's, Stencil::forward when l - 1 below, with the
- * operations of either in the same order. */
-static __forceinline__ __device__ float kept(const float *q, const float *c, int l)
-{
-    float d = c[0] * (q[l] - q[l - 1]);
-    for (int k = 1; k < l; k++)
-        d += c[k] * (q[l + k] - q[l - 1 - k]);
     return d;
 }
 
@@ -124,180 +103,139 @@ static __forceinline__ __device__ float damped(float d, float *psi, const float 
         return; \
     int r = ((k + a.halo[2]) * a.padded[1] + j + a.halo[1]) * a.padded[0] + i + a.halo[0];
 
-/* The column a thread of the updates climbs: nodes (i, j, k) to (i, j, end - 1), a.march
- * planes of them or what is left, r the padded index of the first, sy and sz the distance in
- * memory between neighbours along y and z. A thread past the last node has none. */
-#define COLUMN \
-    const int i = blockIdx.x * blockDim.x + threadIdx.x; \
-    const int j = blockIdx.y * blockDim.y + threadIdx.y; \
-    int k = (blockIdx.z * blockDim.z + threadIdx.z) * a.march; \
-    if (i >= a.n[0] || j >= a.n[1] || k >= a.n[2]) \
-        return; \
-    const int end = k + a.march < a.n[2] ? k + a.march : a.n[2]; \
+/* The distance in memory between neighbours along y and z. */
+#define STRIDES \
     const int sy = a.padded[0]; \
-    const int sz = a.padded[0] * a.padded[1]; \
-    int r = ((k + a.halo[2]) * a.padded[1] + j + a.halo[1]) * a.padded[0] + i + a.halo[0];
-
-/* Before the first plane, the values of f below and above r that the derivative there reads,
- * all but the topmost, a place up from where MOVE_UP then puts them: from `below` planes
- * under r. */
-#define KEEP(q, f, below) \
-    for (int m = 1; m < 2 * l; m++) \
-        q[m] = f[r + (m - 1 - (below)) * sz];
-
-/* At each plane, what is kept moves a place down and the topmost value comes from memory. */
-#define MOVE_UP(q, f, below) \
-    for (int m = 0; m < 2 * l - 1; m++) \
-        q[m] = q[m + 1]; \
-    q[2 * l - 1] = f[r + (2 * l - 1 - (below)) * sz];
+    const int sz = a.padded[0] * a.padded[1];
 
 /* Adds sign times the velocity increment (VelocityUpdate::row). */
 __global__ void velocity(Args a)
 {
-    COLUMN
+    NODE
+    STRIDES
     const float *sxx = a.f[3], *syy = a.f[4], *szz = a.f[5];
     const float *sxy = a.f[6], *sxz = a.f[7], *syz = a.f[8];
     const int l = STENCIL_L;
-    /* dz sxz and dz syz at k read l planes below; dz szz at k+1/2, l - 1. */
-    float zxz[2 * MAX_L], zyz[2 * MAX_L], zzz[2 * MAX_L];
-    KEEP(zxz, sxz, l)
-    KEEP(zyz, syz, l)
-    KEEP(zzz, szz, l - 1)
-    for (; k < end; k++, r += sz) {
-        MOVE_UP(zxz, sxz, l)
-        MOVE_UP(zyz, syz, l)
-        MOVE_UP(zzz, szz, l - 1)
-        float d0 = forward(sxx, r, 1, a.c[0], l);  /* dx sxx at i+1/2 */
-        float d2 = kept(zxz, a.c[2], l);           /* dz sxz at k */
-        float d3 = backward(sxy, r, 1, a.c[0], l); /* dx sxy at i */
-        float d5 = kept(zyz, a.c[2], l);           /* dz syz at k */
-        float d6 = backward(sxz, r, 1, a.c[0], l); /* dx sxz at i */
-        float d8 = kept(zzz, a.c[2], l);           /* dz szz at k+1/2 */
-        float d1 = 0.0f, d4 = 0.0f, d7 = 0.0f;
-        if (a.n[1] > 1) {
-            d1 = backward(sxy, r, sy, a.c[1], l); /* dy sxy at j */
-            d4 = forward(syy, r, sy, a.c[1], l);  /* dy syy at j+1/2 */
-            d7 = backward(syz, r, sy, a.c[1], l); /* dy syz at j */
-        }
-        /* The layers' memory along x holds, per plane and row, each term's slab; along y, per
-         * plane and slab row, each term's row; along z, per slab plane and row, the same
-         * (Outputs::row). At half nodes: dx sxx, dy syy and dz szz; the rest at nodes. */
-        if (a.layers) {
-            int w, s;
-            const float *p;
-            w = a.lo[0] + a.hi[0];
-            s = slab(i, a.n[0], a.lo[0], a.hi[0]);
-            if (s >= 0) {
-                float *q = a.psi_v[0] + (k * a.n[1] + j) * 3 * w + s;
-                p = a.profile + a.profile_at[0];
-                d0 = damped(d0, q, p + 3 * w, w, s);
-                d3 = damped(d3, q + w, p, w, s);
-                d6 = damped(d6, q + 2 * w, p, w, s);
-            }
-            w = a.lo[1] + a.hi[1];
-            s = slab(j, a.n[1], a.lo[1], a.hi[1]);
-            if (s >= 0) {
-                float *q = a.psi_v[1] + (k * w + s) * 3 * a.n[0] + i;
-                p = a.profile + a.profile_at[1];
-                d1 = damped(d1, q, p, w, s);
-                d4 = damped(d4, q + a.n[0], p + 3 * w, w, s);
-                d7 = damped(d7, q + 2 * a.n[0], p, w, s);
-            }
-            w = a.lo[2] + a.hi[2];
-            s = slab(k, a.n[2], a.lo[2], a.hi[2]);
-            if (s >= 0) {
-                float *q = a.psi_v[2] + (s * a.n[1] + j) * 3 * a.n[0] + i;
-                p = a.profile + a.profile_at[2];
-                d2 = damped(d2, q, p, w, s);
-                d5 = damped(d5, q + a.n[0], p, w, s);
-                d8 = damped(d8, q + 2 * a.n[0], p + 3 * w, w, s);
-            }
-        }
-        a.f[0][r] += a.sign * (a.m[0][r] * (d0 + d1 + d2));
-        a.f[1][r] += a.sign * (a.m[1][r] * (d3 + d4 + d5));
-        a.f[2][r] += a.sign * (a.m[2][r] * (d6 + d7 + d8));
+    float d0 = forward(sxx, r, 1, a.c[0], l);   /* dx sxx at i+1/2 */
+    float d2 = backward(sxz, r, sz, a.c[2], l); /* dz sxz at k */
+    float d3 = backward(sxy, r, 1, a.c[0], l);  /* dx sxy at i */
+    float d5 = backward(syz, r, sz, a.c[2], l); /* dz syz at k */
+    float d6 = backward(sxz, r, 1, a.c[0], l);  /* dx sxz at i */
+    float d8 = forward(szz, r, sz, a.c[2], l);  /* dz szz at k+1/2 */
+    float d1 = 0.0f, d4 = 0.0f, d7 = 0.0f;
+    if (a.n[1] > 1) {
+        d1 = backward(sxy, r, sy, a.c[1], l); /* dy sxy at j */
+        d4 = forward(syy, r, sy, a.c[1], l);  /* dy syy at j+1/2 */
+        d7 = backward(syz, r, sy, a.c[1], l); /* dy syz at j */
     }
+    /* The layers' memory along x holds, per plane and row, each term's slab; along y, per
+     * plane and slab row, each term's row; along z, per slab plane and row, the same
+     * (Outputs::row). At half nodes: dx sxx, dy syy and dz szz; the rest at nodes. */
+    if (a.layers) {
+        int w, s;
+        const float *p;
+        w = a.lo[0] + a.hi[0];
+        s = slab(i, a.n[0], a.lo[0], a.hi[0]);
+        if (s >= 0) {
+            float *q = a.psi_v[0] + (k * a.n[1] + j) * 3 * w + s;
+            p = a.profile + a.profile_at[0];
+            d0 = damped(d0, q, p + 3 * w, w, s);
+            d3 = damped(d3, q + w, p, w, s);
+            d6 = damped(d6, q + 2 * w, p, w, s);
+        }
+        w = a.lo[1] + a.hi[1];
+        s = slab(j, a.n[1], a.lo[1], a.hi[1]);
+        if (s >= 0) {
+            float *q = a.psi_v[1] + (k * w + s) * 3 * a.n[0] + i;
+            p = a.profile + a.profile_at[1];
+            d1 = damped(d1, q, p, w, s);
+            d4 = damped(d4, q + a.n[0], p + 3 * w, w, s);
+            d7 = damped(d7, q + 2 * a.n[0], p, w, s);
+        }
+        w = a.lo[2] + a.hi[2];
+        s = slab(k, a.n[2], a.lo[2], a.hi[2]);
+        if (s >= 0) {
+            float *q = a.psi_v[2] + (s * a.n[1] + j) * 3 * a.n[0] + i;
+            p = a.profile + a.profile_at[2];
+            d2 = damped(d2, q, p, w, s);
+            d5 = damped(d5, q + a.n[0], p, w, s);
+            d8 = damped(d8, q + 2 * a.n[0], p + 3 * w, w, s);
+        }
+    }
+    a.f[0][r] += a.sign * (a.m[0][r] * (d0 + d1 + d2));
+    a.f[1][r] += a.sign * (a.m[1][r] * (d3 + d4 + d5));
+    a.f[2][r] += a.sign * (a.m[2][r] * (d6 + d7 + d8));
 }
 
 /* Adds sign times the stress increment (StressUpdate::row). */
 __global__ void stress(Args a)
 {
-    COLUMN
+    NODE
+    STRIDES
     const float *vx = a.f[0], *vy = a.f[1], *vz = a.f[2];
     const int l = STENCIL_L;
-    /* dz vz at k reads l planes below; dz vx and dz vy at k+1/2, l - 1. */
-    float zvz[2 * MAX_L], zvx[2 * MAX_L], zvy[2 * MAX_L];
-    KEEP(zvz, vz, l)
-    KEEP(zvx, vx, l - 1)
-    KEEP(zvy, vy, l - 1)
-    for (; k < end; k++, r += sz) {
-        MOVE_UP(zvz, vz, l)
-        MOVE_UP(zvx, vx, l - 1)
-        MOVE_UP(zvy, vy, l - 1)
-        const int surface = a.free_surface && k == 0;
-        float d0 = backward(vx, r, 1, a.c[0], l); /* dx vx at i */
-        /* On the free surface the condition szz = 0 replaces dz vz. */
-        float d2 = surface ? 0.0f : kept(zvz, a.c[2], l); /* dz vz at k */
-        float d4 = forward(vy, r, 1, a.c[0], l);  /* dx vy at i+1/2 */
-        float d5 = kept(zvx, a.c[2], l);          /* dz vx at k+1/2 */
-        float d7 = kept(zvy, a.c[2], l);          /* dz vy at k+1/2 */
-        float d6 = forward(vz, r, 1, a.c[0], l);  /* dx vz at i+1/2 */
-        float d1 = 0.0f, d3 = 0.0f, d8 = 0.0f;
-        if (a.n[1] > 1) {
-            d1 = backward(vy, r, sy, a.c[1], l); /* dy vy at j */
-            d3 = forward(vx, r, sy, a.c[1], l);  /* dy vx at j+1/2 */
-            d8 = forward(vz, r, sy, a.c[1], l);  /* dy vz at j+1/2 */
-        }
-        /* At nodes: dx vx, dy vy and dz vz (the first along each axis); the rest at half
-         * nodes. */
-        if (a.layers) {
-            int w, s;
-            const float *p;
-            w = a.lo[0] + a.hi[0];
-            s = slab(i, a.n[0], a.lo[0], a.hi[0]);
-            if (s >= 0) {
-                float *q = a.psi_s[0] + (k * a.n[1] + j) * 3 * w + s;
-                p = a.profile + a.profile_at[0];
-                d0 = damped(d0, q, p, w, s);
-                d4 = damped(d4, q + w, p + 3 * w, w, s);
-                d6 = damped(d6, q + 2 * w, p + 3 * w, w, s);
-            }
-            w = a.lo[1] + a.hi[1];
-            s = slab(j, a.n[1], a.lo[1], a.hi[1]);
-            if (s >= 0) {
-                float *q = a.psi_s[1] + (k * w + s) * 3 * a.n[0] + i;
-                p = a.profile + a.profile_at[1];
-                d1 = damped(d1, q, p, w, s);
-                d3 = damped(d3, q + a.n[0], p + 3 * w, w, s);
-                d8 = damped(d8, q + 2 * a.n[0], p + 3 * w, w, s);
-            }
-            w = a.lo[2] + a.hi[2];
-            s = slab(k, a.n[2], a.lo[2], a.hi[2]);
-            if (s >= 0) {
-                float *q = a.psi_s[2] + (s * a.n[1] + j) * 3 * a.n[0] + i;
-                p = a.profile + a.profile_at[2];
-                d2 = damped(d2, q, p, w, s);
-                d5 = damped(d5, q + a.n[0], p + 3 * w, w, s);
-                d7 = damped(d7, q + 2 * a.n[0], p + 3 * w, w, s);
-            }
-        }
-        const float lam = a.m[3][r], l2m = a.m[4][r];
-        if (surface) {
-            /* With szz = 0, dz vz = -lam/(lam + 2 mu) (dx vx + dy vy). */
-            const float q = l2m > 0.0f ? lam * lam / l2m : 0.0f;
-            const float u = l2m - q, v = lam - q;
-            a.f[3][r] += a.sign * (u * d0 + v * d1);
-            a.f[4][r] += a.sign * (v * d0 + u * d1);
-            a.f[5][r] = 0.0f;
-        } else {
-            a.f[3][r] += a.sign * (l2m * d0 + lam * (d1 + d2));
-            a.f[4][r] += a.sign * (l2m * d1 + lam * (d0 + d2));
-            a.f[5][r] += a.sign * (l2m * d2 + lam * (d0 + d1));
-        }
-        a.f[6][r] += a.sign * (a.m[5][r] * (d3 + d4));
-        a.f[7][r] += a.sign * (a.m[6][r] * (d5 + d6));
-        a.f[8][r] += a.sign * (a.m[7][r] * (d7 + d8));
+    const int surface = a.free_surface && k == 0;
+    float d0 = backward(vx, r, 1, a.c[0], l); /* dx vx at i */
+    /* On the free surface the condition szz = 0 replaces dz vz. */
+    float d2 = surface ? 0.0f : backward(vz, r, sz, a.c[2], l); /* dz vz at k */
+    float d4 = forward(vy, r, 1, a.c[0], l);  /* dx vy at i+1/2 */
+    float d5 = forward(vx, r, sz, a.c[2], l); /* dz vx at k+1/2 */
+    float d7 = forward(vy, r, sz, a.c[2], l); /* dz vy at k+1/2 */
+    float d6 = forward(vz, r, 1, a.c[0], l);  /* dx vz at i+1/2 */
+    float d1 = 0.0f, d3 = 0.0f, d8 = 0.0f;
+    if (a.n[1] > 1) {
+        d1 = backward(vy, r, sy, a.c[1], l); /* dy vy at j */
+        d3 = forward(vx, r, sy, a.c[1], l);  /* dy vx at j+1/2 */
+        d8 = forward(vz, r, sy, a.c[1], l);  /* dy vz at j+1/2 */
     }
+    /* At nodes: dx vx, dy vy and dz vz (the first along each axis); the rest at half nodes. */
+    if (a.layers) {
+        int w, s;
+        const float *p;
+        w = a.lo[0] + a.hi[0];
+        s = slab(i, a.n[0], a.lo[0], a.hi[0]);
+        if (s >= 0) {
+            float *q = a.psi_s[0] + (k * a.n[1] + j) * 3 * w + s;
+            p = a.profile + a.profile_at[0];
+            d0 = damped(d0, q, p, w, s);
+            d4 = damped(d4, q + w, p + 3 * w, w, s);
+            d6 = damped(d6, q + 2 * w, p + 3 * w, w, s);
+        }
+        w = a.lo[1] + a.hi[1];
+        s = slab(j, a.n[1], a.lo[1], a.hi[1]);
+        if (s >= 0) {
+            float *q = a.psi_s[1] + (k * w + s) * 3 * a.n[0] + i;
+            p = a.profile + a.profile_at[1];
+            d1 = damped(d1, q, p, w, s);
+            d3 = damped(d3, q + a.n[0], p + 3 * w, w, s);
+            d8 = damped(d8, q + 2 * a.n[0], p + 3 * w, w, s);
+        }
+        w = a.lo[2] + a.hi[2];
+        s = slab(k, a.n[2], a.lo[2], a.hi[2]);
+        if (s >= 0) {
+            float *q = a.psi_s[2] + (s * a.n[1] + j) * 3 * a.n[0] + i;
+            p = a.profile + a.profile_at[2];
+            d2 = damped(d2, q, p, w, s);
+            d5 = damped(d5, q + a.n[0], p + 3 * w, w, s);
+            d7 = damped(d7, q + 2 * a.n[0], p + 3 * w, w, s);
+        }
+    }
+    const float lam = a.m[3][r], l2m = a.m[4][r];
+    if (surface) {
+        /* With szz = 0, dz vz = -lam/(lam + 2 mu) (dx vx + dy vy). */
+        const float q = l2m > 0.0f ? lam * lam / l2m : 0.0f;
+        const float u = l2m - q, v = lam - q;
+        a.f[3][r] += a.sign * (u * d0 + v * d1);
+        a.f[4][r] += a.sign * (v * d0 + u * d1);
+        a.f[5][r] = 0.0f;
+    } else {
+        a.f[3][r] += a.sign * (l2m * d0 + lam * (d1 + d2));
+        a.f[4][r] += a.sign * (l2m * d1 + lam * (d0 + d2));
+        a.f[5][r] += a.sign * (l2m * d2 + lam * (d0 + d1));
+    }
+    a.f[6][r] += a.sign * (a.m[5][r] * (d3 + d4));
+    a.f[7][r] += a.sign * (a.m[6][r] * (d5 + d6));
+    a.f[8][r] += a.sign * (a.m[7][r] * (d7 + d8));
 }
 
 /* Damps every field inside the side layers by the sponge's factors (Solver::damp_layers). */
