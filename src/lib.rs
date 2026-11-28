@@ -10,6 +10,9 @@ pub mod adjoint;
 pub mod born;
 pub mod config;
 pub mod cpml;
+// Libraries are found at run time with the system's loader, which a browser hasn't got.
+#[cfg(unix)]
+pub mod cuda;
 pub mod fd;
 pub mod gradient;
 pub mod grid;

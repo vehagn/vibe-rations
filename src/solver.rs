@@ -572,6 +572,24 @@ impl Solver {
         }
     }
 
+    /// The absorbing layers' memory, for the velocity update and then the stress update, along
+    /// x, y and z ([`Outputs::row`] has the layout): with the fields, the material and the
+    /// sponge, what a GPU holds to step as this solver does (crate::cuda).
+    pub fn layers(&self) -> [&[Vec<f32>; 3]; 2] {
+        [&self.psi_v, &self.psi_s]
+    }
+
+    /// The sponge's factors along each axis, if it damps.
+    pub fn sponge(&self) -> Option<&[Vec<f32>; 3]> {
+        self.sponge.as_ref()
+    }
+
+    /// The absorbing layers' memory, to set it: the velocity update's, then the stress
+    /// update's.
+    pub fn layers_mut(&mut self) -> [&mut [Vec<f32>; 3]; 2] {
+        [&mut self.psi_v, &mut self.psi_s]
+    }
+
     /// The nodes outside the absorbing layers along x, y and z, where the update is the same
     /// at every node and can be taken back.
     pub fn interior(&self) -> [std::ops::Range<usize>; 3] {
@@ -1046,6 +1064,17 @@ impl PointOp {
         for &(f, i, w) in &self.terms {
             fields.get_mut(f)[i] += w * value;
         }
+    }
+
+    /// [`PointOp::sample`] of fields whose values at its terms' positions are `values`, in
+    /// the terms' order: the same sum, for values fetched from elsewhere (crate::cuda).
+    pub fn weigh(&self, values: &[f32]) -> f32 {
+        assert_eq!(values.len(), self.terms.len(), "a value for each term");
+        self.terms
+            .iter()
+            .zip(values)
+            .map(|(&(_, _, w), &v)| w * v)
+            .sum()
     }
 }
 

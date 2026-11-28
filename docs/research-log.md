@@ -4766,6 +4766,163 @@ the_line_sources_closed_forms_sum_the_point_sources`; `just unit 2d`; `just unit
 counts_what`; the speeds, `cargo test --release --test physics
 hessian_products_side_by_side_in_2d -- --ignored --nocapture`.
 
+## 2026-11-27 — The time step on a GPU
+
+**Question.** gauss has a GeForce GTX 1080 (2016; 8 GiB) beside its six cores, and csim, the
+maintainer's earlier code, stepped its elastic wavefields on such cards [@aaker2020]. How much
+faster than the CPU does the forward step run there; can it be had without the build, the
+Mac's binary or the browser's depending on CUDA; and can the CPU stay the reference, with a
+tolerance to justify, or bit for bit?
+
+**Design** (`src/cuda.rs`, `src/cuda/`; `run --gpu`).
+
+- *Nothing at build time.* The kernels are CUDA C source held in the binary
+  (`cuda/kernels.cu`), compiled when a run starts by NVRTC (`libnvrtc.so.12`) and launched
+  through the driver's API (`libcuda.so.1`), both opened with the system's loader and declared
+  by hand (`cuda/driver.rs`, some 25 functions). No crate is added and nothing is linked, so a
+  build is the same with or without a GPU, the dependencies stay pure Rust, and the dev
+  container needs no CUDA. Considered and left: `cudarc` (a dependency for those 25 calls),
+  rust-cuda (a pinned compiler), and `nvcc` when building (the dev container has none, and
+  Docker on gauss has no NVIDIA runtime, so nothing built there could be tested there).
+  In a first check with a small kernel the context took 0.13 s, NVRTC 0.13 s and the driver
+  0.07 s to load what it compiled.
+- *The whole step on the card.* The nine fields, the eight material arrays, the CPML's
+  memory and coefficients and the sponge's factors live there, and one step is up to seven
+  launches in `Solver::step_with`'s order: velocities, forces, the velocities' mirrors,
+  stresses, moments, the sponge, the stresses' mirrors. Copying fields across each step would
+  cost more than stepping them. What crosses: the sources' values for every step before the
+  run; what the receivers' terms read, kept on the card and fetched 64 MiB at a time; the
+  largest velocity every hundred steps; and the fields when a snapshot or the run's end wants
+  them.
+- *Bit for bit, not a tolerance.* A GPU's single-precision additions, multiplications and
+  divisions round as a CPU's do; what differs is that compilers for it fuse $ab + c$ into one
+  rounding by default. With that off (NVRTC's `--fmad=false`) and each node's operations
+  written in the solver's order, the results are the CPU's to the last bit, so the tests
+  compare bits and no tolerance needs defending. A first check on the card, before any solver
+  code: a stencil kernel's 4,000,000 values, none different from the CPU's; with fusing on,
+  1,638,985 different, by up to $4.8 \times 10^{-7}$.
+- *One thread a node,* doing what `VelocityUpdate::row` and `StressUpdate::row` do for it,
+  the layers' memory included. Everything a kernel reads is one structure passed by value
+  (464 bytes: 32 addresses and 52 four-byte members, laid out without padding; a kernel sends
+  back its size and last members at the start of every run, and the run stops if they differ).
+  The stencil's half-length is a constant when NVRTC compiles, so its loops unroll.
+- *Sources and receivers.* Sources add through their point operators' terms in one thread,
+  in the solver's order, since terms may share a node and additions don't commute in the last
+  bit. Receivers' terms are read on the card and weighed on the host with the sum
+  `PointOp::sample` takes (`PointOp::weigh`).
+- *The same kernels on a CPU.* The source keeps to what C and CUDA C++ share, so the system's
+  C compiler compiles it too (`cuda/host.c`, with `-ffp-contract=off`), and `cuda::Host` runs
+  it a thread at a time. The tests step it against the solver with no GPU, in CI as anywhere:
+  water over rock under a free surface with the sponge, uneven spacing and sources between
+  nodes at order 8; a full space at order 4; a 2D grid at order 16; every field, layer memory
+  and trace value compared as bits. The same test runs on a GPU where there is one
+  (`VIBE_RATIONS_CUDA_REQUIRED=1` makes its absence a failure).
+
+Forward runs only: gradients and inversions still step on the CPU.
+
+**Method.** On gauss (`deploy/simulation-host/`: the card's driver 550.163.01 and CUDA 12.4
+came with the system, so nothing was installed), built in the dev container and run from the
+host, which is where the card is. The three runs of the 2026-11-25 entry: `examples/layered.toml`
+(129 × 129 × 81 nodes, 1,666 steps, 18 snapshots), Marmousi2's central part
+(`central-true.toml`, 241 × 41 × 141, 1,750 steps) and the whole section's grid for 300 steps
+(681 × 201 × 141), each twice; Mcells/s are the run's own, interior nodes × steps over the
+time stepping, the last progress line's. Each run's output files were compared with those of
+the same binary on the CPU. The CPU was busy with other work throughout (load 11–12 on 12
+threads), which a run on the card, one mostly sleeping host thread, hardly feels; the CPU's
+own speeds in the first table are the idle machine's of 2026-11-25. Both were then measured
+again on the idle machine (below).
+
+**Results.** Mcells/s, the two runs of each within 1 of each other, and the whole run's wall
+time:
+
+| Run | GTX 1080 | | gauss's CPU, 12 threads | M1 Max, 10 threads |
+|---|---|---|---|---|
+| `layered.toml` | **465** | 5.8 s | 111 | 229 |
+| the same without its snapshots | 512 | 5.4 s | | |
+| Marmousi2's central part | **505** | 5.9 s | 117 | 198 |
+| the whole section's grid, 300 steps | **664** | 13.3 s | 114 | 318 |
+
+*On the idle machine* (2026-11-28, from 04:26 UTC, the final tree `74f5901`): the same binary
+on the CPU's 12 threads, three runs, and on the card, two; medians, with the range where
+there was one, and the whole run's wall time:
+
+| Run | GTX 1080 | | gauss's CPU | | Ratio |
+|---|---|---|---|---|---|
+| `layered.toml` | 446 (445–447) | 5.8 s | 108 (108–109) | 21.0 s | 4.1 |
+| the same without its snapshots | 510 (509–512) | 5.2 s | 110 | 20.8 s | 4.6 |
+| Marmousi2's central part | 504 (502–505) | 5.7 s | 114 (113–114) | 21.7 s | 4.4 |
+| the whole section's grid, 300 steps | 664 (663–664) | 11.8 s | 114 | 52.5 s | 5.8 |
+
+A busy CPU costs the card's runs nothing in the stepping without snapshots and 0.2–1.5 s of
+wall time outside it. With `layered.toml`'s snapshots the card stepped slower on the idle
+machine than on the busy one (445–447 against 463–465) though the run was shorter; not
+looked into. The CPU's results are untouched by the change: with main's binary (`a41d004`)
+and this one, every output file of the three small runs is the same, `run.json` included,
+and `just physics` prints the same 284 lines but for their durations.
+
+*Bit for bit.* For all four runs every output file is byte for byte the CPU's: the traces, the
+times, the gathers and `layered.toml`'s 18 snapshot pictures. `run.json` differs by the one
+line that names the device.
+
+*The card.* It works at 100% and 130–141 W, 61 to 67 °C over a whole-section run (77 °C at
+most after dozens of runs in a row). The whole section's 19.3 M nodes take 1,665 MiB of its
+8 GiB, so it would hold about 100 M. A run still holds the solver on the host as well (the
+model is set up there, and the fields come back at the end): 1.95 GB for the whole section.
+Outside the stepping a run spends about 1 s on the small grids and 4.5 s on the whole
+section's (setting the model up on the host, as a CPU run does, 1.5 GB across each way, and
+the outputs). Each snapshot fetches every field: `layered.toml`'s 18 cost 9% of its stepping.
+
+*Blocks of threads* (`VIBE_RATIONS_CUDA_BLOCK`), `layered.toml` without snapshots and the
+whole section's grid: the default, 32 × 4 × 4 along $x$, $y$ and $z$, was the fastest of
+thirteen on both (510 and 662). Longer rows lose (64 × 4 × 4: 434 and 615; 128 × 4 × 1: 429 and
+520), and so do short rows with more of them (16 × 16 × 2: 406 and 405). All thirteen gave the
+same bits.
+
+*Fused multiply-adds buy nothing* (`VIBE_RATIONS_CUDA_FMAD=on`): 498 and 649, 2% slower, and
+nearly every trace value then differs from the CPU's, by up to $2.3 \times 10^{-5}$ of the
+largest on `layered.toml` and $2.3 \times 10^{-6}$ after the whole section's 300 steps. The
+step is limited by memory, not arithmetic, so bit-for-bit agreement costs nothing.
+
+*Threads climbing along $z$* (tried in `606b8b0`, taken out in `93aa660`). csim's kernels have
+each thread march up a column, keeping in registers the $2L$ values its $z$-derivative reads,
+so that a plane costs one new value from memory instead of $2L$ [@aaker2020]. Done here for
+the three $z$-derivatives of each update, with the same operations per node (and so the same
+bits: every trace of 48 runs matched), it lost. The loop keeps every argument of the kernel in
+registers: at order 8 the stress update needs 155 a thread and the velocity update 124,
+against 36 and 40 for a node a thread (198 and 168 at order 16; from the assembler's report).
+A block may hold 65,536, so the default block of 512 threads no longer launched
+(`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`), and with smaller blocks the card holds fewer threads
+at once. One plane a thread ran 24–25% slower than before at the same block (363 against 487,
+473 against 622). Climbing won part of it back, most at 4 to 16 planes, and the whole column
+was always slower than those:
+
+| Planes a thread | 1 | 4 | 16 | all | a node a thread |
+|---|---|---|---|---|---|
+| `layered.toml` without snapshots, best of six blocks | 386 | 461 | 475 | 427 | 510 |
+| the whole section's grid, best of six blocks | 504 | 637 | 608 | 562 | 664 |
+
+So the reads along $z$ do cost (18–33% came back with them gone), but less than the registers
+that saving them took. csim keeps the registers down with a kernel per field, each with one
+derivative along $z$, and takes the $x$- and $y$-derivatives from tiles in shared memory;
+that is the layout to try if the forward step on the card ever limits anything, not a loop
+inside these two kernels.
+
+**Decision.** `run --gpu` stays, as an option: a node a thread, blocks of 32 × 4 × 4, no
+fused multiply-adds, the CPU's results bit for bit and 4.1–5.8 times gauss's CPU (1.9–2.5
+times the M1 Max). The CPU is still the reference and the default; the tests hold the two
+together bit for bit, with or without a card. Not done: gradients and inversions, which is
+where an inversion's time goes. The adjoint is the same step, so it needs no new update
+kernels, but the checkpoints or the rebuilt field's band, the strain rates and the
+correlations would have to live on the card too, within its 8 GiB.
+
+**Reproduce.** On a machine with an NVIDIA card, its driver and CUDA's `libnvrtc`: `cargo
+test --release --lib cuda -- --nocapture` (with `VIBE_RATIONS_CUDA_REQUIRED=1` so that a
+missing card fails); `vibe-rations run examples/layered.toml --gpu --out out/gpu` and the same
+without `--gpu`, then `diff -r` of the two directories. The whole section's 300 steps:
+`examples/marmousi2/whole-true.toml` with `duration = 0.6`. On gauss the binary is built in
+the dev container and run from the host (`deploy/simulation-host/README.md`). Without a card:
+`just unit cuda` runs the kernels on the CPU against the solver.
+
 ## 2026-11-28 — Marmousi2: the true model under the seafloor in the start
 
 **Question.** The 2026-11-26 entries left the centre's wrong-way $v_s$ update below 750 m

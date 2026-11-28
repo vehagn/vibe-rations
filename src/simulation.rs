@@ -101,6 +101,9 @@ pub struct RunInfo {
     pub band: Option<f64>,
     /// The compiled update loops it runs (crate::simd): AVX2 or plain, the same results.
     pub kernels: Kernels,
+    /// What stepped it, when that wasn't this CPU (crate::cuda): a GPU's name and arithmetic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// The most memory the run holds at once (`memory.peak`).
     pub memory_bytes: usize,
     /// What it holds, part by part (crate::memory).
@@ -440,6 +443,7 @@ impl Simulation {
             coefficients: cfg.scheme.coefficients,
             band: solver.stencil.band(),
             kernels: solver.kernels(),
+            device: None,
             memory_bytes: memory.peak as usize,
             memory,
             sources: source_info,
