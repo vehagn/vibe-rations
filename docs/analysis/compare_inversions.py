@@ -143,7 +143,7 @@ md.append("| run | device | start (s) | mean iteration (s) | iterations | total 
 md.append("|---|---|---|---|---|---|---|---|")
 for n in names:
     r = result["runs"][n]; t = r["timing"]; it = t.get("iteration_s", [])
-    md.append(f"| {n} | {r['device'][:60]} | {t.get('start_s', float('nan')):.0f} | "
+    md.append(f"| {n} | {r['device']} | {t.get('start_s', float('nan')):.0f} | "
               f"{(sum(it) / len(it)) if it else float('nan'):.0f} | {len(it)} | "
               f"{t.get('total_s', float('nan')) / 3600:.2f} | {t.get('rss_gib') or float('nan'):.2f} | {t.get('exit')} |")
 md.append("\n## Misfit by iteration (fraction of the start)\n")
