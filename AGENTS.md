@@ -171,6 +171,31 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The step on a GPU** (`run --gpu`, `src/cuda.rs`, `src/cuda/`; the log's "The time step
+  on a GPU", 2026-11-27). The whole step on an NVIDIA card, a thread a node, the CPU's results
+  **bit for bit**: the kernels (`cuda/kernels.cu`) do each node's operations in the solver's
+  order and are compiled without fused multiply-adds (`--fmad=false`), which is all that
+  differs between the two's arithmetic. Keep it so: when `VelocityUpdate::row`,
+  `StressUpdate::row`, the CPML's update, the mirrors, the sponge or `Solver::step_with`'s
+  order changes, the kernels and `GpuSolver::step` must follow, and
+  `the_kernels_step_as_the_solver_bit_for_bit` catches a miss without a GPU, since the
+  kernels keep to what C and CUDA C++ share and `cuda::Host` runs them on the CPU (so no C++
+  in them, and `-ffp-contract=off` for the C). Nothing is linked: NVRTC and the driver are
+  opened at run time (`cuda/driver.rs`), so the dependencies stay pure Rust and a build needs
+  no CUDA. `Args` is passed to every kernel by value and mirrored by hand in `cuda.rs`: eight-
+  byte members first, an even number of four-byte ones, and the run checks the layout on the
+  card before it steps. On gauss's GTX 1080: 465–664 Mcells/s against the CPU's 111–117,
+  blocks of 32 × 4 × 4 the fastest, fused multiply-adds 2% slower (memory limits it, not
+  arithmetic). **Registers decide what fits:** a block may hold 65,536 on that card, and a
+  version whose threads climbed columns keeping what the $z$-derivatives read (csim's idea)
+  needed 155 a thread against 36, would not launch in blocks of 512
+  (`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`), and was 4–7% slower at its best; a loop in a kernel
+  keeps every argument in registers. Ask the assembler before believing a kernel is cheap
+  (`nvcc -arch=sm_61 --fmad=false -DSTENCIL_L=4 -Xptxas -v -c src/cuda/kernels.cu`).
+  The dev container sees no GPU (gauss's Docker has no NVIDIA runtime): build there, run the
+  binary and the lib's test binary from the host (`VIBE_RATIONS_CUDA_REQUIRED=1` makes a
+  missing card a failure). Forward runs only; `run.json`'s `kernels` is then still the CPU's
+  loops, which step nothing, and `device` says what did.
 - **2D runs** (`points = [nx, 1, nz]`; `Grid::is_2d`, `Grid::spans`, `cpml::layer_widths`;
   the log's "A 2D solver", 2026-11-27). Plane strain on the 3D code, not a second solver: the
   kernels skip the $y$-derivatives, so a 2D step is bit for bit the 3D step of a field
@@ -241,8 +266,8 @@ doesn't show.
   section's gradient, 15 GiB). It ran `examples/layered.toml` at 90 Mcells/s from the image,
   104 built for its CPU (AVX2), half the Mac's native speed: it frees the Mac rather than
   outruns it. Since the run-time AVX2 and the bands (2026-11-25) either build runs it at
-  111. Record everything installed there in its README; `setup.sh` must stay able to redo
-  it. `just mac` removes the old binary before copying the new: macOS killed one
+  111. Its GTX 1080 runs the forward step at 465–664 (above). Record everything installed
+  there in its README; `setup.sh` must stay able to redo it. `just mac` removes the old binary before copying the new: macOS killed one
   rewritten in place (SIGKILL, exit 137).
 
 - **Sources and receivers sit where they are** (`Grid::coordinates`, `Solver::axis_weights`,

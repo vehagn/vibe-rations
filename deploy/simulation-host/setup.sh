@@ -13,6 +13,12 @@
 #
 #   ssh root@host 'bash -s' < deploy/simulation-host/setup.sh
 #   ssh root@host 'DATA=/srv/data bash -s' < deploy/simulation-host/setup.sh
+#   ssh root@host 'GPU=nvidia bash -s' < deploy/simulation-host/setup.sh
+#
+# With GPU=nvidia it also installs Debian's NVIDIA driver and CUDA toolkit, for `run --gpu`
+# on the machine itself (the containers don't see the card): as gauss got them with its
+# system, some 430 packages. They need `contrib non-free non-free-firmware` in apt's sources,
+# and a reboot before the driver loads.
 #
 # Running it again changes nothing that is in place: it doesn't replace a running server
 # (`just remote-update host` does) or touch a clone's work. It leaves users, SSH and the
@@ -39,6 +45,14 @@ sed -i 's/^deb-src /# deb-src /' /etc/apt/sources.list
 apt-get update -qq
 apt-get install -y -qq docker.io docker-compose git just
 systemctl enable --now docker
+
+if [ "${GPU:-}" = nvidia ]; then
+    # The driver builds its kernel module here (dkms), hence the headers. `run --gpu` uses
+    # the driver's libcuda1 and the toolkit's libnvrtc12; the rest of the toolkit is what
+    # gauss has.
+    apt-get install -y -qq linux-headers-amd64 nvidia-driver nvidia-smi nvidia-cuda-toolkit
+    nvidia-smi >/dev/null 2>&1 || echo "reboot to load the NVIDIA driver"
+fi
 
 # The solver server.
 install -d -o "$SERVER_UID" -g "$SERVER_UID" -m 0755 "$DATA/runs"
