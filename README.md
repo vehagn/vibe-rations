@@ -414,13 +414,14 @@ run starts by CUDA's run-time compiler (`libnvrtc`) and run through the driver (
 both looked for on the machine at that moment; where one is missing, `--gpu` says which.
 Forward runs only so far: `gradient` and `invert` step on the CPU.
 
-On gauss's GeForce GTX 1080 (from 2016, 8 GiB), the runs above, beside the two CPUs' (the
-research log's "The time step on a GPU"):
+On gauss's GeForce GTX 1080 (from 2016, 8 GiB), the runs above, beside gauss's CPU timed
+the same night on the idle machine and the M1 Max's figures above (the research log's "The
+time step on a GPU"):
 
 | Run | GTX 1080 | gauss's CPU | M1 Max |
 |---|---|---|---|
-| `examples/layered.toml` | 465 Mcell/s | 111 Mcell/s | 229 Mcell/s |
-| Marmousi2's central part forward | 505 Mcell/s | 117 Mcell/s | 198 Mcell/s |
+| `examples/layered.toml` | 446 Mcell/s | 108 Mcell/s | 229 Mcell/s |
+| Marmousi2's central part forward | 504 Mcell/s | 114 Mcell/s | 198 Mcell/s |
 | the whole section's grid, 300 steps | 664 Mcell/s | 114 Mcell/s | 318 Mcell/s |
 
 The whole section's 19.3 M nodes take 1.6 of the card's 8 GiB. `VIBE_RATIONS_CUDA_BLOCK` sets

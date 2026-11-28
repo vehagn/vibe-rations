@@ -4829,7 +4829,8 @@ host, which is where the card is. The three runs of the 2026-11-25 entry: `examp
 time stepping, the last progress line's. Each run's output files were compared with those of
 the same binary on the CPU. The CPU was busy with other work throughout (load 11–12 on 12
 threads), which a run on the card, one mostly sleeping host thread, hardly feels; the CPU's
-own speeds are the idle machine's of 2026-11-25, not measured again that night.
+own speeds in the first table are the idle machine's of 2026-11-25. Both were then measured
+again on the idle machine (below).
 
 **Results.** Mcells/s, the two runs of each within 1 of each other, and the whole run's wall
 time:
@@ -4840,6 +4841,24 @@ time:
 | the same without its snapshots | 512 | 5.4 s | | |
 | Marmousi2's central part | **505** | 5.9 s | 117 | 198 |
 | the whole section's grid, 300 steps | **664** | 13.3 s | 114 | 318 |
+
+*On the idle machine* (2026-11-28, from 04:26 UTC, the final tree `74f5901`): the same binary
+on the CPU's 12 threads, three runs, and on the card, two; medians, with the range where
+there was one, and the whole run's wall time:
+
+| Run | GTX 1080 | | gauss's CPU | | Ratio |
+|---|---|---|---|---|---|
+| `layered.toml` | 446 (445–447) | 5.8 s | 108 (108–109) | 21.0 s | 4.1 |
+| the same without its snapshots | 510 (509–512) | 5.2 s | 110 | 20.8 s | 4.6 |
+| Marmousi2's central part | 504 (502–505) | 5.7 s | 114 (113–114) | 21.7 s | 4.4 |
+| the whole section's grid, 300 steps | 664 (663–664) | 11.8 s | 114 | 52.5 s | 5.8 |
+
+A busy CPU costs the card's runs nothing in the stepping without snapshots and 0.2–1.5 s of
+wall time outside it. With `layered.toml`'s snapshots the card stepped slower on the idle
+machine than on the busy one (445–447 against 463–465) though the run was shorter; not
+looked into. The CPU's results are untouched by the change: with main's binary (`a41d004`)
+and this one, every output file of the three small runs is the same, `run.json` included,
+and `just physics` prints the same 284 lines but for their durations.
 
 *Bit for bit.* For all four runs every output file is byte for byte the CPU's: the traces, the
 times, the gathers and `layered.toml`'s 18 snapshot pictures. `run.json` differs by the one
@@ -4889,7 +4908,7 @@ that is the layout to try if the forward step on the card ever limits anything, 
 inside these two kernels.
 
 **Decision.** `run --gpu` stays, as an option: a node a thread, blocks of 32 × 4 × 4, no
-fused multiply-adds, the CPU's results bit for bit and 4.2–5.8 times gauss's CPU (2.0–2.6
+fused multiply-adds, the CPU's results bit for bit and 4.1–5.8 times gauss's CPU (1.9–2.5
 times the M1 Max). The CPU is still the reference and the default; the tests hold the two
 together bit for bit, with or without a card. Not done: gradients and inversions, which is
 where an inversion's time goes. The adjoint is the same step, so it needs no new update

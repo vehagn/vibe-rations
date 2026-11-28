@@ -184,9 +184,10 @@ doesn't show.
   opened at run time (`cuda/driver.rs`), so the dependencies stay pure Rust and a build needs
   no CUDA. `Args` is passed to every kernel by value and mirrored by hand in `cuda.rs`: eight-
   byte members first, an even number of four-byte ones, and the run checks the layout on the
-  card before it steps. On gauss's GTX 1080: 465–664 Mcells/s against the CPU's 111–117,
-  blocks of 32 × 4 × 4 the fastest, fused multiply-adds 2% slower (memory limits it, not
-  arithmetic). **Registers decide what fits:** a block may hold 65,536 on that card, and a
+  card before it steps. On gauss's GTX 1080: 446–664 Mcells/s against the CPU's 108–114 on
+  the idle machine the same night (4.1–5.8 times), blocks of 32 × 4 × 4 the fastest, fused
+  multiply-adds 2% slower (memory limits it, not arithmetic). **Registers decide what fits:**
+  a block may hold 65,536 on that card, and a
   version whose threads climbed columns keeping what the $z$-derivatives read (csim's idea)
   needed 155 a thread against 36, would not launch in blocks of 512
   (`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`), and was 4–7% slower at its best; a loop in a kernel
@@ -266,7 +267,7 @@ doesn't show.
   section's gradient, 15 GiB). It ran `examples/layered.toml` at 90 Mcells/s from the image,
   104 built for its CPU (AVX2), half the Mac's native speed: it frees the Mac rather than
   outruns it. Since the run-time AVX2 and the bands (2026-11-25) either build runs it at
-  111. Its GTX 1080 runs the forward step at 465–664 (above). Record everything installed
+  111. Its GTX 1080 runs the forward step at 446–664 (above). Record everything installed
   there in its README; `setup.sh` must stay able to redo it. `just mac` removes the old binary before copying the new: macOS killed one
   rewritten in place (SIGKILL, exit 137).
 
