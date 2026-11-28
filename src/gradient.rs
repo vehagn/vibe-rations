@@ -550,11 +550,15 @@ pub(crate) fn velocities(s: &Solver) -> [Vec<f32>; 3] {
     s.fields.velocities().map(<[f32]>::to_vec)
 }
 
+/// A term of a pressure residual: (normal component 0–2, padded index, its interpolation
+/// weight / (3W) there).
+pub(crate) type PressureTerm = (usize, usize, f32);
+
 /// The pressure residuals, as they enter the adjoint strain.
 pub(crate) struct PressureResiduals {
-    /// For each receiver, the terms it reads pressure from: (normal component 0–2, padded
-    /// index, its interpolation weight / (3W) there). On a node, one per component.
-    terms: Vec<Vec<(usize, usize, f32)>>,
+    /// For each receiver, the terms it reads pressure from ([`PressureTerm`]). On a node, one
+    /// per component.
+    terms: Vec<Vec<PressureTerm>>,
     /// The pressure residuals, (receivers, samples), if pressure was recorded.
     values: Option<Vec<f32>>,
     samples: usize,
@@ -603,6 +607,23 @@ impl PressureResiduals {
 
     pub(crate) fn memory_bytes(&self) -> usize {
         4 * self.values.as_ref().map_or(0, Vec::len)
+    }
+
+    /// The sample whose residuals [`PressureResiduals::add`] adds for `n`, if it adds any.
+    #[cfg(unix)]
+    pub(crate) fn sample_for(&self, n: usize) -> Option<usize> {
+        self.values.as_ref()?;
+        let step = n.checked_sub(1)?;
+        let sample = step / self.record_every;
+        (step.is_multiple_of(self.record_every) && sample < self.samples).then_some(sample)
+    }
+
+    /// For each receiver, the terms it adds to the adjoint strain: (normal component 0–2,
+    /// padded index, weight); and the residuals, (receivers, samples), if pressure was
+    /// recorded (crate::cuda).
+    #[cfg(unix)]
+    pub(crate) fn parts(&self) -> (&[Vec<PressureTerm>], Option<&[f32]>, usize) {
+        (&self.terms, self.values.as_deref(), self.samples)
     }
 
     /// Adds -W⁻¹ r_σ⁽ⁿ⁾, the residual of the pressure read from σ⁽ⁿ⁾ (recorded after forward

@@ -264,7 +264,7 @@ impl Device for Cuda {
             format!("--fmad={}", self.fused),
             format!("-DSTENCIL_L={half_length}"),
         ];
-        let (ptx, version) = compile(KERNELS, &options)?;
+        let (ptx, version) = compiled(&options)?;
         self.compiler = version;
         let mut module = null_mut();
         let mut functions = [null_mut(); Kernel::ALL.len()];
@@ -401,6 +401,20 @@ impl Compiler {
         let why = unsafe { CStr::from_ptr((self.error_string)(code)) };
         Err(anyhow!("{what}: {}", why.to_string_lossy()))
     }
+}
+
+/// The kernels compiled with `options`, compiled once in a process: an inversion opens the
+/// GPU for every run, and NVRTC takes a good part of a second.
+fn compiled(options: &[String]) -> Result<(Vec<u8>, String)> {
+    type Done = (Vec<String>, (Vec<u8>, String));
+    static DONE: std::sync::Mutex<Vec<Done>> = std::sync::Mutex::new(Vec::new());
+    let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, ptx)) = done.iter().find(|(o, _)| o == options) {
+        return Ok(ptx.clone());
+    }
+    let ptx = compile(KERNELS, options)?;
+    done.push((options.to_vec(), ptx.clone()));
+    Ok(ptx)
 }
 
 /// Compiles CUDA C `source` with NVRTC to PTX, the GPU's assembly, as text ending in a NUL,

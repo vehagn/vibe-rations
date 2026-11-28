@@ -32,6 +32,15 @@ typedef struct Args {
     float *values;      /* the sources' values: a row per step */
     float *gathered;    /* what the receivers' terms read: a row per sample */
     float *peak;        /* the largest velocity of each row of nodes */
+    /* A gradient's (cuda/replay.rs): */
+    float *v[3];        /* the velocities strain differentiates, or copy copies into */
+    float *e[6];        /* the strain rates strain writes or adds to; what inject adds to with which 1 */
+    float *ea[6];       /* the adjoint strain correlate reads */
+    float *before[3];   /* the forward velocities before the step correlated, */
+    float *after[3];    /* and after it */
+    double *sums;       /* the correlations' sums, eight a padded node (gradient::Sums) */
+    double *lit;        /* the illumination, one an interior node */
+    double volume;      /* a cell's volume */
     int n[3];           /* interior nodes */
     int halo[3];
     int padded[3];
@@ -41,12 +50,15 @@ typedef struct Args {
     int l;              /* the stencil's half-length */
     int free_surface;
     int layers;         /* whether the CPML acts */
-    int which;          /* mirror: 0 the velocities, 1 the stresses */
+    int which;          /* mirror: 0 the velocities, 1 the stresses; inject: 0 into the fields, 1
+                         * into e; strain: 0 writes, 1 adds */
     int from;           /* the first term to inject or gather, */
     int to;             /* and the one after the last */
     int row;            /* the step whose values to inject; the sample to gather into */
     int sources;        /* values in a row */
     int check;          /* layout: comes back if the structure arrived whole */
+    int skip;           /* inject: leaves out terms whose value is zero, as the adjoint does */
+    int pad;            /* keeps the four-byte members even */
     float sign;         /* +1 a step, -1 a step taken back; the mirrors' sign */
     float c[3][8];      /* the stencil's coefficients over the spacing along x, y, z */
 } Args;
@@ -280,14 +292,21 @@ __global__ void mirror(Args a)
 }
 
 /* Adds the sources' terms from..to for step `row`, one after another as the solver does
- * (PointOp::inject): one thread, since terms may share a value. */
+ * (PointOp::inject): one thread, since terms may share a value. Into the fields, or with
+ * which 1 into e (the adjoint strain, as gradient::PressureResiduals::add does); with skip,
+ * a term whose value is zero adds nothing, as in Adjoint's injections. */
 __global__ void inject(Args a)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0)
         return;
+    float **to = a.which ? a.e : a.f;
     const float *value = a.values + a.row * a.sources;
-    for (int t = a.from; t < a.to; t++)
-        a.f[a.term_field[t]][a.term_index[t]] += a.term_weight[t] * value[a.term_source[t]];
+    for (int t = a.from; t < a.to; t++) {
+        const float x = value[a.term_source[t]];
+        if (a.skip && x == 0.0f)
+            continue;
+        to[a.term_field[t]][a.term_index[t]] += a.term_weight[t] * x;
+    }
 }
 
 /* Copies what the receivers' terms from..to read into row `row` of gathered; the weighted
@@ -322,6 +341,92 @@ __global__ void peak(Args a)
         }
     }
     a.peak[k * a.n[1] + j] = best;
+}
+
+/* The strain rates of the velocities v (Solver::strain_rate): dx vx, dy vy, dz vz,
+ * dy vx + dx vy, dz vx + dx vz and dz vy + dy vz, each where the stress it changes sits,
+ * written into e, or with which 1 added to it (Solver::add_strain_rate), each sum of two
+ * derivatives rounded before it is added. Without the layers; on the free surface dz vz is
+ * zero. */
+__global__ void strain(Args a)
+{
+    NODE
+    STRIDES
+    const float *vx = a.v[0], *vy = a.v[1], *vz = a.v[2];
+    const int l = STENCIL_L;
+    float d0 = backward(vx, r, 1, a.c[0], l);
+    float d2 = a.free_surface && k == 0 ? 0.0f : backward(vz, r, sz, a.c[2], l);
+    float d4 = forward(vy, r, 1, a.c[0], l);
+    float d5 = forward(vx, r, sz, a.c[2], l);
+    float d6 = forward(vz, r, 1, a.c[0], l);
+    float d7 = forward(vy, r, sz, a.c[2], l);
+    float d1 = 0.0f, d3 = 0.0f, d8 = 0.0f;
+    if (a.n[1] > 1) {
+        d1 = backward(vy, r, sy, a.c[1], l);
+        d3 = forward(vx, r, sy, a.c[1], l);
+        d8 = forward(vz, r, sy, a.c[1], l);
+    }
+    if (a.which) {
+        a.e[0][r] += d0;
+        a.e[1][r] += d1;
+        a.e[2][r] += d2;
+        a.e[3][r] += d3 + d4;
+        a.e[4][r] += d5 + d6;
+        a.e[5][r] += d7 + d8;
+    } else {
+        a.e[0][r] = d0;
+        a.e[1][r] = d1;
+        a.e[2][r] = d2;
+        a.e[3][r] = d3 + d4;
+        a.e[4][r] = d5 + d6;
+        a.e[5][r] = d7 + d8;
+    }
+}
+
+/* Adds a forward step's correlations with the adjoint step that pairs with it
+ * (gradient::correlate), in double precision and in its order: -W ea (x) e for the stiffness,
+ * the adjoint velocities (the fields' first three) times the forward velocities' change for
+ * the density, and |after|^2 to the illumination. */
+__global__ void correlate(Args a)
+{
+    NODE
+    const int surface = a.free_surface && k == 0;
+    /* A cell's share is half on the free surface for what sits on it (Solver::cell_share). */
+    const double w_normal = a.volume * (surface ? 0.5 : 1.0);
+    const double w_xy = w_normal, w_xz = a.volume, w_yz = a.volume;
+    const double xx = -w_normal * (double)a.ea[0][r];
+    const double yy = -w_normal * (double)a.ea[1][r];
+    const double zz = -w_normal * (double)a.ea[2][r];
+    const double exx = a.e[0][r], eyy = a.e[1][r], ezz = a.e[2][r];
+    double *sum = a.sums + 8LL * r;
+    if (surface) {
+        sum[3] += xx * exx + yy * eyy;
+        sum[4] += xx * eyy + yy * exx;
+    } else {
+        sum[3] += xx * exx + yy * eyy + zz * ezz;
+        sum[4] += xx * (eyy + ezz) + yy * (exx + ezz) + zz * (exx + eyy);
+    }
+    sum[5] += -w_xy * (double)a.ea[3][r] * (double)a.e[3][r];
+    sum[6] += -w_xz * (double)a.ea[4][r] * (double)a.e[4][r];
+    sum[7] += -w_yz * (double)a.ea[5][r] * (double)a.e[5][r];
+    for (int c = 0; c < 3; c++)
+        sum[c] += (double)a.f[c][r] * (double)(a.after[c][r] - a.before[c][r]);
+    double lit = 0.0;
+    for (int c = 0; c < 3; c++) {
+        const double x = a.after[c][r];
+        lit = c == 0 ? x * x : lit + x * x;
+    }
+    a.lit[((long long)k * a.n[1] + j) * a.n[0] + i] += lit;
+}
+
+/* Copies the velocities, the whole padded arrays, into v: a thread a value. */
+__global__ void copy(Args a)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long long)a.padded[0] * a.padded[1] * a.padded[2])
+        return;
+    for (int c = 0; c < 3; c++)
+        a.v[c][t] = a.f[c][t];
 }
 
 /* Tells whether the structure arrived as it was sent: its size and its last members. */

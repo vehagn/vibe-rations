@@ -389,6 +389,20 @@ pub struct Iteration {
 }
 
 /// An inversion in progress.
+/// Where an inversion's forward and gradient runs step.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Compute {
+    /// This machine's CPU.
+    #[default]
+    Cpu,
+    /// A device that each run opens afresh (crate::cuda), such as a GPU: its gradient runs
+    /// replay checkpoints whatever `reconstruct` says, and every run is the CPU's bit for
+    /// bit unless the device fuses products into sums. The receivers' runs, the Hessian's
+    /// probes and its products still step on the CPU.
+    #[cfg(unix)]
+    Device(fn() -> Result<Box<dyn crate::cuda::Device>>),
+}
+
 pub struct Inversion {
     pub shots: Vec<Shot>,
     /// The model as it now stands.
@@ -428,12 +442,20 @@ pub struct Inversion {
     /// The most memory held at once so far, counted from the arrays
     /// ([`crate::memory::Plan::inversion_memory`] works it out beforehand).
     pub memory_bytes: usize,
+    /// Where the runs step, and the device's name if not on the CPU.
+    compute: Compute,
+    device: Option<String>,
 }
 
 impl Inversion {
     /// Sets up an inversion from a configuration with an `[inversion]` section, its own
     /// model to start from and the observed traces under `base`, as `invert` does.
     pub fn from_config(cfg: &Config, base: &Path) -> Result<Self> {
+        Self::from_config_on(cfg, base, Compute::Cpu)
+    }
+
+    /// [`Inversion::from_config`], its runs stepping where `compute` says.
+    pub fn from_config_on(cfg: &Config, base: &Path, compute: Compute) -> Result<Self> {
         let settings = cfg
             .inversion
             .clone()
@@ -452,7 +474,7 @@ impl Inversion {
                 Observed::load(cfg, &shot)
             })
             .collect::<Result<Vec<_>>>()?;
-        Self::new(cfg, model, observed, &settings)
+        Self::new_on(cfg, model, observed, &settings, compute)
     }
 
     /// Sets up an inversion of `start` against `observed` traces, one set per source of `cfg`
@@ -463,6 +485,23 @@ impl Inversion {
         observed: Vec<Observed>,
         settings: &InversionConfig,
     ) -> Result<Self> {
+        Self::new_on(cfg, start, observed, settings, Compute::Cpu)
+    }
+
+    /// [`Inversion::new`], its runs stepping where `compute` says.
+    pub fn new_on(
+        cfg: &Config,
+        start: Model,
+        observed: Vec<Observed>,
+        settings: &InversionConfig,
+        compute: Compute,
+    ) -> Result<Self> {
+        // Open the device once first, so that a machine without one fails before the work.
+        let device = match compute {
+            Compute::Cpu => None,
+            #[cfg(unix)]
+            Compute::Device(open) => Some(open()?.name()),
+        };
         ensure!(
             observed.len() == cfg.sources.len(),
             "{} sets of observed traces for {} sources",
@@ -691,6 +730,8 @@ impl Inversion {
             iteration: 0,
             history: Vec::new(),
             memory_bytes: 0,
+            compute,
+            device,
         };
         ensure!(
             settings.water_level > 0.0,
@@ -707,6 +748,11 @@ impl Inversion {
         );
         inversion.start_stage()?;
         Ok(inversion)
+    }
+
+    /// The device the runs step on, if not the CPU: its name.
+    pub fn device(&self) -> Option<&str> {
+        self.device.as_deref()
     }
 
     /// The stages, each with its misfit.
@@ -853,7 +899,11 @@ impl Inversion {
         let mut total = 0.0;
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
-            sim.run(None, false)?;
+            match self.compute {
+                Compute::Cpu => sim.run(None, false)?,
+                #[cfg(unix)]
+                Compute::Device(open) => crate::cuda::run(&mut sim, open()?, None, false)?,
+            }
             total += shot.misfit.value(&sim.receivers.traces)?;
         }
         Ok(total)
@@ -875,11 +925,14 @@ impl Inversion {
         let mut memory_bytes = held;
         for shot in &self.shots {
             let mut sim = Simulation::with_model(&shot.config, model.clone())?;
-            let run = gradient_with(
-                &mut sim,
-                |r| shot.misfit.evaluate(&r.traces),
-                self.strategy(),
-            )?;
+            let adjoint_source = |r: &crate::receiver::Receivers| shot.misfit.evaluate(&r.traces);
+            let run = match self.compute {
+                Compute::Cpu => gradient_with(&mut sim, adjoint_source, self.strategy())?,
+                #[cfg(unix)]
+                Compute::Device(open) => {
+                    crate::cuda::gradient(&mut sim, adjoint_source, None, open()?)?
+                }
+            };
             total += run.misfit;
             memory_bytes = memory_bytes.max(held + run.memory_bytes);
             illumination
@@ -904,9 +957,10 @@ impl Inversion {
         })
     }
 
-    /// How a gradient run gets each shot's forward wavefield back (`[inversion] reconstruct`).
+    /// How a gradient run gets each shot's forward wavefield back (`[inversion] reconstruct`;
+    /// on a device, always from checkpoints).
     pub fn strategy(&self) -> Strategy {
-        if self.settings.reconstruct {
+        if self.settings.reconstruct && self.device.is_none() {
             Strategy::Reconstruct { segment: None }
         } else {
             Strategy::default()
@@ -1367,6 +1421,7 @@ impl Inversion {
             "stages": stages,
             "iterations": self.history,
             "memory_bytes": self.memory_bytes,
+            "device": self.device,
             "stopped": stopped,
         });
         std::fs::write(
@@ -2028,6 +2083,60 @@ mod tests {
             assert_eq!(g[n], inv.g[i] as f32);
         }
         assert!(inv.gradient_of(Parameter::Vp).is_none());
+    }
+
+    /// On a device the inversion takes the CPU's steps bit for bit: the misfits, the
+    /// gradients and the models, here on the GPU's kernels run by this CPU, with water so the
+    /// free surface, the fluid and the sponge all act. On a device the gradient runs replay
+    /// checkpoints even where `reconstruct` asks to rebuild.
+    #[cfg(unix)]
+    #[test]
+    fn an_inversion_on_the_kernels_is_the_cpus_bit_for_bit() {
+        let water = |vs: &str| {
+            format!(
+                "[[model.layer]]\ntop = 0.0\nvp = 1500.0\nvs = 0.0\nrho = 1000.0\n\
+                 [[model.layer]]\ntop = 30.0\nvp = 2000.0\nvs = {vs}\nrho = 2000.0"
+            )
+        };
+        let truth = survey(&water("1350.0"), "");
+        let run = |compute: Compute, extra: &str| {
+            let cfg = survey(
+                &water("1300.0"),
+                &format!("parameters = [\"vp\", \"vs\"]\n{extra}"),
+            );
+            let settings = cfg.inversion.clone().unwrap();
+            let mut inv = Inversion::new_on(
+                &cfg,
+                start(&cfg),
+                vec![recorded(&truth)],
+                &settings,
+                compute,
+            )
+            .unwrap();
+            let mut misfits = vec![inv.misfit()];
+            for _ in 0..2 {
+                misfits.push(inv.iterate().unwrap().expect("a step").misfit);
+            }
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            let g: Vec<u64> = inv.g.iter().map(|x| x.to_bits()).collect();
+            (
+                inv.strategy(),
+                misfits,
+                g,
+                bits(&inv.model.vp),
+                bits(&inv.model.vs),
+            )
+        };
+        fn host() -> Result<Box<dyn crate::cuda::Device>> {
+            Ok(Box::new(crate::cuda::Host::build()?))
+        }
+        let (on_cpu, misfits, g, vp, vs) = run(Compute::Cpu, "reconstruct = false");
+        let (on_device, misfits_d, g_d, vp_d, vs_d) = run(Compute::Device(host), "");
+        assert_eq!(on_cpu, Strategy::Checkpoints { every: None });
+        assert_eq!(on_device, on_cpu);
+        assert!(misfits[2] < misfits[0], "{misfits:?}");
+        assert_eq!(misfits, misfits_d);
+        assert!(g == g_d && vp == vp_d && vs == vs_d);
     }
 
     /// With `reconstruct` (the default) the gradient runs rebuild each forward wavefield

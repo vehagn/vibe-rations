@@ -18,10 +18,14 @@
 //! compiled when a run starts by NVRTC and launched through the driver's API, both found at
 //! run time ([`Cuda`]). A build is the same with or without a GPU, and the same kernels
 //! compile for a CPU ([`Host`]), where a test steps them a thread at a time against the
-//! solver. Forward runs only so far ([`run`]); gradients and inversions step on the CPU.
+//! solver. Forward runs ([`run`]) and gradients replayed from checkpoints ([`gradient`],
+//! `cuda/replay.rs`), and so inversions; rebuilding the forward wavefield, the receivers' runs
+//! and the Hessian step on the CPU.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -30,14 +34,16 @@ use crate::cpml::Stagger;
 use crate::grid::Grid;
 use crate::receiver::Receivers;
 use crate::simulation::{Simulation, human_time};
-use crate::solver::{Field, PointOp, Solver};
+use crate::solver::{Field, PointOp, Solver, State};
 use crate::source::Source;
 
 mod driver;
 mod host;
+mod replay;
 
 pub use driver::{Cuda, FMAD_VARIABLE, NVRTC_VARIABLE, compile};
 pub use host::Host;
+pub use replay::gradient;
 
 /// The kernels' source: CUDA C, in what it shares with C.
 pub const KERNELS: &str = include_str!("cuda/kernels.cu");
@@ -57,10 +63,13 @@ pub enum Kernel {
     Gather,
     Peak,
     Layout,
+    Strain,
+    Correlate,
+    Copy,
 }
 
 impl Kernel {
-    pub const ALL: [Kernel; 8] = [
+    pub const ALL: [Kernel; 11] = [
         Kernel::Velocity,
         Kernel::Stress,
         Kernel::Damp,
@@ -69,6 +78,9 @@ impl Kernel {
         Kernel::Gather,
         Kernel::Peak,
         Kernel::Layout,
+        Kernel::Strain,
+        Kernel::Correlate,
+        Kernel::Copy,
     ];
 
     /// Its function's name in the source.
@@ -82,6 +94,9 @@ impl Kernel {
             Kernel::Gather => "gather",
             Kernel::Peak => "peak",
             Kernel::Layout => "layout",
+            Kernel::Strain => "strain",
+            Kernel::Correlate => "correlate",
+            Kernel::Copy => "copy",
         }
     }
 }
@@ -104,6 +119,14 @@ pub struct Args {
     values: u64,
     gathered: u64,
     peak: u64,
+    v: [u64; 3],
+    e: [u64; 6],
+    ea: [u64; 6],
+    before: [u64; 3],
+    after: [u64; 3],
+    sums: u64,
+    lit: u64,
+    volume: f64,
     n: [i32; 3],
     halo: [i32; 3],
     padded: [i32; 3],
@@ -119,6 +142,8 @@ pub struct Args {
     row: i32,
     sources: i32,
     check: i32,
+    skip: i32,
+    pad: i32,
     sign: f32,
     c: [[f32; 8]; 3],
 }
@@ -158,6 +183,108 @@ pub trait Device {
     fn wait(&mut self) -> Result<()>;
 }
 
+impl<D: Device + ?Sized> Device for Box<D> {
+    fn name(&self) -> String {
+        (**self).name()
+    }
+
+    fn prepare(&mut self, half_length: usize) -> Result<()> {
+        (**self).prepare(half_length)
+    }
+
+    fn free_bytes(&mut self) -> Result<Option<usize>> {
+        (**self).free_bytes()
+    }
+
+    fn alloc(&mut self, bytes: usize) -> Result<u64> {
+        (**self).alloc(bytes)
+    }
+
+    fn upload(&mut self, to: u64, data: &[u8]) -> Result<()> {
+        (**self).upload(to, data)
+    }
+
+    fn download(&mut self, from: u64, out: &mut [u8]) -> Result<()> {
+        (**self).download(from, out)
+    }
+
+    fn launch(
+        &mut self,
+        kernel: Kernel,
+        grid: [u32; 3],
+        block: [u32; 3],
+        args: &Args,
+    ) -> Result<()> {
+        (**self).launch(kernel, grid, block, args)
+    }
+
+    fn wait(&mut self) -> Result<()> {
+        (**self).wait()
+    }
+}
+
+/// One device that several hold, each launching on it in turn: what is launched runs in the
+/// order launched, whoever launched it. The kernels are compiled once for each stencil
+/// length.
+pub struct Shared<D>(Rc<RefCell<(D, Option<usize>)>>);
+
+impl<D> Shared<D> {
+    pub fn new(device: D) -> Self {
+        Self(Rc::new(RefCell::new((device, None))))
+    }
+}
+
+impl<D> Clone for Shared<D> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+impl<D: Device> Device for Shared<D> {
+    fn name(&self) -> String {
+        self.0.borrow().0.name()
+    }
+
+    fn prepare(&mut self, half_length: usize) -> Result<()> {
+        let mut held = self.0.borrow_mut();
+        if held.1 != Some(half_length) {
+            held.0.prepare(half_length)?;
+            held.1 = Some(half_length);
+        }
+        Ok(())
+    }
+
+    fn free_bytes(&mut self) -> Result<Option<usize>> {
+        self.0.borrow_mut().0.free_bytes()
+    }
+
+    fn alloc(&mut self, bytes: usize) -> Result<u64> {
+        self.0.borrow_mut().0.alloc(bytes)
+    }
+
+    fn upload(&mut self, to: u64, data: &[u8]) -> Result<()> {
+        self.0.borrow_mut().0.upload(to, data)
+    }
+
+    fn download(&mut self, from: u64, out: &mut [u8]) -> Result<()> {
+        self.0.borrow_mut().0.download(from, out)
+    }
+
+    fn launch(
+        &mut self,
+        kernel: Kernel,
+        grid: [u32; 3],
+        block: [u32; 3],
+        args: &Args,
+    ) -> Result<()> {
+        self.0.borrow_mut().0.launch(kernel, grid, block, args)
+    }
+
+    fn wait(&mut self) -> Result<()> {
+        self.0.borrow_mut().0.wait()
+    }
+}
+
 /// The values of a slice as bytes, to cross to a device.
 fn bytes<T: Plain>(v: &[T]) -> &[u8] {
     // SAFETY: `Plain` types have no padding and any bytes are a value of them.
@@ -173,6 +300,8 @@ fn bytes_mut<T: Plain>(v: &mut [T]) -> &mut [u8] {
 trait Plain: Copy {}
 impl Plain for f32 {}
 impl Plain for i32 {}
+impl Plain for f64 {}
+impl Plain for [f64; 8] {}
 
 /// Threads per block of the short kernels that run along one index.
 const LINE: u32 = 256;
@@ -346,32 +475,83 @@ impl<D: Device> GpuSolver<D> {
     /// Takes `solver`'s fields, layers' memory and step count.
     pub fn upload(&mut self, solver: &Solver) -> Result<()> {
         ensure!(solver.grid == self.grid, "another grid's solver");
-        for (at, values) in self.args.f.into_iter().zip(solver.fields.arrays()) {
+        self.upload_parts(solver.fields.arrays(), solver.layers(), solver.step)
+    }
+
+    /// Takes up `state`, one of this solver's ([`Solver::state`]).
+    pub fn upload_state(&mut self, state: &State) -> Result<()> {
+        self.upload_parts(state.fields().arrays(), state.layers(), state.step())
+    }
+
+    fn upload_parts(
+        &mut self,
+        fields: [&Vec<f32>; 9],
+        [psi_v, psi_s]: [&[Vec<f32>; 3]; 2],
+        step: usize,
+    ) -> Result<()> {
+        ensure!(
+            fields.iter().all(|f| f.len() == self.grid.padded_len()),
+            "another grid's fields"
+        );
+        for (at, values) in self.args.f.into_iter().zip(fields) {
             self.device.upload(at, bytes(values))?;
         }
-        let [psi_v, psi_s] = solver.layers();
         for (at, values) in
             (self.args.psi_v.into_iter().zip(psi_v)).chain(self.args.psi_s.into_iter().zip(psi_s))
         {
             self.device.upload(at, bytes(values))?;
         }
-        self.step = solver.step;
+        self.step = step;
         Ok(())
     }
 
     /// Gives `solver` the fields, the layers' memory and the step count held here.
     pub fn download(&mut self, solver: &mut Solver) -> Result<()> {
         ensure!(solver.grid == self.grid, "another grid's solver");
-        for (at, values) in self.args.f.into_iter().zip(solver.fields.arrays_mut()) {
-            self.device.download(at, bytes_mut(values))?;
-        }
-        let [psi_v, psi_s] = solver.layers_mut();
-        for (at, values) in
-            (self.args.psi_v.into_iter().zip(psi_v)).chain(self.args.psi_s.into_iter().zip(psi_s))
-        {
-            self.device.download(at, bytes_mut(values))?;
-        }
+        // Apart from the solver for a moment, to borrow both.
+        let mut fields = std::mem::replace(&mut solver.fields, crate::solver::Fields::zeros(0));
+        let done = Self::download_parts(
+            &mut self.device,
+            &self.args,
+            fields.arrays_mut(),
+            solver.layers_mut(),
+        );
+        solver.fields = fields;
+        done?;
         solver.step = self.step;
+        Ok(())
+    }
+
+    /// Gives `state` (one of this solver's) the fields, the layers' memory and the step count
+    /// held here.
+    pub fn download_state(&mut self, state: &mut State) -> Result<()> {
+        let (fields, layers, step) = state.parts_mut();
+        ensure!(
+            fields
+                .arrays()
+                .iter()
+                .all(|f| f.len() == self.grid.padded_len()),
+            "another grid's state"
+        );
+        Self::download_parts(&mut self.device, &self.args, fields.arrays_mut(), layers)?;
+        *step = self.step;
+        Ok(())
+    }
+
+    fn download_parts(
+        device: &mut D,
+        args: &Args,
+        fields: [&mut Vec<f32>; 9],
+        [psi_v, psi_s]: [&mut [Vec<f32>; 3]; 2],
+    ) -> Result<()> {
+        for (at, values) in args.f.into_iter().zip(fields) {
+            device.download(at, bytes_mut(values))?;
+        }
+        for (at, values) in (args.psi_v.into_iter().zip(psi_v.iter_mut()))
+            .chain(args.psi_s.into_iter().zip(psi_s.iter_mut()))
+        {
+            device.download(at, bytes_mut(values))?;
+        }
         Ok(())
     }
 
@@ -384,32 +564,13 @@ impl<D: Device> GpuSolver<D> {
         steps: usize,
         receivers: &Receivers,
     ) -> Result<()> {
-        let mut terms = Terms::default();
         // Forces, then moment tensors: each kind in the sources' order, as a step adds them.
-        for forces in [true, false] {
-            let start = terms.len();
-            for (s, source) in sources.iter().enumerate() {
-                if source.is_force() == forces {
-                    terms.extend(&source.op, s);
-                }
-            }
-            let range = start..terms.len();
-            if forces {
-                self.forces = range;
-            } else {
-                self.moments = range;
-            }
-        }
-        let start = terms.len();
-        for op in receivers.ops.iter().flatten() {
-            terms.extend(op, 0);
-        }
-        self.receivers = start..terms.len();
-        ensure!(
-            terms.len() < i32::MAX as usize && steps < i32::MAX as usize,
-            "too many terms"
-        );
-
+        let of_kind = |forces: bool| -> Vec<(&PointOp, usize)> {
+            (sources.iter().enumerate())
+                .filter(|(_, s)| s.is_force() == forces)
+                .map(|(i, s)| (&s.op, i))
+                .collect()
+        };
         // What each source adds at each step, as Solver::step_with asks for it: a force with
         // the velocities at n·dt, a moment tensor with the stresses half a step later.
         let mut values = Vec::with_capacity(steps * sources.len());
@@ -424,9 +585,66 @@ impl<D: Device> GpuSolver<D> {
                 values.push(source.value(n, t));
             }
         }
+        let receiving: Vec<&PointOp> = receivers.ops.iter().flatten().collect();
+        self.attach_ops(
+            [&of_kind(true), &of_kind(false)],
+            sources.len(),
+            &values,
+            steps,
+            &receiving,
+            receivers.samples,
+        )
+    }
+
+    /// Puts on the device what a run of `steps` steps adds and reads: `added` the operators
+    /// added with the velocities, then those added with the stresses, each with its column in
+    /// the row of `columns` values that `values` holds for each step; and the operators of the
+    /// receivers, which read `samples` samples.
+    fn attach_ops(
+        &mut self,
+        added: [&[(&PointOp, usize)]; 2],
+        columns: usize,
+        values: &[f32],
+        steps: usize,
+        receivers: &[&PointOp],
+        samples: usize,
+    ) -> Result<()> {
+        ensure!(
+            values.len() == steps * columns
+                && added
+                    .iter()
+                    .flat_map(|a| a.iter())
+                    .all(|&(_, c)| c < columns),
+            "{} values for {steps} steps of {columns}",
+            values.len()
+        );
+        let mut terms = Terms::default();
+        for (k, ops) in added.into_iter().enumerate() {
+            let start = terms.len();
+            for &(op, column) in ops {
+                terms.extend(op, column);
+            }
+            let range = start..terms.len();
+            if k == 0 {
+                self.forces = range;
+            } else {
+                self.moments = range;
+            }
+        }
+        let start = terms.len();
+        for op in receivers {
+            terms.extend(op, 0);
+        }
+        self.receivers = start..terms.len();
+        ensure!(
+            terms.len() < i32::MAX as usize
+                && steps < i32::MAX as usize
+                && values.len() < i32::MAX as usize,
+            "too many terms"
+        );
         self.steps = steps;
-        self.args.sources = sources.len() as i32;
-        self.args.values = self.put(&values)?;
+        self.args.sources = columns as i32;
+        self.args.values = self.put(values)?;
         self.args.term_field = self.put(&terms.field)?;
         self.args.term_index = self.put(&terms.index)?;
         self.args.term_weight = self.put(&terms.weight)?;
@@ -434,8 +652,8 @@ impl<D: Device> GpuSolver<D> {
 
         let row = 4 * self.receivers.len();
         self.chunk = match row {
-            0 => receivers.samples.max(1),
-            _ => (GATHERED_BYTES / row).clamp(1, receivers.samples.max(1)),
+            0 => samples.max(1),
+            _ => (GATHERED_BYTES / row).clamp(1, samples.max(1)),
         };
         self.held = 0;
         self.args.gathered = self.reserve(self.chunk * row)?;
@@ -916,6 +1134,64 @@ mod tests {
         assert!(gpu.memory_bytes() > 17 * 4 * sim.solver.grid.padded_len());
     }
 
+    /// The L2 misfit of the traces against no data: residuals the traces themselves, so
+    /// that every receiver drives the adjoint run.
+    fn no_data(r: &Receivers) -> Result<(f64, Vec<Vec<f32>>)> {
+        let misfit = r.traces.iter().flatten().map(|&x| 0.5 * (x as f64).powi(2));
+        Ok((misfit.sum(), r.traces.clone()))
+    }
+
+    /// A gradient of `text` on `device`, with another checkpoint interval than the CPU's,
+    /// leaves the CPU's bits: the gradient, the illumination, the misfit, the traces and the
+    /// forward run's last state.
+    fn gradients_alike<D: Device>(name: &str, text: &str, device: D) {
+        let mut cpu = simulation(text);
+        let a = crate::gradient::gradient(&mut cpu, no_data, None).unwrap();
+        let mut gpu = simulation(text);
+        let on = device.name();
+        let b = gradient(&mut gpu, no_data, Some(7), device).unwrap();
+        assert_ne!(a.checkpoint_every, b.checkpoint_every);
+        assert!(
+            a.gradient.mu.iter().any(|&g| g != 0.0),
+            "{name}: nothing to compare"
+        );
+        assert_eq!(a.misfit.to_bits(), b.misfit.to_bits(), "{name}: the misfit");
+        let parts = [
+            ("ρ", &a.gradient.rho, &b.gradient.rho),
+            ("λ", &a.gradient.lambda, &b.gradient.lambda),
+            ("μ", &a.gradient.mu, &b.gradient.mu),
+            ("the illumination", &a.illumination, &b.illumination),
+        ];
+        for (what, x, y) in parts {
+            let differ = x.iter().zip(y).filter(|(p, q)| p.to_bits() != q.to_bits());
+            assert!(
+                x.len() == y.len() && differ.count() == 0,
+                "{name}, {what}: values differ on {on}"
+            );
+        }
+        let traces = |s: &Simulation| bits(s).into_iter().filter(|(w, _)| w.starts_with("traces"));
+        assert!(traces(&cpu).eq(traces(&gpu)), "{name}: the traces");
+    }
+
+    /// Water over rock under a free surface with pressure receivers, a full space at order
+    /// 4, and a 2D grid at order 16.
+    #[test]
+    fn a_gradient_on_the_kernels_is_the_solvers_bit_for_bit() {
+        for (name, text) in CASES {
+            gradients_alike(name, text, Host::build().unwrap());
+        }
+    }
+
+    /// A GPU, where there is one, makes the CPU's gradients too.
+    #[test]
+    fn a_gpu_makes_the_solvers_gradient_bit_for_bit() {
+        for (name, text) in CASES {
+            let Some(device) = gpu() else { return };
+            eprintln!("{name} on {}", device.name());
+            gradients_alike(name, text, device);
+        }
+    }
+
     /// NVRTC, where there is one, compiles the kernels without fusing any product into a sum.
     #[test]
     fn nvrtc_compiles_the_kernels_without_fused_multiply_adds() {
@@ -951,10 +1227,10 @@ mod tests {
 
     #[test]
     fn the_arguments_are_laid_out_as_the_kernels_declare_them() {
-        // 32 addresses and 52 four-byte members, with no padding: cuda/kernels.cu.
-        assert_eq!(size_of::<Args>(), 32 * 8 + 52 * 4);
+        // 55 addresses, a double and 54 four-byte members, with no padding: cuda/kernels.cu.
+        assert_eq!(size_of::<Args>(), 56 * 8 + 54 * 4);
         assert_eq!(align_of::<Args>(), 8);
-        assert_eq!(std::mem::offset_of!(Args, n), 256);
+        assert_eq!(std::mem::offset_of!(Args, n), 448);
         assert_eq!(std::mem::offset_of!(Args, c), size_of::<Args>() - 96);
         for (k, kernel) in Kernel::ALL.into_iter().enumerate() {
             assert_eq!(kernel as usize, k);
