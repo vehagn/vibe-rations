@@ -412,7 +412,11 @@ where there is one and, since their source also compiles as C, on the CPU everyw
 Nothing more is needed to build it. The kernels are CUDA C held in the binary, compiled as a
 run starts by CUDA's run-time compiler (`libnvrtc`) and run through the driver (`libcuda`),
 both looked for on the machine at that moment; where one is missing, `--gpu` says which.
-Forward runs only so far: `gradient` and `invert` step on the CPU.
+`gradient --gpu` and `invert --gpu` take the gradient there too: the forward run, keeping its
+checkpoints on the host, the adjoint run, the replay and the correlations, so an inversion's
+misfits, gradients and models are the CPU's bit for bit. They replay checkpoints
+(`--reconstruct`, `--surface` and the receivers' runs and Hessian of `[inversion]` stay on
+the CPU).
 
 On gauss's GeForce GTX 1080 (from 2016, 8 GiB), the runs above, beside gauss's CPU timed
 the same night on the idle machine and the M1 Max's figures above (the research log's "The

@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
 
 use vibe_rations::config::{Config, shot_dir};
 use vibe_rations::gradient::{Strategy, balancing_weights, gradient_with, l2_misfit};
-use vibe_rations::inversion::Inversion;
+use vibe_rations::inversion::{Compute, Inversion};
 use vibe_rations::npy;
+use vibe_rations::receiver::Receivers;
 use vibe_rations::simulation::{self, Simulation};
 use vibe_rations::{memory, remote, section, server};
 
@@ -98,6 +99,11 @@ enum Command {
         /// Where to write results, instead of the configuration's [output] dir.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Step the forward and gradient runs on this machine's NVIDIA GPU, with the same
+        /// results bit for bit (`VIBE_RATIONS_CUDA_FMAD=on` lets it fuse products into sums,
+        /// and then they differ). Gradients replay checkpoints, whatever `reconstruct` says.
+        #[arg(long)]
+        gpu: bool,
     },
     /// The gradient of the L2 misfit to observed traces with respect to vp, vs and ρ.
     ///
@@ -121,6 +127,10 @@ enum Command {
         balance: bool,
         #[command(flatten)]
         strategy: StrategyArgs,
+        /// Step it on this machine's NVIDIA GPU, with the same results bit for bit; it
+        /// replays checkpoints.
+        #[arg(long, conflicts_with_all = ["reconstruct", "surface"])]
+        gpu: bool,
     },
     /// Make model files from a 2D section: SEG-Y files of vp, vs and ρ, a trace per x position
     /// and a sample per depth, the first at the surface.
@@ -561,7 +571,7 @@ fn run() -> Result<()> {
                 range(&m.rho, false),
             );
         }
-        Command::Invert { config, out } => {
+        Command::Invert { config, out, gpu } => {
             let (cfg, sim, planned) = load(&config, Kind::Invert)?;
             let out = out.unwrap_or_else(|| cfg.output.dir.clone());
             report(&sim);
@@ -576,7 +586,20 @@ fn run() -> Result<()> {
                 "the starting misfit and gradient, {} shot(s)",
                 cfg.sources.len()
             );
-            let mut inversion = Inversion::from_config(&cfg, base(&config))?;
+            let compute = if gpu {
+                if cfg.inversion.as_ref().is_some_and(|i| i.reconstruct) {
+                    eprintln!(
+                        "on the GPU the gradient runs replay checkpoints instead of rebuilding"
+                    );
+                }
+                gpu_compute()?
+            } else {
+                Compute::Cpu
+            };
+            let mut inversion = Inversion::from_config_on(&cfg, base(&config), compute)?;
+            if gpu {
+                eprintln!("device    {}", inversion.device().unwrap_or_default());
+            }
             eprintln!(
                 "{} unknowns; misfit {:.6e}",
                 inversion.unknowns(),
@@ -630,6 +653,7 @@ fn run() -> Result<()> {
             out,
             balance,
             strategy,
+            gpu,
         } => {
             let strategy = strategy.strategy()?;
             let (cfg, mut sim, planned) = load(&config, Kind::Gradient(strategy))?;
@@ -671,11 +695,12 @@ fn run() -> Result<()> {
                 vec![1.0; data.len()]
             };
             eprintln!("running forward, then the adjoint back with the forward run replayed");
-            let run = gradient_with(
-                &mut sim,
-                |r| l2_misfit(&r.traces, &data, &weights),
-                strategy,
-            )?;
+            let adjoint_source = |r: &Receivers| l2_misfit(&r.traces, &data, &weights);
+            let run = if gpu {
+                gradient_on_gpu(&mut sim, adjoint_source)?
+            } else {
+                gradient_with(&mut sim, adjoint_source, strategy)?
+            };
             sim.write_outputs(&out)?;
             let shape = sim.solver.grid.shape();
             let [vp, vs, rho] = run.gradient.velocities(&sim.solver.model);
@@ -779,6 +804,39 @@ fn run_on_gpu(sim: &mut Simulation, out: &Path, progress: bool) -> Result<()> {
 
 #[cfg(not(unix))]
 fn run_on_gpu(_: &mut Simulation, _: &Path, _: bool) -> Result<()> {
+    anyhow::bail!("--gpu finds the NVIDIA driver as Unix systems load libraries; not here")
+}
+
+/// The gradient of `sim` on this machine's GPU (`gradient --gpu`).
+#[cfg(unix)]
+fn gradient_on_gpu(
+    sim: &mut Simulation,
+    adjoint_source: impl FnOnce(&Receivers) -> Result<(f64, Vec<Vec<f32>>)>,
+) -> Result<vibe_rations::gradient::Run> {
+    let device = vibe_rations::cuda::Cuda::open()?;
+    eprintln!("device    {}", vibe_rations::cuda::Device::name(&device));
+    vibe_rations::cuda::gradient(sim, adjoint_source, None, device)
+}
+
+#[cfg(not(unix))]
+fn gradient_on_gpu(
+    _: &mut Simulation,
+    _: impl FnOnce(&Receivers) -> Result<(f64, Vec<Vec<f32>>)>,
+) -> Result<vibe_rations::gradient::Run> {
+    anyhow::bail!("--gpu finds the NVIDIA driver as Unix systems load libraries; not here")
+}
+
+/// An inversion's runs on this machine's GPU, each opening it afresh (`invert --gpu`).
+#[cfg(unix)]
+fn gpu_compute() -> Result<Compute> {
+    fn open() -> Result<Box<dyn vibe_rations::cuda::Device>> {
+        Ok(Box::new(vibe_rations::cuda::Cuda::open()?))
+    }
+    Ok(Compute::Device(open))
+}
+
+#[cfg(not(unix))]
+fn gpu_compute() -> Result<Compute> {
     anyhow::bail!("--gpu finds the NVIDIA driver as Unix systems load libraries; not here")
 }
 

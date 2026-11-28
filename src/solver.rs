@@ -298,6 +298,31 @@ impl State {
         let psi: usize = self.psi_v.iter().chain(&self.psi_s).map(Vec::len).sum();
         self.fields.memory_bytes() + 4 * psi
     }
+
+    /// Its fields.
+    pub fn fields(&self) -> &Fields {
+        &self.fields
+    }
+
+    /// Its layers' memory, as [`Solver::layers`] lays it out.
+    pub fn layers(&self) -> [&[Vec<f32>; 3]; 2] {
+        [&self.psi_v, &self.psi_s]
+    }
+
+    /// The steps taken to reach it.
+    pub fn step(&self) -> usize {
+        self.step
+    }
+
+    /// Its fields, layers' memory and step count, to set them (crate::cuda).
+    #[cfg(unix)]
+    pub(crate) fn parts_mut(&mut self) -> (&mut Fields, [&mut [Vec<f32>; 3]; 2], &mut usize) {
+        (
+            &mut self.fields,
+            [&mut self.psi_v, &mut self.psi_s],
+            &mut self.step,
+        )
+    }
 }
 
 /// The wavefield and everything needed to advance it.
@@ -442,6 +467,17 @@ impl Solver {
             psi_v: self.psi_v.clone(),
             psi_s: self.psi_s.clone(),
             step: self.step,
+        }
+    }
+
+    /// A [`State`] of it with every value zero, to fill (crate::cuda).
+    #[cfg(unix)]
+    pub(crate) fn blank_state(&self) -> State {
+        State {
+            fields: Fields::zeros(self.grid.padded_len()),
+            psi_v: self.psi_v.each_ref().map(|p| vec![0.0; p.len()]),
+            psi_s: self.psi_s.each_ref().map(|p| vec![0.0; p.len()]),
+            step: 0,
         }
     }
 

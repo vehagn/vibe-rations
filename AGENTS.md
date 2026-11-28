@@ -58,7 +58,7 @@ Task guides in `.claude/skills/*/SKILL.md`; any agent can read them:
 
 ```
 src/
-  main.rs        the CLI: run [--remote | --shots | --gpu] | check | memory | gradient | invert | extrude | serve | remote
+  main.rs        the CLI: run [--remote | --shots | --gpu] | check | memory | gradient [--gpu] | invert [--gpu] | extrude | serve | remote
   adjoint.rs     the adjoint run: residuals back through the forward solver, reversed
   born.rs        the Born run beside the forward one: the traces' change for a model change, J δm
   gradient.rs    misfit gradients for ρ, λ, μ (and vp, vs): checkpointed replay or the field
@@ -79,9 +79,10 @@ src/
   simd.rs        which compiled update loops run: AVX2 chosen at run time, or the plain ones
                  (`VIBE_RATIONS_SIMD=off`)
   cuda.rs        the time step on an NVIDIA GPU (`run --gpu`): a solver's state on a Device,
-                 stepped by cuda/kernels.cu (CUDA C compiled at run time); cuda/driver.rs finds
-                 the driver and NVRTC with the system's loader, cuda/host.rs and host.c run the
-                 same kernels on a CPU for the tests
+                 stepped by cuda/kernels.cu (CUDA C compiled at run time); cuda/replay.rs the
+                 checkpointed gradient there (`gradient --gpu`, `invert --gpu`); cuda/driver.rs
+                 finds the driver and NVRTC with the system's loader, cuda/host.rs and host.c run
+                 the same kernels on a CPU for the tests
   fd.rs          the staggered Stencil (Taylor or optimised, order 2–16), a row at a time
   cpml.rs        CPML profiles and memory slabs, the sponge factors
   source.rs      wavelets, moment tensors, how sources enter the grid
@@ -237,8 +238,20 @@ doesn't show.
   (`nvcc -arch=sm_61 --fmad=false -DSTENCIL_L=4 -Xptxas -v -c src/cuda/kernels.cu`).
   The dev container sees no GPU (gauss's Docker has no NVIDIA runtime): build there, run the
   binary and the lib's test binary from the host (`VIBE_RATIONS_CUDA_REQUIRED=1` makes a
-  missing card a failure). Forward runs only; `run.json`'s `kernels` is then still the CPU's
-  loops, which step nothing, and `device` says what did.
+  missing card a failure). `run.json`'s `kernels` is then still the CPU's loops, which step
+  nothing, and `device` says what did. **Gradients and inversions** (`gradient --gpu`,
+  `invert --gpu`, `inversion::Compute`, `cuda/replay.rs`; 2026-11-28): the checkpointed
+  replay with everything on the card but the checkpoints (on the host), bit for bit, three
+  kernels more (`strain`, `correlate` in double precision, `copy`); the adjoint's residuals
+  enter through `inject` with zeros skipped (`skip`), as `Adjoint` skips them, and the
+  pressure residuals into the adjoint strain through `inject` with `which` 1. When
+  `gradient::correlate`, `Solver::strain_rate`, `PressureResiduals::add` or `Adjoint`'s
+  injections change, the kernels and `replay.rs` must follow
+  (`a_gradient_on_the_kernels_is_the_solvers_bit_for_bit` and
+  `an_inversion_on_the_kernels_is_the_cpus_bit_for_bit` catch a miss without a GPU). There
+  is no `cuMemFree`: memory goes with the context, so each run opens the card afresh (an
+  inversion's `Compute::Device` is a function that opens it) and NVRTC's PTX is kept per
+  process.
 - **2D runs** (`points = [nx, 1, nz]`; `Grid::is_2d`, `Grid::spans`, `cpml::layer_widths`;
   the log's "A 2D solver", 2026-11-27). Plane strain on the 3D code, not a second solver: the
   kernels skip the $y$-derivatives, so a 2D step is bit for bit the 3D step of a field

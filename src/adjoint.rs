@@ -159,6 +159,49 @@ impl Adjoint {
         );
     }
 
+    /// What the run injects, as a GPU takes it (crate::cuda): the operators of the velocity
+    /// residuals, which enter with the velocities, then those of the pressure residuals, which
+    /// enter with the stresses, each in the order [`Adjoint::step`] adds them; and for each
+    /// step, a row of their values, zero where nothing enters (a zero adds nothing).
+    #[cfg(unix)]
+    pub(crate) fn injections(&self) -> ([Vec<&PointOp>; 2], Vec<f32>) {
+        let mut ops: [Vec<&PointOp>; 2] = [Vec::new(), Vec::new()];
+        // Which residual array and receiver each column takes.
+        let mut columns: [Vec<(usize, usize)>; 2] = [Vec::new(), Vec::new()];
+        for stress in [false, true] {
+            for (c, (&component, of)) in self.components.iter().zip(&self.ops).enumerate() {
+                if (component == Component::P) != stress {
+                    continue;
+                }
+                for (r, op) in of.iter().enumerate() {
+                    ops[stress as usize].push(op);
+                    columns[stress as usize].push((c, r));
+                }
+            }
+        }
+        let sample = |n: usize| {
+            (n.is_multiple_of(self.record_every) && n / self.record_every < self.samples)
+                .then_some(n / self.record_every)
+        };
+        let width = columns[0].len() + columns[1].len();
+        let mut values = vec![0.0f32; self.steps * width];
+        for (m, row) in values.chunks_mut(width.max(1)).enumerate().take(self.steps) {
+            let n = self.steps - 1 - m;
+            // Velocities recorded after forward step n; pressure after step n - 1.
+            let at = [Some(n).and_then(sample), n.checked_sub(1).and_then(sample)];
+            let cells = row.iter_mut();
+            for ((&(c, r), at), cell) in (columns[0].iter().map(|x| (x, at[0])))
+                .chain(columns[1].iter().map(|x| (x, at[1])))
+                .zip(cells)
+            {
+                if let Some(s) = at {
+                    *cell = self.residuals[c][r * self.samples + s];
+                }
+            }
+        }
+        (ops, values)
+    }
+
     /// Adds to the stresses the run starts from, before its first step, and mirrors them
     /// again across a free surface.
     pub(crate) fn add_to_start(&mut self, add: impl FnOnce(&mut Fields)) {
