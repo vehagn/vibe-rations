@@ -211,6 +211,26 @@ impl MaterialChange {
         }
     }
 
+    /// The change at the positions `points` (padded indices) alone, for a change of a few
+    /// nodes: per position δB/B for vx, vy and vz, the two normal moduli's changes and the
+    /// three shear moduli's. `None` if it is not zero everywhere else.
+    pub(crate) fn at(&self, points: &[usize]) -> Option<Vec<[f32; 8]>> {
+        let arrays = [
+            &self.b[0],
+            &self.b[1],
+            &self.b[2],
+            &self.l2m,
+            &self.lam,
+            &self.shear[0],
+            &self.shear[1],
+            &self.shear[2],
+        ];
+        let count = |values: &mut dyn Iterator<Item = f32>| values.filter(|&v| v != 0.0).count();
+        let all: usize = arrays.iter().map(|a| count(&mut a.iter().copied())).sum();
+        let here: Vec<[f32; 8]> = points.iter().map(|&p| arrays.map(|a| a[p])).collect();
+        (count(&mut here.iter().flatten().copied()) == all).then_some(here)
+    }
+
     pub(crate) fn memory_bytes(&self) -> usize {
         4 * self
             .b
@@ -220,6 +240,75 @@ impl MaterialChange {
             .map(Vec::len)
             .sum::<usize>()
     }
+}
+
+/// [`MaterialChange::add_velocity`] for a change that is zero outside `points`
+/// ([`MaterialChange::at`]), `forward` holding, per position, the forward velocities' change
+/// over the step first: the same additions, so the same Born run bit for bit.
+pub(crate) fn add_velocity_at(
+    f: &mut Fields,
+    points: &[usize],
+    change: &[[f32; 8]],
+    forward: &[[f32; 9]],
+) {
+    for ((&p, m), u) in points.iter().zip(change).zip(forward) {
+        f.vx[p] += m[0] * u[0];
+        f.vy[p] += m[1] * u[1];
+        f.vz[p] += m[2] * u[2];
+    }
+}
+
+/// [`MaterialChange::add_stress`] likewise, `forward` holding the forward strain rates after
+/// the velocities' change.
+pub(crate) fn add_stress_at(
+    s: &Solver,
+    f: &mut Fields,
+    points: &[usize],
+    change: &[[f32; 8]],
+    forward: &[[f32; 9]],
+) {
+    let g = s.grid;
+    let plane = g.plane_len();
+    let surface = s.free_surface.then(|| g.halo * plane..(g.halo + 1) * plane);
+    for ((&p, m), u) in points.iter().zip(change).zip(forward) {
+        let (l2, l) = (m[3], m[4]);
+        let [exx, eyy, ezz, exy, exz, eyz] = [u[3], u[4], u[5], u[6], u[7], u[8]];
+        if surface.as_ref().is_some_and(|r| r.contains(&p)) {
+            f.sxx[p] += l2 * exx + l * eyy;
+            f.syy[p] += l2 * eyy + l * exx;
+        } else {
+            f.sxx[p] += l2 * exx + l * (eyy + ezz);
+            f.syy[p] += l2 * eyy + l * (exx + ezz);
+            f.szz[p] += l2 * ezz + l * (exx + eyy);
+        }
+        f.sxy[p] += m[5] * exy;
+        f.sxz[p] += m[6] * exz;
+        f.syz[p] += m[7] * eyz;
+    }
+    if s.free_surface {
+        for j in 0..g.n[1] {
+            let row = g.idx(0, j, 0);
+            f.szz[row..row + g.n[0]].fill(0.0);
+        }
+    }
+}
+
+/// A Born run's traces as `receivers` recorded them, un-warped as `sim`'s are once it has
+/// finished.
+pub(crate) fn unwarped(sim: &Simulation, receivers: &Receivers) -> Vec<Vec<f32>> {
+    let samples = receivers.samples;
+    let mut traces = receivers.traces.clone();
+    for (&c, data) in receivers.components.iter().zip(&mut traces) {
+        if let Some(warp) = sim.trace_warp(c).filter(|_| sim.traces_unwarped()) {
+            data.par_chunks_mut(samples).for_each(|trace| {
+                let x: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
+                for (t, y) in trace.iter_mut().zip(warp.apply(&x)) {
+                    *t = y as f32;
+                }
+            });
+        }
+    }
+    traces
 }
 
 /// The Born run beside a forward run: the change of the material, the solver holding δv and
@@ -288,19 +377,7 @@ impl Scattering {
             self.solver.peak_velocity().is_finite(),
             "the Born wavefield blew up"
         );
-        let samples = self.receivers.samples;
-        let mut traces = self.receivers.traces.clone();
-        for (&c, data) in self.receivers.components.iter().zip(&mut traces) {
-            if let Some(warp) = sim.trace_warp(c).filter(|_| sim.traces_unwarped()) {
-                data.par_chunks_mut(samples).for_each(|trace| {
-                    let x: Vec<f64> = trace.iter().map(|&v| v as f64).collect();
-                    for (t, y) in trace.iter_mut().zip(warp.apply(&x)) {
-                        *t = y as f32;
-                    }
-                });
-            }
-        }
-        Ok(traces)
+        Ok(unwarped(sim, &self.receivers))
     }
 
     /// Bytes it holds.

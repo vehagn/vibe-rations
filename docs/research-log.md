@@ -4766,6 +4766,208 @@ the_line_sources_closed_forms_sum_the_point_sources`; `just unit 2d`; `just unit
 counts_what`; the speeds, `cargo test --release --test physics
 hessian_products_side_by_side_in_2d -- --ignored --nocapture`.
 
+## 2026-11-27 — The SEG 2018 poster's Hessian matrix: recomputed, tried for numerical error, and the 2018 code rerun
+
+**Question.** The maintainer's SEG 2018 poster [@hagen2018] and EGU 2017 talk [@hagen2017]
+show the Hessian of elastic FWI as a matrix along a column under the source, block by block
+in $\rho$, $v_p$, $v_s$, built with Fichtner and Trampert's kernels [@fichtner2011hessian] by
+differencing whole simulations in another code (read here for its setup and rerun unchanged
+in a scratch copy; none of it is in this repository). Can this solver's exact
+Hessian replicate it, what does it measure against closed forms, was what the poster and the
+talk showed physical or numerical (the maintainer's hunch: mostly numerical noise), and what
+does the Hessian add over the gradient?
+
+**The matrix by blocks** (`hessian::hessian_block`, `Solver::strain_rate_at`). With
+$A(m)u = s$, $A^T\tilde u = R^T W r$ and $\delta u_b = -A^{-1}(\partial_b A)u$,
+
+$$H = G + B + B^T + L, \quad G = J^T W J, \quad B_{ab} = -\tilde u^T(\partial_a A)\,\delta u_b,
+\quad L_{ab} = -\tilde u^T(\partial_a\partial_b A)\,u .$$
+
+For the matrix between a set of nodes that takes one forward and one adjoint run, both kept
+at the positions around the nodes for every step, and one Born run per column, read at the
+receivers for $G$ and at the nodes for $B$: $2 + n$ runs against a product's Born and two
+adjoint runs with replays per column, and each part at its own scale, where a product returns
+their sum in single precision. Fichtner and Trampert's $H^1$ is $B$'s column, $H^2 = G + B^T$
+and $H^3 = L$. The poster's 303 columns took 32 s in 2D (133² nodes, 580 steps, four cloud
+cores) against 12–15 minutes by products, and 46 minutes and 1.2 GiB in 3D (133 × 37 × 133).
+`the_hessian_between_nodes_is_the_products` (physics) holds the block to the products:
+$6.8 \times 10^{-8}$ at order 8, $2.1 \times 10^{-7}$ with walls and water, $1.2 \times 10^{-7}$
+and $5.7 \times 10^{-8}$ in 2D.
+
+**The survey** (`tests/hessian_poster.rs`). The poster's simple model: a homogeneous square
+1 km on a side ($v_p$ 1500, $v_s$ 1000 m/s, $\rho$ 1000 kg/m³), a pressure source with a 10 Hz
+Ricker wavelet 30 m under its top, pressure receivers along that depth, 10 m cells, observed
+data from a smooth disc at the centre (radius 200 m, +100 in each parameter), the matrix on
+the 101 cells under the source. Three versions in 2D: absorbing layers that work
+(`poster_2d_long`), a reflecting half-space 20 m under the box (`poster_2d_floor`), and rigid
+walls two cells outside the model with a 2 s record (`poster_2d_box`), which is what the 2018
+code's boundaries amounted to (below). And the absorbing one in 3D (`poster`), for the point
+scatterer's closed forms.
+
+**Against closed forms** (`tests/common/explosion.rs`). The start's traces against an
+explosion's pressure (in 2D a line of them): 0.012% at 80 m from the source to 0.25% at
+480 m, next to the layers; 0.012–0.42% in 3D. Every Born gather against a point scatterer's
+first Born term (an explosion's field, a point change of $\rho$, $\lambda$ or $\mu$ spread as
+the grid's averaging spreads it, Stokes's solution to the receiver), 3D, nodes 130–530 m deep:
+0.07–0.56% for $\delta v_p$, 0.08–1.0% for $\delta v_s$, 0.05–0.44% for $\delta\rho$ (medians
+0.18, 0.29, 0.12%). $G$ from the solver's Born traces against $G$ from the closed form's:
+0.015–0.024% in all nine blocks.
+
+**Against itself and the misfit.** Six columns against whole products: 1.4–2.8 × 10⁻⁷
+(absorbing), 0.6–1.9 × 10⁻⁷ (floor), 5–9 × 10⁻⁸ (box). Against extrapolated differences of
+the gradient: 6 × 10⁻⁵–1.4 × 10⁻³ (floor), 1.3–2.5 × 10⁻³ (absorbing, where the differences
+have few digits left). With the start's own data a product is $G$'s column to
+0.7–1.6 × 10⁻⁷ (`coarse_without_residual`). And the curvature along fourteen directions on
+the column from misfits alone (`…_along`): three or four digits of $v^T H v$, also where it
+is negative and where $v^T G v$ is far off (the disc's profile in all three parameters,
+absorbing: measured −41.24, $v^T H v$ −41.32, $v^T G v$ +50.90).
+
+**What the exact matrix is.** With layers that work, $\lVert S\rVert / \lVert G\rVert =
+0.0096$ between the nodes at least 100 m deep ($S = B + B^T + L$), and 99% of $S$ is on its
+diagonal: the Hessian of the survey the poster describes is Gauss–Newton. $G$'s columns
+oscillate along the column with a period of 40–50 m inside an envelope ±75 m wide; at one
+node the Born gathers of $v_p$ and $\rho$ have a cosine of +0.99 ($v_p$, $v_s$ −0.77; $v_s$,
+$\rho$ −0.68), the node's 3 × 3 block a condition number of 2750 (23 over the floor, 7.7 in
+the box); of 273 eigenvalues of $G$ scaled to a unit diagonal, 86 are within a factor 100 of
+the largest. Over the floor and in the box the residual is 90–260 times larger, the gradient
+a transmission kernel of one sign, and $\lVert S\rVert/\lVert G\rVert$ 2.2 and 5.6.
+
+**The diagonal is a cell's self-term.** A cell much smaller than a wavelength responds
+statically to its own stress glut: for an isotropic glut $m$ the divergence of the static
+equation gives $\theta_{\text{self}} = -m/(\lambda + 2\mu)$ pointwise, whatever the cell's
+shape, in 2D and 3D and on the grid, so $\delta\lambda$ acts as
+$\delta\lambda/(1 + \delta\lambda/(\lambda + 2\mu))$. In $v_p$ that is
+$(B + B^T)_{aa} = -4g_a/v_p$, $L_{aa} = +g_a/v_p$, $S_{aa} = -3g_a/v_p$: the diagonal of the
+second-order part is the gradient times a constant. Measured slopes of $S_{aa}$ on $g_a$:
+−2.36, −2.13, −2.04, −2.01 × 10⁻³ at 20, 10, 5, 2.5 m, against $-3/v_p = -2.00 \times
+10^{-3}$ (the dynamic correction is of order $(kh)^2$); $L_{aa}/g_a = 1/v_p$ exactly. It
+vanishes in the compliance $1/(\rho v_p^2)$ (7% left), and against $G_{aa}$ it grows as
+$1/h^2$ in 2D ($1/h^3$ in 3D): median $|S_{aa}|/G_{aa}$ for $v_p$ 0.0032, 0.011, 0.041, 0.15
+on those grids. A matrix picture's diagonal therefore depends on the cell size and says
+nothing about resolution. For $v_s$ and $\rho$ the glut is not isotropic and there is no
+single constant.
+
+**What the poster's figure is.** Three things, each read from the 2018 code and confirmed by
+computing the same quantity here or by rerunning that code. (1) Its second adjoint run is
+driven by the unchanged residual, so $J^T W J$ is absent: it computes $B + B^T + \frac12 L$
+($H^3$ at half weight, by its constant $\nu = 0.5$). (2) Of its ten cells of C-PML two update (its 16-point operators stop
+eight cells from the edge), so the model sits in a nearly closed box: rerun, the homogeneous
+start returns 29–43% of the direct wave's peak after 0.9 s, and with thirty cells of layer
+$3 \times 10^{-5}$ or less, the residual falling from 18–42% of the direct wave to
+0.08–0.23% and the misfit 77,000-fold. (3) Its plot adds each of the nine blocks to its own
+transpose. $B + B^T + \frac12 L$ from this solver's exact parts in the box, plotted that way,
+correlates with the poster's figure (read back from its pixels) at −0.82 over the matrix and
+−0.92 to −0.97 on the blocks' diagonals, against 0.003 for the absorbing survey: the same
+structure with the opposite sign.
+
+**The sign, and the 2018 code rerun** (commit `27817001`, rebuilt on gauss with a missing
+brace added, the window widened to the column and the parts saved apart; single precision
+throughout). Its kernels pair the adjoint *stress* with the forward strain rate; in a cell
+made stiffer the strain falls but the stress rises, so its $H^2$, a difference of adjoint
+stress fields, should cancel its $H^1$ on the diagonal where the exact ones add. Predicted per
+unit of the $v_p$ gradient: −1.06, +1.07 and (half weight) +0.33 × 10⁻³; rerun at 200 m:
+−1.01, +0.98, +0.33 × 10⁻³, sum +0.30 against the exact −2.0. Its stored $v_p$ gradient
+passes a central-difference check of its own misfit (0.987–0.994 from 50 m down); its $v_s$
+and $\rho$ gradients fail it in sign and size (correlations 0.90 and 0.33 over the column).
+The true diagonal of its experiment, from second differences of its own misfit in every cell
+(steps of 1% and 2% agree to 1–2%), is positive at every depth for all three parameters; its
+adjoint Hessian's $v_p$ diagonal is −0.13 to −0.36 of that. This solver's exact Hessian in
+the box, times one factor for the two codes' units (fitted on $v_p$), matches the true
+diagonal at the nine depths 100–900 m within 10% for $v_p$ (median 3%), 6% for $v_s$ and 7%
+for $\rho$ down to 800 m (22% and 34% at 900 m), and the same-cell $v_p$–$v_s$ entry within
+2–9%; per unit of the $v_p$ gradient, with no factor, −2.26, −2.14, −1.91, −1.77 × 10⁻³
+there against −2.24, −2.13, −1.86, −1.76 here at 200–800 m. Two whole columns differenced
+the same way (a change of $v_p$ and of $v_s$ 500 m down against all 303 unknowns, 2425 runs,
+steps of 1%) correlate with this solver's exact columns at 0.998 and 0.999, and at 0.98 and
+0.97 without the changed cell (21–25% apart there, about the differences' own noise); the
+2018 adjoint Hessian's columns, per unit, at −0.22 and +0.21, and at 0.87 and 0.75 without
+the cell (0.77 and 0.65 of the size, carried by the two cells on either side). So the 2018
+experiment's true Hessian is replicated; the matrix the poster showed is not it.
+
+The 2018 code's matrix with one thing changed. A record of 1 s for 2 s: the misfit is 10⁵
+times smaller, each part about 5000 times, and the correlation with the 2018 matrix 0.08, so
+all but one part in 5000 of it was made by waves that had come back from the edges. Thirty
+cells of layer for ten: 7000 times smaller, correlation 0.02, which a matrix holding
+$J^T W J$ could not do; its $v_p$ diagonal per unit is 0.0003–0.002 where this solver's
+exact diagonal in the absorbing survey, in the same units, is 0.09–1.2, and it is again
+−0.14 to −0.36 of the exact self-term there. Every edge one cell further out: correlation
+0.98, the $v_p$ diagonal 14–26% different, the $v_s$ and $\rho$ diagonals below 500 m of the
+other sign. Its constant $\nu$ at 0.05 for 0.5: $H^1$ and $H^2$ exactly ten times larger and
+$H^3$ unchanged, since the code changes a cell by 100 whatever $\nu$ and multiplies the
+fields' differences by $1/\nu$, where the poster's equations change the model by
+$\nu\,\delta m$; the $v_p$ diagonal of the sum changes sign at 400 m, so the weights of the
+three parts followed an arbitrary constant.
+
+**Trials: what is numerical** (`trials_…`, 45 versions with one thing changed; entries
+compared as densities, $g\,\Delta t/h^2$, $X_{ab}\,\Delta t/h^4$ between different cells and
+$S_{aa}\,\Delta t/h^2$ for a cell with itself, since a node's unit change stands for a cell
+of area $h^2$ and the misfit sums samples).
+
+| changed | gradient | $G$ | $S$, cells apart | |
+|---|---|---|---|---|
+| 20 m against 2.5 m (absorbing, 10 Hz) | 14% | 26% | 17% | |
+| 10 m | 3.5% | 7.8% | 4.4% | |
+| 5 m | 0.72% | 1.7% | 0.89% | second order, whatever the stencil |
+| order 4, 12, 16 against 8 at 10 m | ≤ 2.2 × 10⁻⁴ | ≤ 6.1 × 10⁻³ | ≤ 7.6 × 10⁻³ | |
+| Courant 0.4; layers twice as wide or 120 m further out; a 3 s record | ≤ 8 × 10⁻⁴ | ≤ 8 × 10⁻⁴ | ≤ 8 × 10⁻⁴ | |
+| the 2018 code's numerics (order 16, Taylor, 1 ms, time error kept) | 6.3 × 10⁻⁴ | 1.9 × 10⁻³ | 3.8 × 10⁻³ | |
+| a 1 s record | 32% | 6.7% | 47% | physics: late reflections cut |
+| 5 Hz, 10 m against 5 m | 1.2% | 1.6% | 1.5% | |
+| 20 Hz | 5.4% | 16% | 44% | cosine 0.91 |
+| 32 Hz, 10 m against 2.5 m | 4800× | 110% | 62,000× | cosine 0.01 |
+| 32 Hz, 5 m against 2.5 m | 3.0% | 13% | 20% | cosine 0.98 |
+| box: walls 10 m outside instead of 20 | 40% | 43% | 75% | cosine 0.66 |
+| box: walls 30 m, 40 m outside | 16%, 31% | 39%, 60% | 55%, 95% | cosines 0.83, 0.33 |
+| box: record 1.9 s, 2.1 s | 8.9%, 2.7% | 9.7%, 8.4% | 8.0%, 2.9% | |
+| box: 5 m cells, walls in place | 6.4% | 13% | 21% | cosine 0.98 |
+
+At 32 Hz on 10 m cells the residual is 170 times the converged one (1.4 × 10⁻² of the direct
+wave against 8 × 10⁻⁵): the grid carries nothing above $v/2h$, 75 Hz for P and 50 Hz for S
+here, inside the wavelet's band, and the difference of two runs' numerical errors takes the
+residual's place (the mechanism is the likely one, not isolated). A small inclusion in the
+talk's medium ($v_p$ 2000, $v_s$ 1000, 500 m under the source in the 1 km model): at 8 Hz
+the 10 m grid is within 2–5% of a 5 m one with either numerics; at 32 Hz against 2.5 m the
+gradient is 20–23% off, $G$ 37%, $S$ between cells 38% (2018's numerics, cosine 0.94) to 75%
+(order 8, 0.72), the 5 m grid within 5%, 10% and 6%; in the poster's medium at 32 Hz the
+gradient is off by 5.5–7.5 times its size and $S$ by 30–42 times, cosine −0.02 (the 5 m
+grid: 6.5%, 14%, 7.1%). Differencing whole runs in single precision (`trials_differenced`):
+at the 2018 step of 100, Born traces 3% off for $\rho$, 10% for $v_p$ and 23–71% for $v_s$,
+columns 5%, 18–20% and 42–108% (9–14% for all three in the box); best at a step of 5
+(0.2–5%); at 0.05 round-off (15–83% for traces). In the box the diagonal's *look* survives everything (plotted the
+poster's way the variants correlate at 0.96–0.99), because it is $-3g_a/v_p$ of a one-signed
+gradient.
+
+**What the Hessian adds.** Along the true anomaly, $v = m_{\text{true}} - m_{\text{start}}$
+(`…_towards`): Gauss–Newton's quadratic puts the minimum at 0.81 of the way (absorbing), 0.31
+(floor) and 0.40 (box); the full Hessian's at 3.76 in the absorbing survey and nowhere over
+the floor and in the box, where $v^T H v < 0$ (−4.3 × 10⁷ against $v^T G v = +1.41 \times
+10^8$; −9.1 × 10⁸ against +2.83 × 10⁹): the start is on the concave part of the misfit, and
+the second-order part there is the quadratic model's breakdown, not a correction to the step.
+
+**Decision.** (1) `hessian_block` is how a matrix between chosen nodes is computed; products
+remain for single directions. (2) For the question behind the poster: the Hessian adds what
+Gauss–Newton adds. Resolution and cross-talk are in $J^T W J$; the second-order part's
+diagonal is the gradient times a constant and free, its part between cells 0.2% of $G$ when
+the fit is good, and when the fit is poor it is large but describes curvature a Newton step
+cannot use. Its one cheap, useful number is the sign of $v^T H v$ along the search direction
+(one product): negative means the start is beyond a local method's reach. (3) Compare
+Hessians on different grids as densities, and judge a matrix picture's diagonal knowing it
+scales as $1/h^2$. (4) A closed box makes every entry an interference pattern that depends
+on where the walls are; a Hessian study needs layers that are checked to absorb. (5) At
+10 Hz and 10 m this survey's matrix is within 4–8% of converged and the error is the
+model's sampling, second order whatever the stencil; a 32 Hz wavelet needs about 3 m.
+
+**Reproduce.** `cargo test --release --test hessian_poster -- --ignored --nocapture --exact
+<name>`, with `<name>` one of `poster` (3D, 46 min), `poster_2d_long`, `poster_2d_floor`,
+`poster_2d_box`, their `_products`, `_differences`, `_along` and `_towards`,
+`coarse_without_residual`, and the trials `trials_spacing`, `trials_scheme`,
+`trials_layers`, `trials_frequency`, `trials_floor`, `trials_box`, `trials_inclusion`,
+`trials_talk`, `trials_finest`, `trials_talk_finest`, `trials_differenced` (seconds to
+minutes each on four cores; the 2.5 m cases 7–12 minutes). They write raw matrices under
+`out/hessian-poster/`. The write-up with its figures, the scripts that make them and the
+2018 code's numbers are kept with the maintainer's notes, outside the repository, as is the
+2018 code.
+
 ## 2026-11-27 — The time step on a GPU
 
 **Question.** gauss has a GeForce GTX 1080 (2016; 8 GiB) beside its six cores, and csim, the
@@ -5170,3 +5372,14 @@ $v_p$ before $v_s$ and $v_z$ before $v_x$) and not on the start.
   error kept, or order 4, more. Still to measure: interfaces and the free surface, which have
   no closed-form kernels, against finer grids [@mittet2017]; and whether an inversion's model
   error follows the gradient's (data from a fine grid inverted on coarse ones).
+- **What the Hessian adds, beyond one source and one column.** The poster's survey
+  (2026-11-27, "The SEG 2018 poster's Hessian matrix") says Gauss–Newton is the Hessian when
+  the layers absorb and the fit is good, and that the second-order part's diagonal is the
+  gradient times a constant. Open: the trade-off between $v_p$ and $\rho$ with more sources
+  and offsets (a question about $G$, cheap by blocks); the same matrix along columns of a
+  realistic section in 2D; the EGU talk's own geometry (4 × 3 km, the inclusion 1900 m deep)
+  on a fine grid, which would say how much of its 32 Hz checkerboard is physical; the
+  self-term's form for $v_s$ and $\rho$, whose stress glut is not isotropic; and whether
+  point-spread functions of $G$ at nodes a few wavelengths apart (one Born run for many
+  nodes) make a preconditioner that beats the illumination, which the diagonal alone did
+  not (2026-11-27, "The Hessian").

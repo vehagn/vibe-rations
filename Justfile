@@ -82,6 +82,14 @@ interfaces:
 study *args:
     cargo test --release --test inversion_study {{ args }} -- --ignored --nocapture --test-threads 1
 
+# The Hessian matrix along a column under the source, after the maintainer's SEG 2018 poster:
+# one case by its test's name, written under out/hessian-poster (`just hessian-poster
+# poster_2d_long`; seconds to minutes in 2D, `poster` 46 minutes in 3D). The test's header and
+# the research log list the cases and the trials.
+[group("check")]
+hessian-poster name:
+    cargo test --release --test hessian_poster -- --ignored --nocapture --exact {{ name }}
+
 # The reconstruction study: how far the forward wavefield rebuilt backwards drifts, in the
 # field and the gradient, by run length, order, time step and boundary, from the band around
 # the layers and inside a surface (about 20 minutes; `just drift surface` for the surface's).
