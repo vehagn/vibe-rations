@@ -1,7 +1,7 @@
 # Development container for vibe-rations: the Rust toolchain with the WebAssembly target,
 # wasm-bindgen and wasm-opt for the web app, zig and cargo-zigbuild to build the command line
-# for macOS, just, and a zsh. Bump the pinned Rust version here and in rust-toolchain.toml
-# together, then rebuild.
+# for macOS, TeX for the report, just, and a zsh. Bump the pinned Rust version here and in
+# rust-toolchain.toml together, then rebuild.
 FROM docker.io/library/rust:1.99.1-trixie
 
 ARG USERNAME=dev
@@ -20,10 +20,14 @@ ARG CARGO_ZIGBUILD_VERSION=0.24.1
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
+# The texlive packages, lmodern and latexmk typeset the report (`just report`): pdflatex,
+# BibTeX, pgfplots, siunitx and the rest of report/preamble.tex, about 400 MB.
 RUN apt-get update; \
     apt-get install -y --no-install-recommends \
       bash-completion binaryen file htop jq just less locales procps python3-venv sudo tree \
-      vim zsh; \
+      vim zsh \
+      latexmk lmodern texlive-fonts-recommended texlive-latex-base texlive-latex-extra \
+      texlive-latex-recommended texlive-pictures texlive-science; \
     rm -rf /var/lib/apt/lists/*; \
     sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen; \
     locale-gen

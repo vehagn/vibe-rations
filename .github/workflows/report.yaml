@@ -1,0 +1,40 @@
+# Builds the solver report's PDF from the experiments' committed data (no simulation runs)
+# and keeps it as an artifact of the run, with the list of experiments and their status.
+name: Report
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pdf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The branch's own commit, not the merge commit GitHub makes for a pull request:
+          # the report prints the commit it was built from.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install TeX (the dev container's packages)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            latexmk lmodern texlive-fonts-recommended texlive-latex-base texlive-latex-extra \
+            texlive-latex-recommended texlive-pictures texlive-science
+      - name: The experiments and whether their data are current
+        run: python3 report/report.py list
+      - name: Build the PDF
+        run: python3 report/report.py pdf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibe-rations-report
+          path: report/build/vibe-rations-report.pdf
+          if-no-files-found: error
