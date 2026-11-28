@@ -506,7 +506,14 @@ doesn't show.
   inversions use) $v_s$ moves the right way at every depth, so the soft seabed is the
   difference. `[inversion] fixed_below` holds the model at and below a depth, for layer
   stripping; the top 250 m inverted first, alone, barely moves in the centre, and the
-  inversion after it ends where L2 alone does (the log's "layer stripping by depth"). Past the offset where the line meets the 3.5 s record's
+  inversion after it ends where L2 alone does (the log's "layer stripping by depth"). With
+  the truth put back under the seafloor in the start (475–700 m; `true_top_l2`, an oracle
+  control after Aaker et al. 2020, the log's 2026-11-28 entry) two thirds of the start's
+  misfit goes, and the centre's $v_s$ update below 750 m stops pointing away (cosines +0.10
+  and −0.03 against −0.15 and −0.17) but still adds error (1.056 and 1.076); left free, the
+  true top is spoilt; and a top right only down to 575 m is worse at 750–1000 m than the
+  smooth start (1.228 against 1.095). So the start's error under the seafloor isn't what
+  limits the centre, and a shallow start from the data can't be the remedy by itself. Past the offset where the line meets the 3.5 s record's
   end (about 1.6–1.8 km) the window is empty and the check judges nothing.
   Judge a variant by the error ratio and the cosine with the true update by depth band, not by
   the misfit, and on both parts, within four nodes of the receivers' plane (`ACROSS`: over the
