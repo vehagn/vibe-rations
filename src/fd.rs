@@ -258,6 +258,12 @@ impl Stencil {
         &self.coefficients
     }
 
+    /// The coefficients in single precision, as [`Stencil::forward`] and
+    /// [`Stencil::backward`] apply them.
+    pub fn single(&self) -> &[f32] {
+        &self.single
+    }
+
     /// Σ |cₙ|, which sets the stability limit: dt ≤ 1 / (vp Σ|cₙ| √(Σ 1/h²)).
     pub fn sum_abs(&self) -> f64 {
         self.coefficients.iter().map(|c| c.abs()).sum()

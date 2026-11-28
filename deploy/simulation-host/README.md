@@ -13,6 +13,7 @@ Provisioned 2026-11-22 from Debian 13.8's netinst image, reached as root over SS
 |---|---|
 | CPU | Intel Xeon E5-1650 v3, 6 cores, 12 threads, 3.5 GHz (Haswell: AVX2, no AVX-512) |
 | Memory | 62 GiB |
+| GPU | NVIDIA GeForce GTX 1080 (GP104), 8 GiB, compute capability 6.1 |
 | System disk | 512 GB SSD (ADATA SX900), `/` |
 | Data disk | 2 TB spinning disk (WD Red WD20EFRX), ext4, `/srv/data` |
 | Packages | Debian's `main contrib non-free non-free-firmware`, with security and updates |
@@ -60,6 +61,43 @@ Before the metered line, `prefetch.sh` fetched what later work may need:
   Python (`out/venv/bin/python`).
 - The solver image built from the clone once (`vibe-rations-solver:local`), which caches its
   toolchains, the WebAssembly tools and the Debian base for later builds.
+
+### The GPU's driver and CUDA (installed 2026-11-22, recorded 2026-11-27)
+
+They came with the system, and were found there, unrecorded, when `run --gpu` was written
+(the research log's "The time step on a GPU"); nothing was downloaded for it.
+
+- One command on 2026-11-22, 11:26–11:29 UTC, between the Debian installer's own steps and
+  so before the first boot: `apt-get -y install linux-headers-amd64 nvidia-driver nvidia-smi
+  nvidia-cuda-toolkit`, from Debian's own `non-free` and `non-free-firmware` (no NVIDIA
+  repository), 434 packages with what they pull in. `firmware-nvidia-graphics` 20250410-2
+  had come two minutes earlier.
+- The driver, 550.163.01-2: `nvidia-driver`, its kernel module built on the machine by
+  `nvidia-kernel-dkms` against `linux-headers-amd64` 6.12.117-1, `libcuda1` (the driver's
+  API, `libcuda.so.1`) and `nvidia-smi`. The packages' own files in `/etc/modprobe.d`
+  blacklist nouveau; nothing there is written by hand.
+- CUDA 12.4: `nvidia-cuda-toolkit` 12.4.131~12.4.1-2 (`/usr/bin/nvcc`) with `libnvrtc12` and
+  `libnvrtc-builtins12.4` 12.4.127~12.4.1-2 (the run-time compiler, `libnvrtc.so.12`), the
+  CUDA libraries and profilers, and gcc 14.2.0 (`build-essential`). `run --gpu` needs only
+  the driver, `libcuda1` and `libnvrtc12` of all this.
+- `setup.sh` redoes it with `GPU=nvidia` (the same command; it then needs a reboot to load
+  the driver, and `contrib non-free non-free-firmware` in apt's sources, as the installer
+  left them here). That step of the script has not been run on a machine yet.
+- Docker has no NVIDIA runtime (`runc` only), so the dev container doesn't see the card:
+  build there, and run what it built from the host (below). Adding the runtime would mean
+  restarting Docker, and with it every run in the dev container.
+- `/srv/data/scratch/cuda-smoke/` holds the first check of 2026-11-27 (`smoke.c`, 9 kB,
+  and its binary, built with the gcc there): a kernel compiled by NVRTC and launched through
+  the driver's API, its arithmetic the CPU's bit for bit with fused multiply-adds off.
+
+```bash
+# On gauss, in a worktree of the clone: build in the dev container, run on the host.
+docker compose -f /srv/data/vibe-rations/.devcontainer/compose.yaml exec -T \
+    -w /workspaces/vibe-rations/out/wt-NAME -e CARGO_TARGET_DIR=/workspaces/vibe-rations/out/target-NAME \
+    dev cargo build --release
+cd /srv/data/vibe-rations/out/wt-NAME
+../target-NAME/release/vibe-rations run examples/layered.toml --gpu
+```
 
 Left alone: users (everything runs as root or in containers), SSH, the firewall (none; the
 server listens on localhost only). Nothing updates by itself: `unattended-upgrades` isn't

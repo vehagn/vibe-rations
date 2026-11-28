@@ -40,7 +40,7 @@ Then, in the container:
 | `just check <config>` | Sets a run up without running it: grid, time step, accuracy, memory |
 | `just memory <config>` | The memory a run needs, part by part, without setting it up (see "Memory"); `--gradient` or `--invert` for those runs |
 | `just remote-up <host>`, `just tunnel <host>` | On the host: start the solver server on a remote machine, and reach it (see "Remote runs") |
-| `just run <config>` | Runs a simulation; `--shots` fires the sources one at a time, into `shot-NNN/` |
+| `just run <config>` | Runs a simulation; `--shots` fires the sources one at a time, into `shot-NNN/`; `--gpu` steps it on an NVIDIA GPU (see "Speed") |
 | `just gradient <config> <observed>` | The misfit gradient for $v_p$, $v_s$ and $\rho$ against traces in `<observed>` |
 | `just invert <config>` | Inverts observed traces for the model with L-BFGS, as `[inversion]` says |
 | `just web` | Builds the web app into `web/dist` |
@@ -398,6 +398,37 @@ with desktop apps running alongside (the research log's 2026-11-26 entry):
 
 The bands pay on large grids there too, but the central part, whose planes stay in cache and
 whose 41 rows make only 11 bands for 10 unequal cores, lost 16%, and its gradient 20%.
+
+### On an NVIDIA GPU
+
+`vibe-rations run <config> --gpu` takes every step on the machine's NVIDIA GPU instead: the
+updates, the absorbing layers, the free surface, the sources and the receivers. Each thread
+there updates one node with the solver's own operations in the solver's order, compiled
+without fused multiply-adds, so the results are the CPU's bit for bit: every trace, gather
+and snapshot is the same file, and `run.json` gains a `device` line. The CPU stays the
+reference; tests step the same kernels against the solver and compare every value, on a GPU
+where there is one and, since their source also compiles as C, on the CPU everywhere else.
+
+Nothing more is needed to build it. The kernels are CUDA C held in the binary, compiled as a
+run starts by CUDA's run-time compiler (`libnvrtc`) and run through the driver (`libcuda`),
+both looked for on the machine at that moment; where one is missing, `--gpu` says which.
+Forward runs only so far: `gradient` and `invert` step on the CPU.
+
+On gauss's GeForce GTX 1080 (from 2016, 8 GiB), the runs above, beside gauss's CPU timed
+the same night on the idle machine and the M1 Max's figures above (the research log's "The
+time step on a GPU"):
+
+| Run | GTX 1080 | gauss's CPU | M1 Max |
+|---|---|---|---|
+| `examples/layered.toml` | 446 Mcell/s | 108 Mcell/s | 229 Mcell/s |
+| Marmousi2's central part forward | 504 Mcell/s | 114 Mcell/s | 198 Mcell/s |
+| the whole section's grid, 300 steps | 664 Mcell/s | 114 Mcell/s | 318 Mcell/s |
+
+The whole section's 19.3 M nodes take 1.6 of the card's 8 GiB. `VIBE_RATIONS_CUDA_BLOCK` sets
+the threads of a block along $x$, $y$ and $z$ (`32,4,4`, the fastest of thirteen shapes
+there); `VIBE_RATIONS_CUDA_FMAD=on` lets the compiler fuse products into sums, which was 2%
+slower there and no longer the CPU's bits; `VIBE_RATIONS_NVRTC` names the compiler's library
+where the loader doesn't find it.
 
 ## Remote runs
 
