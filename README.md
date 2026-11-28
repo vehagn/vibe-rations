@@ -821,6 +821,7 @@ removed) unless stated:
 | 9 s with a water layer, soft sediment and a free surface (orders 4 and 8) | drains to $\le 3 \times 10^{-6}$ of peak |
 | 2D: a line explosion and a line force against their closed forms (`tests/common/line.rs`), 100–250 m | 0.002–0.006% and 0.0002–0.0005% |
 | 2D: reciprocity, the dot-product test, gradients, the Born run and the Hessian's products, as in 3D | as accurate as in 3D or better (the research log's "A 2D solver") |
+| The Hessian between chosen nodes from one Born run per column (`hessian_block`) against whole products, with a free surface and water, in 3D and 2D | $\le 2.1 \times 10^{-7}$ of the matrix |
 
 ## Towards elastic FWI
 

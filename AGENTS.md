@@ -23,6 +23,7 @@ opens a shell there instead.
 | `just study [name]` | The inversion study: misfits, stages and preconditioning on small surveys | ~30 min |
 | `just drift` | How far the rebuilt forward wavefield drifts, from the band (`gradient --reconstruct`) and inside a surface (`--surface`) | ~20 min |
 | `just gradient-accuracy [name]` | The solver's gradients against the exact kernels of a homogeneous full space | ~40 min |
+| `just hessian-poster <name>` | One case of the Hessian matrix along a column (the SEG 2018 poster's survey and its trials), into `out/hessian-poster` | seconds to minutes (3D: 46 min) |
 | `just lint` | rustfmt check and clippy with `-D warnings` | |
 | `just ci` | `lint` then `test`: what must pass before every commit | |
 | `just fmt` | Format the code | |
@@ -69,7 +70,8 @@ src/
   grid.rs        the grid and its halo (as wide as the stencil), indexing; one node across
                  y makes it 2D
   hessian.rs     the Hessian's products H δm, second-order terms included: Born and two adjoint
-                 runs, replayed from checkpoints
+                 runs, replayed from checkpoints; and its entries between chosen nodes, part
+                 by part, from one Born run per column (`hessian_block`)
   memory.rs      the memory a run needs, from its configuration alone
   model.rs       vp, vs, rho on the nodes: layers, .npy files (on disk or in memory), spheres
   solver.rs      fields, staggered material, the update kernels (bands of rows marching up),
@@ -123,6 +125,9 @@ tests/
                  gradient-accuracy`), and a baseline at the coarsest grid
   hessian_study.rs  the Hessian probed on the sphere survey: point-spread functions from
                  differences of the gradient, the Gauss–Newton diagonal from random probes (ignored)
+  hessian_poster.rs  the Hessian matrix along a column under the source, after the SEG 2018
+                 poster: exact blocks against closed forms, the misfit's own curvature, and
+                 trials of what is numerical (ignored; `just hessian-poster <name>`)
   analytic_inversion.rs  the inversion against Born's Gauss–Newton solution in a full space:
                  J from Stokes's solution, checked against the kernels; studies ignored
   common/        closed-form solutions and setup helpers the tests share (`planar`: a 3D
@@ -131,7 +136,8 @@ tests/
                  plane.rs: plane waves at normal incidence on an interface, kept exactly 1D,
                  and their exact answer; lamb.rs: Pekeris's closed form for a vertical force
                  on the surface of a Poisson solid, and the survey that tests it; line.rs:
-                 the 2D line explosion and line force
+                 the 2D line explosion and line force; explosion.rs: an explosion's pressure
+                 and a point scatterer's Born pressure, as the grid spreads a node's change
   cli.rs         the binary, run as a process
   remote.rs      the server and client as processes: same results as local, reattach, restart
   examples.rs    every example sets up without warnings
@@ -167,6 +173,42 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The Hessian as a matrix between nodes** (`hessian::hessian_block`,
+  `tests/hessian_poster.rs`, `just hessian-poster <name>`; the log's "The SEG 2018 poster's
+  Hessian matrix", 2026-11-27). $H = G + B + B^T + L$ between chosen nodes from one forward,
+  one adjoint and one Born run per column: $G = J^T W J$ from the Born traces' inner products
+  (in double precision), $B$ from each Born run against the adjoint field kept at the nodes,
+  $L$ local. Each part comes at its own scale, where a product returns their sum in single
+  precision and buries a small second-order part under $G$; and it is cheaper (303 columns in
+  32 s in 2D against 12–15 minutes by products, 46 minutes in 3D). `Block` is in ρ, λ, μ
+  (`Block::velocities` converts); near the layers its entries mean as little as a product's.
+  What replicating the maintainer's poster taught: (1) **the second-order part's diagonal is a
+  cell's self-term**, the cell screening its own change: $S_{aa} = -3g_a/v_p$ for $v_p$
+  (measured slopes $-2.13 \times 10^{-3}$ at 10 m, $-2.01$ at 2.5 m, against $-2.00$). It is
+  the gradient times a constant, vanishes in the compliance $1/(\rho v_p^2)$, and grows as
+  $1/h^2$ against $G_{aa}$ ($1/h^3$ in 3D), so a matrix picture's diagonal depends on the cell
+  size. **Compare matrices on different grids as densities**: $g\,\Delta t/h^2$,
+  $X_{ab}\,\Delta t/h^4$ between cells, $S_{aa}\,\Delta t/h^2$ for a cell with itself.
+  (2) With layers that absorb, the poster's survey has a Hessian that is Gauss–Newton to 1%.
+  The second-order part rivals $G$ only when the residual is large (a floor or a closed box
+  that sends the wave back through the anomaly), and then $v^T H v$ along the true update is
+  negative: a cheap sign of cycle skipping (one product), not a better step. (3) **In a closed
+  box every entry depends on where the walls are** (the part between cells changed by 55–95%
+  when a wall moved one cell), so check that the layers absorb before reading a Hessian: the
+  2018 code's ten cells of C-PML updated two under its 16-point stencil and returned 29–43%
+  of the direct wave. (4) At 10 Hz on 10 m cells the matrix is within 4–8% of the 2.5 m
+  grid's, second order whatever the stencil (orders 4–16, the time step, the layers' width
+  and a longer record each move it by under 1%); with a 32 Hz wavelet the same grid carries
+  nothing above $v/2h$ (75 Hz for P, 50 Hz for S, inside the band), the residual is 170 times
+  the converged one and the gradient and second-order part are numerical. (5) **Second
+  differences of the misfit in one cell give the true diagonal with no adjoint code**: they
+  settled the 2018 code's sign (its adjoint Hessian's $v_p$ diagonal was $-0.13$ to $-0.36$
+  of the truth, its $H^2$ built from adjoint stress cancelling its $H^1$), and this solver's
+  exact diagonal in the box matched them within 10% (median 3%), two whole columns at
+  correlations of 0.998 and 0.999. Cut at 1 s, or given layers that absorb, the 2018 code's
+  matrix was 5000–7000 times smaller and unrelated to the poster's: what a figure shows can
+  be the boundary's. The 2018 code and the Gullfaks model are the maintainer's and stay out
+  of this repository.
 - **2D runs** (`points = [nx, 1, nz]`; `Grid::is_2d`, `Grid::spans`, `cpml::layer_widths`;
   the log's "A 2D solver", 2026-11-27). Plane strain on the 3D code, not a second solver: the
   kernels skip the $y$-derivatives, so a 2D step is bit for bit the 3D step of a field
@@ -699,7 +741,9 @@ doesn't show.
   the replay's numbers; the Born run against extrapolated differences of the traces
   $\le 1.6 \times 10^{-4}$ (walls and water's ρ; $\le 8.6 \times 10^{-5}$ at orders 4 and
   8) and the gradient its transpose to $\le 1.6 \times 10^{-7}$; the Hessian's product
-  against differences of the gradient $\le 6.3 \times 10^{-5}$; the gradient against the exact
+  against differences of the gradient $\le 6.3 \times 10^{-5}$, and the Hessian between nodes
+  (`hessian_block`) against the products $\le 2.1 \times 10^{-7}$ (order 8
+  $6.8 \times 10^{-8}$; in 2D $\le 1.2 \times 10^{-7}$); the gradient against the exact
   kernels at 3.5 points per S wavelength (`tests/gradient_accuracy.rs`), the wavefields' part
   0.26% (S) and 0.12% (P) in the Fresnel zone, +0.19% and −0.10% along a smooth change; the 9 s soft-sediment run drains to
   $\le 3 \times 10^{-6}$ of its peak. In 2D (`_in_2d`, `line_`): the line explosion
