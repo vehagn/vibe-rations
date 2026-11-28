@@ -1,0 +1,22 @@
+# The tutorial's first run (report/sections/usage.tex), and the pattern for every other
+# experiment: commands run from the repository's root, their reduced results in {data}
+# (report/data/usage/explosion/, committed), anything bulky in {raw} (report/build/raw/...,
+# git-ignored).
+
+title = "The tutorial's first run: an explosion under a free surface"
+tier = "quick"
+depends = ["examples/explosion.toml", "report/reportlib"]
+
+[[command]]
+run = "vibe-rations check examples/explosion.toml"
+output = "check.txt"
+
+[[command]]
+run = "vibe-rations memory examples/explosion.toml"
+output = "memory.txt"
+
+[[command]]
+run = "vibe-rations run examples/explosion.toml --out {raw}/run --quiet"
+
+[[command]]
+run = "python3 report/experiments/usage/explosion.py {raw}/run {data}"

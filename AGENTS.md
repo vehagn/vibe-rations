@@ -38,6 +38,8 @@ opens a shell there instead.
 | `just web` | Build the web app (both WebAssembly variants) into `web/dist` | ~1 min cold |
 | `just mac` | Cross-compile the command line for macOS on Apple silicon into `out/mac/vibe-rations`, to run on the host | ~1 min cold |
 | `just serve` | On the host: serve `web/dist` at http://localhost:8088 like production | |
+| `just report` | Build the solver report's PDF (`report/build/vibe-rations-report.pdf`) from its experiments' committed data | ~20 s |
+| `just report-status` / `just report-run [names]` | The report's experiments and whether their data are current / rerun them (the quick ones by default) and record their provenance | |
 
 ## Skills
 
@@ -112,10 +114,15 @@ docs/
   references.bib every work cited anywhere in the repository
   research-log.md experiments, results and decisions, for the paper
   analysis/      von Neumann analysis (pure Python): dispersion, time-space, time dispersion
+report/          the solver report (LaTeX): main.tex, preamble.tex, sections/, and its
+                 generator report.py, which runs the experiments of experiments/<section>/
+                 (manifests of commands), keeps their reduced results with provenance.json in
+                 data/<section>/ (committed), and builds the PDF; README.md: its conventions
 deploy/kubernetes/  Deployment, Service, HTTPRoute (Kustomize)
 deploy/simulation-host/  setup.sh for a Debian machine that runs simulations, and the record of
                  gauss, the one it was written for
-.github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images)
+.github/workflows/  ci.yaml (`just ci`), web.yaml and solver.yaml (build and push the images),
+                 report.yaml (the report's PDF as an artifact)
 tests/
   physics.rs     whole simulations: analytic solutions, layers, reciprocity, stability
   accuracy.rs    the stencil-order study, Lamb's problem on finer grids and the free surface's
@@ -177,6 +184,19 @@ examples/        annotated configurations; the marmousi2 ones need `just marmous
 Decisions and lessons, newest first. Add to them when you learn something the code
 doesn't show.
 
+- **The solver report** (`report/`, `just report`, 2026-11-28; `report/README.md` has the
+  conventions). Its numbers, tables and figures come from experiments: a manifest of commands
+  per experiment, the results reduced to small text files and committed with the commit,
+  commands and machine that made them, so the PDF builds in seconds without a simulation and a
+  rerun after a solver change shows as a diff of numbers. An experiment goes *stale* when
+  `src`, the Cargo files, its manifest or what its manifest lists under `depends` differ from
+  what its data were made from; the PDF marks those. So the order is: commit the code, `just
+  report-run <name>`, commit `report/data`. Tests and scripts write report data only where
+  `VIBE_RATIONS_REPORT_DATA` points, never into `report/data` by themselves. Figures are
+  pgfplots reading the CSVs and the Python is the standard library's, so the report needs TeX
+  and nothing else beyond the dev container; the bibliography is `docs/references.bib` itself.
+  No host names go into provenance (the repository is public): the machine is its processor,
+  threads, memory and system, with `VIBE_RATIONS_REPORT_MACHINE` for a label such as `gauss`.
 - **The Hessian as a matrix between nodes** (`hessian::hessian_block`,
   `tests/hessian_poster.rs`, `just hessian-poster <name>`; the log's "The SEG 2018 poster's
   Hessian matrix", 2026-11-27). $H = G + B + B^T + L$ between chosen nodes from one forward,

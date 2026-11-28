@@ -241,3 +241,22 @@ tunnel host port="8089":
 [group("simulate")]
 memory config *args:
     cargo run --release -- memory {{ config }} {{ args }}
+
+# Builds the solver report (report/, LaTeX) into report/build/vibe-rations-report.pdf from the
+# experiments' committed data: no simulation runs. report/README.md has its conventions.
+[group("report")]
+report:
+    python3 report/report.py pdf
+
+# The report's experiments and whether their data are current, stale (what they depend on
+# has changed since), dirty (made with uncommitted changes) or missing.
+[group("report")]
+report-status:
+    python3 report/report.py list
+
+# Reruns the report's experiments and records each one's commit, commands, machine and
+# durations beside its data: the quick ones by default, or the named ones (an experiment or a
+# section), e.g. `just report-run usage`, `just report-run --stale --tier quick --tier study`.
+[group("report")]
+report-run *args:
+    python3 report/report.py run {{ args }}

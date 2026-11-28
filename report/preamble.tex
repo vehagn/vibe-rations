@@ -1,0 +1,252 @@
+% The report's packages, styles and shared macros. Every section uses these; add what several
+% sections need here, and what one section needs at that section's top (with \providecommand).
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs,tabularx,longtable,multirow}
+\usepackage{enumitem}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\input{colours}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,positioning,shapes.geometric,patterns,decorations.pathreplacing}
+\usepackage{pgfplots,pgfplotstable}
+\usepgfplotslibrary{groupplots,fillbetween}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{subcaption}
+\usepackage[section]{placeins}
+\usepackage[round,sort&compress]{natbib}
+\PassOptionsToPackage{obeyspaces,spaces}{url}   % \code keeps its spaces
+\usepackage[colorlinks=true,linkcolor=vrlink,citecolor=vrlink,urlcolor=vrlink]{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}
+% The bibliography style writes \doi{...}: a link.
+\newcommand{\doi}[1]{\href{https://doi.org/#1}{\nolinkurl{doi:#1}}}
+
+% ---------------------------------------------------------------------------------------------
+% Layout
+
+\setlength{\parskip}{0.35em}
+\setlist{itemsep=0.15em,topsep=0.3em}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{4}
+\sisetup{group-separator={\,},group-minimum-digits=5,per-mode=symbol,
+  range-phrase={--},range-units=single}
+\DeclareSIUnit{\cell}{cell}
+
+% ---------------------------------------------------------------------------------------------
+% Where things are, from report/ (where LaTeX runs)
+
+\newcommand{\data}{data}        % report/data: the experiments' committed results
+\newcommand{\gen}{build/gen}    % what `report.py render` writes
+\newcommand{\repo}{..}          % the repository's root, to list its files
+\newcommand{\repourl}{https://github.com/vehagn/vibe-rations}
+
+% ---------------------------------------------------------------------------------------------
+% Notation
+
+\newcommand{\vect}[1]{\bm{#1}}                 % a vector: \vect{v}
+\newcommand{\tens}[1]{\bm{#1}}                 % a tensor: \tens{\sigma}
+\newcommand{\dt}{\Delta t}                     % the time step
+\newcommand{\dx}{h}                            % the grid spacing
+\newcommand{\vp}{v_p}
+\newcommand{\vs}{v_s}
+\newcommand{\T}{^{\mathsf T}}                  % a transpose
+\newcommand{\dd}{\mathrm{d}}                   % the differential in integrals
+\newcommand{\pd}[2]{\frac{\partial #1}{\partial #2}}
+\DeclareMathOperator{\sinc}{sinc}
+
+% ---------------------------------------------------------------------------------------------
+% Code, files and the program's name
+
+\newcommand{\vr}{\texttt{vibe-rations}}
+% Inline code, as typed (underscores, spaces and all), breaking where a URL would:
+% \code{Solver::step_with}, \code{just report-run --stale}. It prints its argument as it
+% stands, macros included; for a generated value in the same type, \texttt{\val{...}}.
+\DeclareUrlCommand{\vrcode}{\urlstyle{tt}}
+\DeclareRobustCommand{\code}{\vrcode}
+\pdfstringdefDisableCommands{\def\code#1{#1}\def\vr{vibe-rations}}
+% A file of the repository, linked to it at the commit the report was built from.
+\DeclareRobustCommand{\file}[1]{\href{\repourl/blob/\buildcommit/#1}{\nolinkurl{#1}}}
+% A commit, shortened and linked: \commit{<the full hash, or a macro holding it>}.
+\DeclareRobustCommand{\commit}[1]{\edef\vrhash{#1}\href{\repourl/commit/\vrhash}{\texttt{%
+  \expandafter\shortcommit\vrhash\empty\empty\empty\empty\empty\empty\empty\empty\relax}}}
+\def\shortcommit#1#2#3#4#5#6#7#8\relax{#1#2#3#4#5#6#7}
+
+\lstdefinelanguage{toml}{
+  comment=[l]{\#},
+  morestring=[b]",
+  morestring=[b]',
+  sensitive=true,
+}
+\lstdefinestyle{vr}{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{vrgrey}{$\hookrightarrow$}\space},
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{black!25},
+  backgroundcolor=\color{black!2},
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  aboveskip=0.7em,
+  belowskip=0.5em,
+  commentstyle=\color{vrgrey},
+  stringstyle=\color{vrgreen!70!black},
+  keywordstyle=\color{vrlink},
+  extendedchars=true,
+  % What the solver prints and its sources' comments use beyond ASCII.
+  literate=
+    {×}{{$\times$}}1 {–}{{--}}1 {—}{{---}}1 {·}{{$\cdot$}}1 {−}{{$-$}}1
+    {¹}{{$^1$}}1 {²}{{$^2$}}1 {³}{{$^3$}}1 {⁴}{{$^4$}}1 {⁵}{{$^5$}}1 {⁶}{{$^6$}}1
+    {⁸}{{$^8$}}1 {⁻}{{$^-$}}1 {⁺}{{$^+$}}1 {⁽}{{$^($}}1 {⁾}{{$^)$}}1 {ⁿ}{{$^n$}}1
+    {ᵀ}{{$^{\mathsf T}$}}1 {ᵉ}{{$^e$}}1 {ᵈ}{{$^d$}}1
+    {₀}{{$_0$}}1 {₁}{{$_1$}}1 {₂}{{$_2$}}1 {ₙ}{{$_n$}}1 {ₐ}{{$_a$}}1 {ₜ}{{$_t$}}1
+    {α}{{$\alpha$}}1 {γ}{{$\gamma$}}1 {δ}{{$\delta$}}1 {ε}{{$\varepsilon$}}1
+    {λ}{{$\lambda$}}1 {μ}{{$\mu$}}1 {π}{{$\pi$}}1 {ρ}{{$\rho$}}1 {σ}{{$\sigma$}}1
+    {τ}{{$\tau$}}1 {χ}{{$\chi$}}1 {Δ}{{$\Delta$}}1 {Σ}{{$\Sigma$}}1
+    {∂}{{$\partial$}}1 {√}{{$\surd$}}1 {½}{{$\frac12$}}1 {≥}{{$\geq$}}1 {≤}{{$\leq$}}1
+    {≪}{{$\ll$}}1 {≈}{{$\approx$}}1 {±}{{$\pm$}}1 {→}{{$\to$}}1 {‖}{{$\Vert$}}1
+    {⌈}{{$\lceil$}}1 {⌉}{{$\rceil$}}1 {⊗}{{$\otimes$}}1 {⟨}{{$\langle$}}1
+    {⟩}{{$\rangle$}}1 {ṽ}{{$\tilde v$}}1 {°}{{$^\circ$}}1 {…}{{\ldots}}1
+    {’}{{'}}1 {‘}{{`}}1 {“}{{``}}1 {”}{{''}}1 {é}{{\'e}}1 {ö}{{\"o}}1 {ü}{{\"u}}1,
+}
+% Commands as typed; what a program printed; a file of the repository (its lines run to 100
+% columns, which the smaller type fits); Rust.
+\lstdefinestyle{shell}{style=vr,language=bash,keywordstyle={}}
+\lstdefinestyle{output}{style=vr,basicstyle=\ttfamily\footnotesize,backgroundcolor={}}
+\lstdefinestyle{toml}{style=vr,language=toml,basicstyle=\ttfamily\footnotesize}
+\lstdefinestyle{rust}{style=vr,language=C,basicstyle=\ttfamily\footnotesize,
+  morekeywords={fn,let,mut,pub,impl,struct,enum,match,use,mod,crate,self,Self,trait,where,
+  loop,in,as,ref,move,unsafe,usize,f32,f64,bool},morecomment=[l]{///}}
+\lstset{style=vr}
+
+% A point worth remembering, set apart.
+\newtcolorbox{keybox}[1][]{enhanced,breakable,colback=vrblue!4,colframe=vrlink,
+  boxrule=0.5pt,arc=1.5pt,left=6pt,right=6pt,top=5pt,bottom=5pt,fonttitle=\bfseries,#1}
+% Something for the reader to try.
+\newtcolorbox{trybox}[1][]{enhanced,breakable,colback=vraqua!5,colframe=vraqua!60!black,
+  boxrule=0.5pt,arc=1.5pt,left=6pt,right=6pt,top=5pt,bottom=5pt,fonttitle=\bfseries,
+  title={Try it},#1}
+% Text still to be written: visible in the PDF, so nobody takes a stub for a section.
+\newcommand{\pending}[1]{\par\noindent\textcolor{vrorange!85!black}{\itshape
+  [Still to be written: #1]}\par}
+
+% ---------------------------------------------------------------------------------------------
+% Figures: pgfplots reading the experiments' CSV files. The solver's curve is `solver`, an
+% exact or published answer `reference`; further curves take the cycle list's colours in
+% order, each with a dash pattern of its own so they survive a greyscale print.
+
+\pgfplotsset{compat=1.18}
+\pgfplotscreateplotcyclelist{vr}{
+  {vrblue, solid},
+  {vrorange, densely dashed},
+  {vraqua!85!black, dashdotted},
+  {vryellow!90!black, densely dotted},
+  {vrmagenta, dashdotdotted},
+  {vrgreen, loosely dashed},
+  {vrviolet, solid},
+  {vrred, densely dashed},
+}
+\pgfplotsset{
+  every axis/.append style={
+    width=0.82\linewidth,
+    height=0.42\linewidth,
+    cycle list name=vr,
+    every axis plot/.append style={line width=0.8pt, mark size=1.6pt},
+    grid=major,
+    grid style={black!10},
+    axis line style={black!55},
+    tick style={black!55},
+    tick label style={font=\small, /pgf/number format/fixed,
+      /pgf/number format/precision=4, /pgf/number format/1000 sep={\,},
+      /pgf/number format/min exponent for 1000 sep=4},
+    label style={font=\small},
+    title style={font=\small\bfseries},
+    legend style={font=\small, draw=none, fill=white, fill opacity=0.85, text opacity=1},
+    legend cell align=left,
+    table/col sep=comma,
+  },
+  solver/.style={vrblue, solid, line width=0.9pt},
+  reference/.style={black, densely dashed, line width=0.6pt},
+  difference/.style={vrorange, solid, line width=0.7pt},
+  % A section with z pointing down, for pictures and models: \begin{axis}[xz section, ...]
+  xz section/.style={y dir=reverse, axis equal image, enlargelimits=false, grid=none,
+    axis on top, xlabel={$x$ (m)}, ylabel={$z$ (m)}},
+  colormap={vrdiverging}{rgb255=(27,100,190) rgb255=(239,239,239) rgb255=(214,58,59)},
+  colormap={vrsequential}{rgb255=(244,248,254) rgb255=(157,200,247) rgb255=(37,125,224)
+    rgb255=(14,61,126)},
+}
+\pgfplotstableset{
+  col sep=comma,
+  every head row/.style={before row=\toprule, after row=\midrule},
+  every last row/.style={after row=\bottomrule},
+}
+
+% ---------------------------------------------------------------------------------------------
+% What the generator provides (report/report.py render writes \gen/*.tex). Without it the
+% report still compiles, with every generated value marked as missing.
+
+\newcommand{\buildcommit}{main}
+\newcommand{\buildcommitshort}{unknown}
+\newcommand{\builddate}{unknown}
+\newif\ifbuilddirty
+
+\newcommand{\missing}[1]{\textcolor{vrred}{\textbf{[?\,\detokenize{#1}]}}}
+\def\vrcurrent{current}
+\DeclareRobustCommand{\statusmark}[1]{%
+  \edef\vrstatus{#1}\ifx\vrstatus\vrcurrent current\else\textcolor{vrred}{\textbf{#1}}\fi}
+
+% \val{usage/explosion/steps}: a value from an experiment's values.json, as it stands.
+% \valnum[siunitx options]{...}: the same through \num, e.g. \valnum[round-precision=3]{...}.
+% \valqty[siunitx options]{...}{unit}: with a unit.
+\newcommand{\setval}[2]{\expandafter\gdef\csname vr@val@\detokenize{#1}\endcsname{#2}}
+\newcommand{\val}[1]{\ifcsname vr@val@\detokenize{#1}\endcsname
+  \csname vr@val@\detokenize{#1}\endcsname\else\missing{#1}\fi}
+\newcommand{\valnum}[2][]{\ifcsname vr@val@\detokenize{#2}\endcsname
+  \num[#1]{\csname vr@val@\detokenize{#2}\endcsname}\else\missing{#2}\fi}
+\newcommand{\valqty}[3][]{\ifcsname vr@val@\detokenize{#2}\endcsname
+  \qty[#1]{\csname vr@val@\detokenize{#2}\endcsname}{#3}\else\missing{#2}\fi}
+
+% \experiment{id}{title}{tier}{status}{commit}{date}: one per manifest, from the generator.
+\newcommand{\experiment}[6]{%
+  \expandafter\gdef\csname vr@exp@\detokenize{#1}@title\endcsname{#2}%
+  \expandafter\gdef\csname vr@exp@\detokenize{#1}@status\endcsname{#4}%
+  \expandafter\gdef\csname vr@exp@\detokenize{#1}@commit\endcsname{#5}%
+  \expandafter\gdef\csname vr@exp@\detokenize{#1}@date\endcsname{#6}}
+% \source{usage/explosion}: where a figure's or a table's numbers come from, for the end of
+% its caption: the experiment (linked to its commands in the appendix) and the commit.
+\DeclareRobustCommand{\source}[1]{%
+  \ifcsname vr@exp@\detokenize{#1}@status\endcsname
+    \edef\vrstatus{\csname vr@exp@\detokenize{#1}@status\endcsname}%
+    \edef\vrcommit{\csname vr@exp@\detokenize{#1}@commit\endcsname}%
+    Data: \hyperref[exp:#1]{\texttt{\detokenize{#1}}}%
+    \ifx\vrcommit\empty\else, commit \texttt{\vrcommit}\fi
+    \ifx\vrstatus\vrcurrent\else\ (\statusmark{\vrstatus})\fi.%
+  \else\missing{#1}\fi}
+% \commands{usage/explosion}: the experiment's commands, as a listing.
+\newcommand{\commands}[1]{\vrcommands#1\relax}
+\def\vrcommands#1/#2\relax{\IfFileExists{\gen/commands/#1--#2.sh}
+  {\lstinputlisting[style=shell]{\gen/commands/#1--#2.sh}}{\missing{#1/#2}}}
+% An experiment's entry in the appendix, which \source links to.
+\newcommand{\experimententry}[2]{\phantomsection\label{exp:#1}%
+  \paragraph{\texttt{\detokenize{#1}}}#2.\par}
+
+\InputIfFileExists{\gen/build.tex}{}{}
+\InputIfFileExists{\gen/experiments.tex}{}{}
+\InputIfFileExists{\gen/values.tex}{}{}

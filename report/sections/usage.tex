@@ -1,0 +1,130 @@
+% Owned by the skeleton thread.
+\section{Using \vr}
+\label{sec:usage}
+
+This section is a tutorial: it takes a reader with the repository checked out from an empty
+terminal to a seismogram, a wavefield picture, a gradient and a small inversion. Every command
+shown was run to make this document, and every figure is drawn from what those commands
+wrote; \cref{sec:reproducibility} lists them all with the commit they ran at.
+
+\subsection{Getting it running}
+\label{sec:usage:start}
+
+Everything is built inside the repository's development container, so the host needs only
+a container engine (Docker or Podman) and \code{just}, a command runner. From the host,
+\begin{lstlisting}[style=shell]
+git clone https://github.com/vehagn/vibe-rations && cd vibe-rations
+just in ci          # builds the container, then formats, lints and runs every test
+\end{lstlisting}
+The first call builds the container (the Rust toolchain of \file{rust-toolchain.toml} and
+the tools of \file{.devcontainer/Containerfile}) and takes a few minutes; later ones start at
+once. \code{just in <recipe>} runs a recipe of the \file{Justfile} inside the container, and
+\code{just dev} opens a shell there instead, where the same recipes are called without
+\code{in}. Inside the container the program itself is \code{cargo run --release --}, or, once
+built, the binary \code{vibe-rations} in the build directory; this report writes it as \vr.
+
+The program has one subcommand per task:
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+\code{check <config>} & Sets a run up without running it and prints its grid, time step,
+  sampling and memory.\\
+\code{memory <config>} & Itemises the memory a run needs, from the configuration alone.\\
+\code{run <config>} & Runs a simulation and writes its traces, gathers and snapshots.\\
+\code{gradient <config>} & The gradient of a misfit to observed traces with respect to
+  $\vp$, $\vs$ and $\rho$.\\
+\code{invert <config>} & Inverts observed traces for the model with L-BFGS.\\
+\code{extrude} & Makes model files from a 2D section stored as SEG-Y.\\
+\code{serve}, \code{remote} & Run simulations on another machine and look after them.\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{A first run: an explosion under a free surface}
+\label{sec:usage:explosion}
+
+A run is described by one TOML file. \file{examples/explosion.toml} sets off an explosion
+\valqty{usage/explosion/source_z}{m} under the free surface of a homogeneous half-space and
+records it along a line of \val{usage/explosion/receivers} receivers on the surface:
+\lstinputlisting[style=toml,firstline=8]{\repo/examples/explosion.toml}
+
+Positions are in metres from the first grid node, $z$ points down, and the free surface is at
+$z = 0$. Nothing in the file sets the time step: it follows from the grid spacing and the
+fastest wave speed (\cref{sec:numerics}). Before spending time on a run, \code{check} says
+what it will be:
+\begin{lstlisting}[style=shell]
+vibe-rations check examples/explosion.toml
+\end{lstlisting}
+\lstinputlisting[style=output]{\data/usage/explosion/check.txt}
+The line to read first is \code{accuracy}: the number of grid points per shortest
+wavelength, counted for the slowest wave at the highest frequency the source emits with any
+strength (2.5 times a Ricker wavelet's dominant frequency). \Cref{sec:verification} shows what
+accuracy a given sampling buys. Then
+\begin{lstlisting}[style=shell]
+vibe-rations run examples/explosion.toml
+\end{lstlisting}
+takes \val{usage/explosion/steps} steps of \valqty[round-mode=places,round-precision=3]%
+{usage/explosion/dt_ms}{ms} and writes its results into the directory the configuration's
+\code{[output]} names: the traces of each recorded component as a NumPy array (\code{vz.npy},
+receivers by samples) with their times (\code{time.npy}) and positions
+(\code{receivers.csv}), a picture of each gather, the snapshots asked for, and
+\code{run.json}, which records what the run was: its grid, time step, stencil, memory and any
+warnings.
+
+\begin{figure}[htb]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+        xlabel={Time (s)}, ylabel={$v_z$ (\si{\micro\metre\per\second})},
+        xmin=0, xmax=0.5, legend pos=north east,
+        y filter/.expression={y*1e6},
+      ]
+      \addplot table[x=t, y=vz_0] {\data/usage/explosion/traces.csv};
+      \addplot table[x=t, y=vz_120] {\data/usage/explosion/traces.csv};
+      \addplot table[x=t, y=vz_240] {\data/usage/explosion/traces.csv};
+      \addplot table[x=t, y=vz_360] {\data/usage/explosion/traces.csv};
+      \legend{above the source, \qty{120}{m} away, \qty{240}{m}, \qty{360}{m}}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{The vertical velocity recorded on the surface above the explosion and at three
+    distances along the line. The P wave arrives first; the Rayleigh wave, which an
+    explosion at depth excites only away from the epicentre, follows it at the larger
+    offsets. \source{usage/explosion}}
+  \label{fig:usage:traces}
+\end{figure}
+
+\begin{figure}[htb]
+  \centering
+  \begin{tikzpicture}
+    \begin{groupplot}[
+        group style={group size=3 by 1, horizontal sep=0.9em, y descriptions at=edge left},
+        xz section, width=0.36\linewidth,
+        xmin=0, xmax=\val{usage/explosion/extent_x},
+        ymin=0, ymax=\val{usage/explosion/extent_z},
+        xtick={200,600,1000},
+      ]
+      \nextgroupplot[title={$t = \valqty[round-mode=places,round-precision=2]%
+        {usage/explosion/snapshot_a_time}{s}$}]
+      \addplot graphics[xmin=0, xmax=\val{usage/explosion/extent_x}, ymin=0,
+        ymax=\val{usage/explosion/extent_z}] {\data/usage/explosion/snapshot_a.png};
+      \nextgroupplot[title={$t = \valqty[round-mode=places,round-precision=2]%
+        {usage/explosion/snapshot_b_time}{s}$}]
+      \addplot graphics[xmin=0, xmax=\val{usage/explosion/extent_x}, ymin=0,
+        ymax=\val{usage/explosion/extent_z}] {\data/usage/explosion/snapshot_b.png};
+      \nextgroupplot[title={$t = \valqty[round-mode=places,round-precision=2]%
+        {usage/explosion/snapshot_c_time}{s}$}]
+      \addplot graphics[xmin=0, xmax=\val{usage/explosion/extent_x}, ymin=0,
+        ymax=\val{usage/explosion/extent_z}] {\data/usage/explosion/snapshot_c.png};
+    \end{groupplot}
+  \end{tikzpicture}
+  \caption{The vertical velocity on the vertical section through the source, as the
+    solver's snapshots draw it (red is downwards; the colour follows the square root of the
+    amplitude, so weak arrivals show). The P wave reflects at the free surface as P and as
+    S, and the absorbing layers, the outer \num{15} nodes on the sides and the bottom,
+    take what reaches them. \source{usage/explosion}}
+  \label{fig:usage:snapshots}
+\end{figure}
+
+\pending{reading the outputs in Python; layered models and model files; \code{memory};
+  a gradient; a small inversion (\file{examples/sphere-inversion.toml}); 2D runs; the web
+  page and remote runs; the GPU; where to look when a run misbehaves}

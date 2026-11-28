@@ -1,0 +1,134 @@
+% Owned by the skeleton thread.
+\section{Reproducing this report}
+\label{sec:reproducibility}
+
+This document was built from commit \commit{\buildcommit} of
+\url{https://github.com/vehagn/vibe-rations}\ifbuilddirty, \textcolor{vrred}{with
+uncommitted changes in the working tree}\fi. Every number, table and figure that
+comes from the solver is the product of an \emph{experiment}: a short manifest under
+\file{report/experiments} naming the commands to run. This appendix says how to rerun them,
+how the report knows whether its numbers are those of the code it was built from, and lists
+every experiment with its commands.
+
+\subsection{Building the report}
+\label{sec:reproducibility:build}
+
+With the repository checked out and its development container available
+(\cref{sec:usage:start}),
+\begin{lstlisting}[style=shell]
+just in report                # the PDF from the committed data: report/build/vibe-rations-report.pdf
+just in report-status         # every experiment and whether its data are current
+just in report-run            # rerun the quick experiments and record their provenance
+just in report-run --stale --tier quick --tier study   # rerun what has gone stale
+just in report-run verification/stokes                 # rerun one experiment by name
+\end{lstlisting}
+\code{just report} needs no simulation: the experiments' results are committed, reduced to
+small text files, under \file{report/data}, and the figures are drawn from them by LaTeX
+itself (pgfplots) each time the PDF is built.
+
+\subsection{How a number gets here}
+\label{sec:reproducibility:how}
+
+\begin{enumerate}
+  \item \textbf{A manifest names the commands.} An experiment is a file
+    \code{report/experiments/<section>/<name>.toml} with a title, a tier and a list of shell
+    commands, run from the repository's root. The commands are the ones a person would type:
+    the solver's own subcommands (\cref{sec:usage}), the tests that compare it with closed
+    forms, and short scripts that reduce what those wrote. A script or a directory of inputs
+    that belongs to the experiment sits beside its manifest under the same name.
+  \item \textbf{The generator runs them and records what it did.}
+    \code{report/report.py run <section>/<name>} builds the solver, empties the experiment's
+    data directory \code{report/data/<section>/<name>}, runs the commands in order, and then
+    writes \code{provenance.json} there: the commit checked out, any uncommitted change in
+    what the experiment depends on, the content hash of each thing it depends on, every
+    command with the time it took, the machine (its processor, threads and memory; no host
+    name), the compiler, and the size and SHA-256 of every file produced. A command that
+    fails leaves no provenance, so half a result can't pass for a whole one.
+  \item \textbf{Only reduced results are committed.} The data directory holds small text
+    files: curves thinned to a few hundred points as CSV, single numbers as
+    \code{values.json}, a small PNG where a field is shown. Whatever is bulky (whole
+    wavefields, every trace) stays in the git-ignored \code{report/build/raw}. Because the
+    committed files are text with six significant digits, a rerun after a change to the
+    solver shows up in \code{git diff} as the numbers that moved.
+  \item \textbf{LaTeX draws from the data.} Figures are pgfplots reading the CSV files, tables
+    are typeset from them, and a number in the text is \code{\val{<section>/<name>/<key>}},
+    looked up in \code{values.json}. Nothing between the committed data and the PDF is drawn
+    or typed by hand, and building the PDF runs no simulation.
+  \item \textbf{The PDF says where each result is from.} A caption ends with the
+    experiment's name and the commit its data were made at, linked to its entry below.
+\end{enumerate}
+
+\paragraph{Current, stale, dirty, missing.} The results are committed, so they can fall
+behind the code. The generator therefore compares, for each experiment, the content hashes
+recorded in its provenance with those of the commit the report is built from: the solver's
+sources (\code{src}), \code{Cargo.toml}, \code{Cargo.lock}, \code{rust-toolchain.toml}, the
+experiment's manifest, scripts and inputs, and whatever else the manifest lists (a test
+file, an example's configuration). If all agree the experiment is \emph{current}: its
+numbers are those of this commit's code, even though they were computed at an earlier commit.
+If any differs it is \emph{stale}; if it was run with uncommitted changes in those files it
+is \emph{dirty}; with no data at all it is \emph{missing}. Anything but current is marked in
+red wherever the experiment is used and in \cref{tab:reproducibility:experiments}, and
+\code{report/report.py check} fails on it. The working order is therefore: commit the code,
+run the experiment, commit its data.
+
+\paragraph{Tiers.} Experiments are sorted by cost, so that keeping the report current
+doesn't mean rerunning everything after every change: \code{quick} ones take up to a couple
+of minutes each, \code{study} ones up to an hour, and \code{heavy} ones longer, or need a
+large machine or downloaded data (their manifests say which). \code{just report-run} alone
+runs the quick ones.
+
+\paragraph{What reproduces exactly.} The solver is deterministic: the same build on the
+same machine gives the same traces whatever the number of threads and whichever compiled
+copy of the update loops runs. The experiment \code{reproducibility/determinism} checks that
+each time it is run, by making the tutorial's run of \cref{sec:usage:explosion} three times
+(with every thread, with one, and with the plain loops in place of the
+\texttt{\val{reproducibility/determinism/kernels_default}} ones) and comparing the SHA-256 of
+the trace files: the \val{reproducibility/determinism/files} files were
+\textbf{\val{reproducibility/determinism/identical}} (\cref{tab:reproducibility:determinism}).
+A rerun of an experiment therefore reproduces its committed files byte for byte, apart from
+\code{provenance.json}'s dates and durations and any output that prints a speed.
+
+\begin{table}[htb]
+  \centering
+  \caption{The first 16 hexadecimal digits of the SHA-256 of each trace file of the same
+    run made three ways. \source{reproducibility/determinism}}
+  \label{tab:reproducibility:determinism}
+  \pgfplotstabletypeset[
+    string type, font=\small\ttfamily,
+    columns/file/.style={column name={\normalfont File}, column type=l},
+    columns/threads-all/.style={column name={\normalfont All threads}},
+    columns/threads-one/.style={column name={\normalfont One thread}},
+    columns/plain-loops/.style={column name={\normalfont Plain loops}},
+    columns/identical/.style={column name={\normalfont Identical}},
+  ]{\data/reproducibility/determinism/hashes.csv}
+\end{table}
+
+Across machines the last digits can differ. The repository's notes (\file{AGENTS.md}) record
+one such case: between Linux and macOS the time step differed in its last bit, most likely
+through the maths library used when the stencil's coefficients are designed, and traces then
+agreed to $6 \times 10^{-12}$ of their peak rather than bit for bit. The six significant
+digits of the committed files hide most of that, but a rerun elsewhere should be expected to
+match to about that many digits, not to produce identical files.
+
+\subsection{The experiments}
+\label{sec:reproducibility:experiments}
+
+\Cref{tab:reproducibility:experiments} lists every experiment, the commit its data were made
+at, and whether the code it depends on has changed since. The commands follow.
+
+\begin{longtable}{@{}llllll@{}}
+  \caption{The report's experiments.\label{tab:reproducibility:experiments}}\\
+  \toprule
+  Experiment & Tier & Commit & Made & Took & Status\\
+  \midrule
+  \endfirsthead
+  \toprule
+  Experiment & Tier & Commit & Made & Took & Status\\
+  \midrule
+  \endhead
+  \bottomrule
+  \endlastfoot
+  \InputIfFileExists{\gen/table.tex}{}{\multicolumn{6}{c}{\missing{run report.py render}}\\}
+\end{longtable}
+
+\InputIfFileExists{\gen/appendix.tex}{}{}

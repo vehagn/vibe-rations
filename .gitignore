@@ -2,6 +2,8 @@
 /out
 /.claude/settings.local.json
 /web/dist
+# The report's raw outputs, generated TeX and PDF (`just report`); report/data is committed
+/report/build
 __pycache__/
 # Downloaded models (`just marmousi2`), and the model files made from them
 /data

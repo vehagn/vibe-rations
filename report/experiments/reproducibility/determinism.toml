@@ -1,0 +1,18 @@
+# Whether a run gives the same traces again: with all threads and with one, and with the
+# AVX2 update loops and the plain ones. The appendix's claim about exact reruns rests on it.
+
+title = "The same run three ways: all threads, one thread, and without AVX2"
+tier = "quick"
+depends = ["examples/explosion.toml"]
+
+[[command]]
+run = "vibe-rations run examples/explosion.toml --out {raw}/threads-all --quiet"
+
+[[command]]
+run = "vibe-rations run examples/explosion.toml --out {raw}/threads-one --quiet --threads 1"
+
+[[command]]
+run = "VIBE_RATIONS_SIMD=off vibe-rations run examples/explosion.toml --out {raw}/plain-loops --quiet"
+
+[[command]]
+run = "python3 report/experiments/reproducibility/determinism.py {raw} {data}"

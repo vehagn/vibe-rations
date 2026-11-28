@@ -1,0 +1,52 @@
+% Owned by the skeleton thread.
+\section{Introduction}
+\label{sec:intro}
+
+Full waveform inversion (FWI) estimates the Earth's elastic properties by fitting whole
+recorded seismograms with simulated ones \citep{tarantola1984,mora1987,fichtner2011}. Each
+iteration simulates the wavefield of every source in the current model, sends the misfit
+between simulated and recorded traces back through the model as an adjoint wavefield, and
+correlates the two to get the misfit's gradient with respect to the model
+\citep{tromp2005}. Everything an inversion concludes therefore rests on the simulator: an
+error in the simulated wavefield is indistinguishable, to the inversion, from an error in
+the model, and a gradient that is not the gradient of what the simulator computes sends the
+optimiser the wrong way.
+
+\vr{} is a simulator written for that role. It solves the isotropic elastic wave equation
+in three dimensions (and, on a grid one node across, in two) in its velocity--stress form on
+a staggered grid \citep{virieux1986,levander1988,graves1996}, with convolutional perfectly
+matched layers on the sides \citep{komatitsch2007} and a free surface on top. Around that
+forward solver it has what an inversion needs: the adjoint run, gradients with respect to
+$\vp$, $\vs$ and $\rho$, several misfit functions, Born and Hessian-vector products, and a
+preconditioned L-BFGS inversion. It is written in Rust, runs on CPUs (and its time step on an
+NVIDIA GPU), in a web browser as WebAssembly, and on a remote machine behind a small server.
+
+This report is the case that the solver is correct, and a manual for using it. It sets out
+to do four things.
+
+\begin{description}
+  \item[State the method.] \Cref{sec:theory} derives the equations the solver integrates and
+    the adjoint equations and gradients built on them; \cref{sec:numerics} gives the discrete
+    scheme, from the stencils and their stability limit to the absorbing layers, the free
+    surface, and how sources, receivers and material interfaces are put on the grid.
+  \item[Show that it is right.] \Cref{sec:verification} compares whole simulations with
+    closed-form solutions of the same problems, and checks the properties an inversion
+    depends on: reciprocity, the adjoint as the exact transpose of the forward run, and
+    gradients against finite differences and exact sensitivity kernels.
+  \item[Place it beside published work.] \Cref{sec:benchmarks} runs problems from the
+    literature and compares the results, and the cost, with what others report.
+  \item[Teach its use.] \Cref{sec:usage} is a tutorial that starts from an empty terminal.
+\end{description}
+
+\paragraph{Every number can be traced.} The solver is still being developed, so a report of
+its accuracy written by hand would be out of date at the next commit. This one is generated.
+Each table, figure and quoted number comes from an \emph{experiment}: a list of commands,
+kept in the repository, whose reduced results are committed together with the commit they
+were run at, the machine, and the time they took. Captions end with the experiment's name
+and commit; \cref{sec:reproducibility} lists the commands of every experiment and says which,
+if any, were made from code that has changed since. Rebuilding the report after a change to
+the solver shows, as a difference of numbers, exactly what the change did to its accuracy.
+
+\pending{a summary table of the headline results, drawn from the verification and benchmark
+  experiments' values once those exist; what the report does not cover (anisotropy,
+  attenuation, topography)}

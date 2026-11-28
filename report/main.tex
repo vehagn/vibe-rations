@@ -1,0 +1,36 @@
+% The solver report. Build it with `just report` (report/report.py pdf), which first writes
+% build/gen/*.tex: the commit, the experiments' provenance and the values the text quotes.
+% report/README.md has the conventions.
+\documentclass[a4paper,11pt]{article}
+\input{preamble}
+
+\title{\vr: a 3D elastic wave solver for full waveform inversion\\[0.4em]
+  \large Its methods, how it is verified, and how to use it}
+\author{Written with Claude for Vegard Stenhjem Hagen}
+\date{Built from commit \commit{\buildcommit} of \builddate
+  \ifbuilddirty\ \textcolor{vrred}{with uncommitted changes}\fi}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\input{sections/abstract}
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\input{sections/intro}
+\input{sections/usage}
+\input{sections/theory}
+\input{sections/numerics}
+\input{sections/verification}
+\input{sections/benchmarks}
+
+\appendix
+\input{sections/reproducibility}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
